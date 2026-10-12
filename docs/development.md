@@ -37,6 +37,7 @@ crates/
   alkh-infra/     适配器：SQLite 仓储、飞书网关、AES-GCM / Argon2、系统时钟
   alkh-server/    交付层（组合根）：Axum 路由、内嵌前端、指标、定时任务
 web/              Vite + React + TS 管理后台
+docs/images/      文档用图片（README 顶部品牌图）
 migrations/       嵌入式 SQLite 迁移（编译期打包进二进制）
 deploy/           Dockerfile、AlertManager / Prometheus 示例配置
 docs/             架构与设计文档（见 README 索引）
@@ -66,7 +67,7 @@ cd web && pnpm dev
 |---|---|
 | `make run` | 本地起后端 + 磁盘上的前端产物 |
 | `make dev` | 只起后端（前端交给 `pnpm dev`） |
-| `make icons` | 从 `icon.png` 重新生成 favicon |
+| `make icons` | 从品牌资产派生 favicon PNG 尺寸与 apple-touch-icon |
 | `make web` | 构建前端并同步到 `crates/alkh-server/web-dist` |
 | `make build` | debug 构建（含前端） |
 | `make release` | release 构建，产出 `target/release/alkh` |
@@ -119,13 +120,22 @@ cd web && pnpm exec tsc --noEmit && pnpm build
 
 ## 图标生成
 
-`icon.png`（仓库根目录）是唯一源文件，favicon 由脚本派生：
+品牌资产（均入库，**不放在仓库根目录**）：
+
+| 路径 | 说明 |
+|---|---|
+| `web/public/favicon.ico` | 品牌主图标，浏览器直接取用，**不经过生成** |
+| `docs/images/banner.png` | 高清品牌图（1536×1024，深色底）：README 顶部展示 + apple-touch-icon 的来源 |
+
+派生小尺寸图标：
 
 ```bash
 make icons      # = python3 scripts/make-icons.py
 ```
 
-产物写入 `web/public/`，Vite 构建时复制到 `dist/` 根目录。脚本里记录了三条处理约定（裁掉柔光、透明补边成正方形、apple-touch-icon 单独扁平化），改动前请先读脚本头部的说明。
+产物：`web/public/favicon-16x16.png`、`favicon-32x32.png`（与 `favicon.ico` 同源，保证各尺寸视觉一致）、
+`apple-touch-icon.png`（180×180，来自高清图）。脚本头部记录了处理约定
+（为何 180px 不用 `favicon.ico` 放大、方形化为何用边缘延展而不是填纯色），改动前请先读。
 
 ## 容器构建
 

@@ -11,7 +11,7 @@ help: ## 显示可用目标
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-icons: ## 从 icon.png 重新生成 favicon / apple-touch-icon（需要 Python + Pillow）
+icons: ## 从品牌资产派生 favicon PNG 尺寸与 apple-touch-icon（需要 Python + Pillow）
 	python3 scripts/make-icons.py
 
 web: icons ## 构建管理后台并同步到后端的内嵌资源目录

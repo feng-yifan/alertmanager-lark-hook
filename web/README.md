@@ -67,10 +67,10 @@ web/
   tsconfig.json
   pnpm-workspace.yaml     # pnpm 11 的 allowBuilds（批准 esbuild 的 postinstall）
   public/                 # 原样复制到 dist/ 根目录的静态资源
-    favicon.ico           # 16/32/48 多尺寸，由 `make icons` 从根目录 icon.png 生成
-    favicon-16x16.png
+    favicon.ico           # 品牌主图标，原样入库（不经生成）
+    favicon-16x16.png     # 由 favicon.ico 派生，与主图标同源
     favicon-32x32.png
-    apple-touch-icon.png  # 180×180，扁平化到白色（iOS 不支持透明通道）
+    apple-touch-icon.png  # 180×180，由 docs/images/banner.png 派生（`make icons`）
   src/
     main.tsx              # 挂载 + Provider 组合
     App.tsx               # 路由 + 侧边栏布局 + RequireAuth 守卫

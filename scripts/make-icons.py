@@ -1,28 +1,40 @@
 #!/usr/bin/env python3
-"""从仓库根目录的 `icon.png` 生成管理后台所需的图标文件。
+"""派生管理后台所需的图标文件。
 
 用法：
     python3 scripts/make-icons.py          # 或 make icons
 
 依赖：Python 3.9+ 与 Pillow（`pip install pillow`）。
 
-产物（写入 `web/public/`，Vite 会在构建时复制到 `dist/` 根目录）：
+## 源文件（均已入库，是本项目的品牌资产）
 
-| 文件 | 用途 |
+| 路径 | 说明 |
 |---|---|
-| `favicon.ico` | 16/32/48 多尺寸，浏览器根路径自动回退 |
-| `favicon-16x16.png` / `favicon-32x32.png` | 现代浏览器显式声明的尺寸 |
-| `apple-touch-icon.png` | iOS 主屏图标（180×180，扁平化到白色） |
+| `web/public/favicon.ico` | **品牌主图标**，直接入库、不经生成。浏览器取用，本脚本**只读不写** |
+| `docs/images/banner.png` | 高清品牌图（1536×1024，深色底）。README 顶部展示，同时作为大尺寸图标的来源 |
 
-处理约定（改动前请先读）：
+## 产物（写入 `web/public/`，Vite 构建时复制到 `dist/` 根目录）
 
-1. **裁掉几乎不可见的光晕**：原图四周有一圈 alpha 很低的白色柔光（`alpha <= 16`）。
-   保留它会在深色标签栏上糊成一团，也会让图标显得很小，因此按 `alpha > 16` 的包围盒裁剪。
-2. **补成正方形**：浏览器会把 favicon 按正方形渲染，非正方形会被拉伸或留边；
-   这里用**透明**补边并留 3% 内边距，保证图形不贴边。
-   ⚠️ 不要改成白底扁平化——在深色标签栏上会变成一个白方块，比柔光更难看。
-3. **apple-touch-icon 单独扁平化到白色**：iOS 不支持透明通道，不扁平化会被合成到黑色上。
-4. 原图 `icon.png` 只用于 README 顶部展示，不参与这里的构建。
+| 文件 | 来源 | 说明 |
+|---|---|---|
+| `favicon-16x16.png` | `favicon.ico` 降采样 | 标签页最小尺寸，浏览器可避免自行缩放 |
+| `favicon-32x32.png` | `favicon.ico` 原尺寸 | 与主图标**逐像素同源**，保证一致 |
+| `apple-touch-icon.png` | `banner.png` | 180×180。iOS 会自行加圆角遮罩，所以直接铺满、不做留白 |
+
+## 为什么 apple-touch-icon 用另一张源图
+
+`favicon.ico` 只有 32×32，放大到 180 会明显发虚。`banner.png` 是同一套视觉的高清版本，
+方形化后缩到 180 边缘锐利，且深色底正好适合 iOS 主屏。
+
+## 处理约定（改动前请先读）
+
+1. **不要用 `favicon.ico` 生成 180px 图标**（见上）。
+2. **方形化用边缘延展，而不是填纯色**：`banner.png` 的背景带轻微渐变，
+   填纯色会留下可见接缝；这里把首行/末行像素向上下延展，接缝不可见，
+   也不会像「居中裁方」那样把右侧卡片切掉。
+3. `favicon-16x16.png` / `favicon-32x32.png` 必须与 `favicon.ico` 同源，
+   否则不同尺寸下会出现两种视觉。
+4. 本脚本不再从仓库根目录读取任何图片；根目录不再存放图片资源。
 """
 
 from __future__ import annotations
@@ -36,64 +48,76 @@ except ImportError:  # pragma: no cover
     sys.exit("缺少 Pillow，请先执行：pip install pillow")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SOURCE = REPO_ROOT / "icon.png"
 OUT_DIR = REPO_ROOT / "web" / "public"
+FAVICON = OUT_DIR / "favicon.ico"
+BANNER = REPO_ROOT / "docs" / "images" / "banner.png"
 
-# 低于该 alpha 的像素视为柔光，裁剪时忽略
-HALO_ALPHA_THRESHOLD = 16
-# 正方形画布的额外边距比例
-MARGIN_RATIO = 0.06
 APPLE_SIZE = 180
+PNG_SIZES = (("favicon-16x16.png", 16), ("favicon-32x32.png", 32))
+
+
+def pad_to_square_by_edge(img: Image.Image) -> Image.Image:
+    """把长方形补成正方形：用首行/末行（或首列/末列）向外延展，避免接缝与裁切。"""
+    w, h = img.size
+    if w == h:
+        return img
+
+    side = max(w, h)
+    canvas = Image.new(img.mode, (side, side))
+    if w > h:  # 上下补
+        pad = (side - h) // 2
+        top = img.crop((0, 0, w, 1)).resize((w, pad), Image.NEAREST)
+        bottom = img.crop((0, h - 1, w, h)).resize((w, side - h - pad), Image.NEAREST)
+        canvas.paste(top, (0, 0))
+        canvas.paste(img, (0, pad))
+        canvas.paste(bottom, (0, pad + h))
+    else:  # 左右补
+        pad = (side - w) // 2
+        left = img.crop((0, 0, 1, h)).resize((pad, h), Image.NEAREST)
+        right = img.crop((w - 1, 0, w, h)).resize((side - w - pad, h), Image.NEAREST)
+        canvas.paste(left, (0, 0))
+        canvas.paste(img, (pad, 0))
+        canvas.paste(right, (pad + w, 0))
+    return canvas
 
 
 def main() -> int:
-    if not SOURCE.is_file():
-        return fail(f"找不到源图：{SOURCE}")
-
-    src = Image.open(SOURCE).convert("RGBA")
-    content = src.getchannel("A").point(lambda v: 255 if v > HALO_ALPHA_THRESHOLD else 0).getbbox()
-    if content is None:
-        return fail(f"{SOURCE.name} 看起来是全透明的，无法生成图标")
-
-    trimmed = src.crop(content)
-    side = round(max(trimmed.size) * (1 + MARGIN_RATIO))
-    canvas = Image.new("RGBA", (side, side), (0, 0, 0, 0))
-    canvas.paste(
-        trimmed,
-        ((side - trimmed.width) // 2, (side - trimmed.height) // 2),
-        trimmed,
-    )
-    print(f"源图 {src.size[0]}×{src.size[1]} → 裁掉柔光后 {trimmed.size[0]}×{trimmed.size[1]} → 正方形画布 {side}×{side}")
-
-    def scaled(size: int) -> Image.Image:
-        return canvas.resize((size, size), Image.LANCZOS)
+    if not FAVICON.is_file():
+        return fail(f"找不到品牌主图标：{FAVICON.relative_to(REPO_ROOT)}")
+    if not BANNER.is_file():
+        return fail(f"找不到高清品牌图：{BANNER.relative_to(REPO_ROOT)}")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    ico = Image.open(FAVICON).convert("RGBA")
+    sizes = sorted(ico.ico.sizes()) if hasattr(ico, "ico") and ico.ico else [ico.size]
+    print(f"主图标 {FAVICON.relative_to(REPO_ROOT)}：{ico.size[0]}×{ico.size[1]}，内含尺寸 {sizes}")
+
     outputs: list[tuple[str, int]] = []
 
-    for name, size in (("favicon-16x16.png", 16), ("favicon-32x32.png", 32)):
+    # 1) 与主图标同源的小尺寸 PNG
+    for name, size in PNG_SIZES:
         path = OUT_DIR / name
-        scaled(size).save(path, optimize=True)
+        ico.resize((size, size), Image.LANCZOS).save(path, optimize=True)
         outputs.append((name, path.stat().st_size))
 
-    # 多尺寸 ICO：Pillow 会从同一张源图分别缩放
-    ico = OUT_DIR / "favicon.ico"
-    scaled(48).save(ico, sizes=[(16, 16), (32, 32), (48, 48)])
-    outputs.append(("favicon.ico", ico.stat().st_size))
-
-    # iOS 不接受透明通道 → 扁平化到白色
-    apple = Image.new("RGB", (APPLE_SIZE, APPLE_SIZE), (255, 255, 255))
-    apple_icon = scaled(APPLE_SIZE)
+    # 2) apple-touch-icon：高清图方形化后缩到 180
+    banner = Image.open(BANNER).convert("RGBA")
+    squared = pad_to_square_by_edge(banner)
+    apple = Image.new("RGB", (APPLE_SIZE, APPLE_SIZE), (0, 0, 0))
+    apple_icon = squared.resize((APPLE_SIZE, APPLE_SIZE), Image.LANCZOS).convert("RGBA")
     apple.paste(apple_icon, (0, 0), apple_icon)
     apple_path = OUT_DIR / "apple-touch-icon.png"
     apple.save(apple_path, optimize=True)
     outputs.append(("apple-touch-icon.png", apple_path.stat().st_size))
+    print(
+        f"高清图 {BANNER.relative_to(REPO_ROOT)}：{banner.size[0]}×{banner.size[1]} "
+        f"→ 方形化 {squared.size[0]}×{squared.size[1]} → {APPLE_SIZE}×{APPLE_SIZE}"
+    )
 
-    print(f"\n写入 {OUT_DIR.relative_to(REPO_ROOT)}/：")
+    print(f"\n写入 {OUT_DIR.relative_to(REPO_ROOT)}/（favicon.ico 原样保留，未改动）：")
     for name, size in outputs:
         print(f"  {name:<24} {size:>7,} B")
-    total = sum(size for _, size in outputs)
-    print(f"  {'合计':<22} {total:>7,} B")
+    print(f"  {'合计':<22} {sum(s for _, s in outputs):>7,} B")
     return 0
 
 

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="icon.png" alt="alertmanager-lark-hook：AlertManager 告警 → 飞书卡片" width="220" />
+  <img src="docs/images/banner.png" alt="alertmanager-lark-hook：AlertManager 告警 → 飞书卡片" width="760" />
 </p>
 
 # alertmanager-lark-hook
