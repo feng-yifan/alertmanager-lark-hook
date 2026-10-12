@@ -181,22 +181,26 @@ impl IntakeService {
             };
         }
 
-        // 4. 幂等去重（R9）
+        // 4. 幂等去重（R9）：原子认领。
+        //
+        // 认领必须发生在处理**之前**（否则两个并发的重复投递会同时通过），
+        // 但处理失败时必须**归还**认领 —— 否则 AlertManager 的退避重试会落进
+        // 同一个去重窗口、被判为 `duplicate` 并收到 **200**，于是 AM 认为投递成功，
+        // 这条告警就永久丢失了（R9 的语义是「跳过已处理的重复」，不是「跳过失败的」）。
         let hash = event_hash(&hook.id, &event);
-        if self
+        if !self
             .deps
             .dedup
-            .seen_recently(&hook.id, &hash, DEFAULT_DEDUP_WINDOW_SECS)
+            .claim(&hook.id, &hash, now, DEFAULT_DEDUP_WINDOW_SECS)
             .await?
         {
             self.audit(skip_reason::DUPLICATE, &hook.id, Some(&channel.id), now)
                 .await;
             return Ok(IntakeOutcome::skipped(skip_reason::DUPLICATE));
         }
-        self.deps.dedup.record(&hook.id, &hash, now).await?;
         let _ = self.deps.hooks.record_call(&hook.id, now).await;
 
-        // 5. 聚合窗口（R6）
+        // 5. 聚合窗口（R6）：事件已受理并入桶，保留下面的认领。
         if policy.aggregation_window_secs > 0 {
             let key = classify_pending(&self.deps, &hook, &event).await;
             self.schedule(
@@ -209,8 +213,24 @@ impl IntakeService {
             return Ok(IntakeOutcome::deferred(key, "aggregating"));
         }
 
-        self.process_event(&hook, &channel, &policy, event, hash, now)
+        match self
+            .process_event(&hook, &channel, &policy, event, hash.clone(), now)
             .await
+        {
+            Ok(outcome) => Ok(outcome),
+            Err(err) => {
+                // 处理失败（DB 写失败 / 渲染失败等）：归还认领，让 AM 的重试能被
+                // 正常处理，而不是被当成重复丢弃。
+                if let Err(release_err) = self.deps.dedup.release(&hook.id, &hash).await {
+                    tracing::warn!(
+                        hook_id = %hook.id,
+                        error = %release_err,
+                        "归还幂等认领失败：AlertManager 的重试可能被误判为重复"
+                    );
+                }
+                Err(err)
+            }
+        }
     }
 
     /// 冲刷到期的聚合桶；返回处理成功的事件数。由 `alkh-server` 定时调用。

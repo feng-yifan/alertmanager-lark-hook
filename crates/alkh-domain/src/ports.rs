@@ -248,16 +248,34 @@ pub trait Clock: Send + Sync {
 }
 
 /// 投递幂等去重窗口（R9）。
+///
+/// 语义是「**认领**」而不是「记录」：先原子地占住这个 hash，处理成功后保持占用，
+/// 处理失败则用 [`release`](Self::release) 归还。
 #[async_trait]
 pub trait EventDedup: Send + Sync {
-    /// 该 hash 是否在 `window_secs` 内已经出现过。
-    async fn seen_recently(
+    /// 原子认领一个事件 hash。
+    ///
+    /// - 窗口内**首次**到达 ⇒ 写入记录并返回 `true`
+    /// - 窗口内**重复**到达 ⇒ 返回 `false`（调用方应跳过）
+    /// - 记录已存在但早于窗口 ⇒ 刷新时间戳并返回 `true`（窗口已滑过，可再次处理）
+    ///
+    /// 实现必须用**单条原子语句**完成「检查 + 写入」，不能用先查后写：
+    /// 两个并发的相同请求必须只有一个拿到认领。
+    ///
+    /// ⚠️ 认领成功但后续处理失败时，调用方**必须**调用 [`release`](Self::release)。
+    /// 否则 `AlertManager` 的重试会落进同一个窗口被判为重复，而重试会收到 200，
+    /// 于是这条告警被静默丢弃。
+    async fn claim(
         &self,
         hook_id: &HookId,
         hash: &str,
+        at: Timestamp,
         window_secs: i64,
     ) -> PortResult<bool>;
-    async fn record(&self, hook_id: &HookId, hash: &str, at: Timestamp) -> PortResult<()>;
+
+    /// 归还认领（处理失败时调用），使同一 hash 可以被重新认领。
+    async fn release(&self, hook_id: &HookId, hash: &str) -> PortResult<()>;
+
     async fn purge_before(&self, before: Timestamp) -> PortResult<u64>;
 }
 

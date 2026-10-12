@@ -232,9 +232,24 @@ impl NotificationSender {
             },
             DeliveryAction::SendNewThenRevoke => {
                 let current = self.send_new(prepared, kind, idempotency_key).await?;
-                let previous = match previous {
-                    Some(prev) => Some(self.revoke(prepared, prev).await),
-                    None => None,
+                // ⚠️ 只有新消息**真的发出去了**才撤回旧消息。
+                //
+                // `send_new` 在发送失败时同样返回 `Ok`（状态为 Pending/Failed，交给后台重试），
+                // 所以不能无条件撤回：那样会出现「旧消息已撤回、新消息没发出」，
+                // 这条告警在群里彻底消失。失败时保留旧消息，用户至少还能看到它。
+                let previous = match (previous, &current.state) {
+                    (Some(prev), DeliveryState::Active | DeliveryState::Resolved) => {
+                        Some(self.revoke(prepared, prev).await)
+                    }
+                    (Some(_), state) => {
+                        tracing::warn!(
+                            delivery_id = %current.id,
+                            state = ?state,
+                            "新消息未发送成功，保留旧消息不撤回（避免告警消息在群里消失）"
+                        );
+                        None
+                    }
+                    (None, _) => None,
                 };
                 Ok(DeliveryResult {
                     current,
@@ -345,7 +360,11 @@ impl NotificationSender {
         let now = self.deps.now();
         let mut d = previous.clone();
         d.kind = kind;
-        d.rendered_digest = prepared.digest.clone();
+        // ⚠️ 这里**只**更新元数据，不碰 `rendered_digest`。
+        //
+        // 旧实现把新 digest 写在这里（调用飞书之前），失败分支又把它落库，
+        // 于是下一次相同内容的事件会命中下面的 R3 提前返回被跳过 ——
+        // 卡片永久停在旧内容且无法自愈。digest 只能在更新**成功**后推进。
         d.card_template_id = prepared.template_id.clone();
         d.updated_at = now;
 
@@ -405,6 +424,8 @@ impl NotificationSender {
 
         match outcome {
             Ok(()) => {
+                // 更新确实生效了，此时才推进 digest / 模板引用。
+                d.rendered_digest = prepared.digest.clone();
                 if kind == DeliveryKind::Resolved {
                     d.mark_resolved(self.deps.now());
                 } else {

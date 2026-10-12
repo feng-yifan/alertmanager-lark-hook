@@ -6,6 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use alkh_domain::channel::ReceiveIdType;
+use alkh_domain::error::{LarkError, PortError};
 use alkh_domain::ports::{AppFeedCardPayload, LarkChat, LarkGateway, LarkSendOutcome};
 use alkh_server::config::Config;
 use async_trait::async_trait;
@@ -37,6 +38,10 @@ struct FakeState {
     recalled: Vec<String>,
     deleted_feed_cards: Vec<String>,
     seq: u64,
+    /// 注入故障：接下来 `fail_send_times` 次「发送」直接返回 `fail_send_code`。
+    /// 用于覆盖发送失败路径（默认 0 = 不注入）。
+    fail_send_times: usize,
+    fail_send_code: i64,
 }
 
 #[derive(Default)]
@@ -80,6 +85,29 @@ impl FakeLark {
     fn snapshot(&self) -> std::sync::MutexGuard<'_, FakeState> {
         self.state.lock().unwrap()
     }
+
+    /// 让接下来的 `times` 次「发送」返回飞书错误 `code`（模拟限频/服务端错误）。
+    ///
+    /// 真实网关会先在内部退避重试，耗尽后才把错误抛给上层；这里直接抛出，
+    /// 等价于「内部重试已耗尽」的状态。
+    fn inject_send_failure(&self, times: usize, code: i64) {
+        let mut s = self.snapshot();
+        s.fail_send_times = times;
+        s.fail_send_code = code;
+    }
+
+    fn take_injected_send_failure(&self) -> Option<PortError> {
+        let mut s = self.snapshot();
+        if s.fail_send_times == 0 {
+            return None;
+        }
+        s.fail_send_times -= 1;
+        let code = s.fail_send_code;
+        Some(PortError::Lark(
+            LarkError::new(code, "注入的发送失败（测试用）")
+                .retryable(code == LarkError::CODE_RATE_LIMITED || code >= 500),
+        ))
+    }
 }
 
 #[async_trait]
@@ -118,6 +146,9 @@ impl LarkGateway for FakeLark {
         card_entity_id: &str,
         uuid: &str,
     ) -> alkh_domain::PortResult<LarkSendOutcome> {
+        if let Some(err) = self.take_injected_send_failure() {
+            return Err(err);
+        }
         let content = json!({ "type": "card", "data": { "card_id": card_entity_id } });
         self.snapshot().messages.push(SentMessage {
             receive_id: receive_id.to_string(),
@@ -139,6 +170,9 @@ impl LarkGateway for FakeLark {
         content: &Value,
         uuid: &str,
     ) -> alkh_domain::PortResult<LarkSendOutcome> {
+        if let Some(err) = self.take_injected_send_failure() {
+            return Err(err);
+        }
         self.snapshot().messages.push(SentMessage {
             receive_id: receive_id.to_string(),
             receive_id_type: receive_id_type.as_str().to_string(),
@@ -229,6 +263,8 @@ struct Harness {
     fake: Arc<FakeLark>,
     hook_token: Option<String>,
     channel_id: Option<String>,
+    /// 直连数据库，用于故障注入（例如把模板数据改坏以触发内部错误）。
+    pool: SqlitePool,
 }
 
 async fn pool() -> SqlitePool {
@@ -271,7 +307,7 @@ async fn start() -> Harness {
     let pool = pool().await;
     let fake = Arc::new(FakeLark::with_chats());
 
-    let state = alkh_server::wiring::build_state(config.clone(), pool, Some(fake.clone()))
+    let state = alkh_server::wiring::build_state(config.clone(), pool.clone(), Some(fake.clone()))
         .await
         .expect("装配 AppState 失败");
     let bootstrap = state
@@ -330,6 +366,7 @@ async fn start() -> Harness {
         fake,
         hook_token: None,
         channel_id: None,
+        pool,
     }
 }
 
@@ -815,6 +852,102 @@ async fn repeat_policy_send_and_revoke_previous_recalls_old_message() {
     let s = h.fake.snapshot();
     assert_eq!(s.messages.len(), 2, "应发送恢复消息");
     assert_eq!(s.recalled.len(), 1, "应撤回/删除旧消息");
+}
+
+/// 回归（P0-1）：处理失败后 AlertManager 的重试必须被**重新处理**，而不是被判为重复。
+///
+/// 修复前的顺序是「先记录去重键 → 再处理事件」，且失败不回滚。于是首次返回 5xx 之后，
+/// AM 的秒级退避重试会命中 60s 去重窗口、被判为 `duplicate`，而 webhook 会回 **200** ——
+/// AM 认为投递成功，这条告警永久丢失，而且审计里只有一条「duplicate」，看不出异常。
+#[tokio::test]
+async fn failed_intake_stays_retryable_instead_of_being_deduped() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+
+    // 故障注入：把内置默认卡片模板的 card_message 置空。
+    // 这会让 `Sender::prepare` 走到 `AppError::internal("卡片消息模板缺少 card_message")`
+    // ⇒ webhook 返回 500（AM 会重试），模拟运行期模板数据损坏这类内部错误。
+    let template_id: String = sqlx::query_scalar(
+        "SELECT id FROM card_templates WHERE kind = 'card_message' AND is_default = 1",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .expect("应存在内置默认卡片模板");
+    sqlx::query("UPDATE card_templates SET card_message = NULL WHERE id = ?")
+        .bind(&template_id)
+        .execute(&h.pool)
+        .await
+        .unwrap();
+
+    let payload = firing_payload(1);
+
+    // 首次投递：内部错误 → 500，AM 会退避重试
+    let (status, body) = h.push(payload.clone()).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        "渲染/准备失败应返回 500 让 AM 重试: {body}"
+    );
+
+    // AM 的重试（秒级，仍在 60s 去重窗口内）
+    let (status2, body2) = h.push(payload).await;
+    assert_ne!(
+        body2["skipped"],
+        json!("duplicate"),
+        "失败后的重试被当成重复：AM 会收到 200 并认为投递成功，告警静默丢失（P0-1 回归）"
+    );
+    assert_eq!(
+        status2,
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        "重试应仍然失败并保持可重试，而不是被吞掉: {body2}"
+    );
+}
+
+/// 回归（P0-2）：新消息发送失败时**不允许**撤回旧消息。
+///
+/// `send_new` 在发送失败时仍返回 `Ok`（状态 Pending，交给后台重试），
+/// 修复前 `SendNewThenRevoke` 会无条件调用 `revoke`，于是出现
+/// 「旧消息已撤回、新消息没发出」—— 这条告警在群里彻底消失。
+#[tokio::test]
+async fn revoke_is_skipped_when_new_message_fails_to_send() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+    let channel_id = h.channel_id.clone().unwrap();
+
+    // 恢复策略：发送新的恢复消息并删除旧消息（映射为 SendNewThenRevoke）
+    let (status, mut policy) = h
+        .get(&format!("/api/v1/channels/{channel_id}/policy"))
+        .await;
+    assert_eq!(status, 200);
+    policy["resolved_policy"] = json!("send_and_delete_previous");
+    let resp = h
+        .http
+        .put(h.url(&format!("/api/v1/channels/{channel_id}/policy")))
+        .bearer_auth(&h.token)
+        .json(&policy)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // 新告警 → 正常发出第一条消息
+    let (_, body) = h.push(firing_payload(1)).await;
+    assert_eq!(body["action"], "send_new");
+    assert_eq!(h.fake.snapshot().messages.len(), 1, "应发出告警卡片");
+
+    // 注入限频故障：下一次发送失败
+    h.fake.inject_send_failure(1, LarkError::CODE_RATE_LIMITED);
+
+    // 解决告警 → 走 SendNewThenRevoke，但新消息发送失败
+    let (_, body) = h.push(resolved_payload()).await;
+    assert_eq!(body["action"], "send_new_then_revoke");
+
+    let s = h.fake.snapshot();
+    assert_eq!(s.messages.len(), 1, "恢复消息发送失败，不应产生第二条消息");
+    assert!(
+        s.recalled.is_empty(),
+        "新消息没发出去就撤回了旧消息，这条告警会在群里消失（P0-2 回归）"
+    );
 }
 
 #[tokio::test]
