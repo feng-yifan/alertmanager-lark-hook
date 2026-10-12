@@ -66,6 +66,11 @@ web/
   vite.config.ts
   tsconfig.json
   pnpm-workspace.yaml     # pnpm 11 的 allowBuilds（批准 esbuild 的 postinstall）
+  public/                 # 原样复制到 dist/ 根目录的静态资源
+    favicon.ico           # 16/32/48 多尺寸，由 `make icons` 从根目录 icon.png 生成
+    favicon-16x16.png
+    favicon-32x32.png
+    apple-touch-icon.png  # 180×180，扁平化到白色（iOS 不支持透明通道）
   src/
     main.tsx              # 挂载 + Provider 组合
     App.tsx               # 路由 + 侧边栏布局 + RequireAuth 守卫

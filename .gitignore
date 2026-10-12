@@ -3,7 +3,9 @@
 /web/node_modules
 /web/dist
 # 前端构建产物：只跟踪占位 index.html，真实产物由 `make web` 生成
-/crates/alkh-server/web-dist/assets/
+# （favicon / assets 等根级资源由 Vite 从 web/public 复制过来，同样不提交）
+/crates/alkh-server/web-dist/*
+!/crates/alkh-server/web-dist/index.html
 *.db
 *.db-shm
 *.db-wal

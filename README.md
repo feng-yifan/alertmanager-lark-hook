@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="icon.png" alt="alertmanager-lark-hook：AlertManager 告警 → 飞书卡片" width="220" />
+</p>
+
 # alertmanager-lark-hook
 
 把 **Prometheus AlertManager** 的告警，通过**飞书机器人**投递到飞书「消息渠道」（群聊 / 单聊）的自建应用。

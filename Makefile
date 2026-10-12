@@ -5,13 +5,16 @@ IMAGE ?= alertmanager-lark-hook:latest
 WEB_DIST := crates/alkh-server/web-dist
 
 .DEFAULT_GOAL := help
-.PHONY: help web build release test lint fmt run dev docker compose up down clean check
+.PHONY: help icons web build release test lint fmt run dev docker compose up down clean check
 
 help: ## 显示可用目标
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-web: ## 构建管理后台并同步到后端的内嵌资源目录
+icons: ## 从 icon.png 重新生成 favicon / apple-touch-icon（需要 Python + Pillow）
+	python3 scripts/make-icons.py
+
+web: icons ## 构建管理后台并同步到后端的内嵌资源目录
 	cd web && $(PNPM) install --frozen-lockfile && $(PNPM) build
 	rm -rf -- $(WEB_DIST)
 	mkdir -p $(WEB_DIST)
