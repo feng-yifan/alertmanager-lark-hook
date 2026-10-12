@@ -147,22 +147,35 @@ POST /api/v1/hooks/alertmanager/{token}
 
 ## 5. 变量与渲染
 
-卡片模板中的 `${var}` 由**渲染上下文**替换。上下文来源：
+卡片模板中的 `${var}` 由**渲染上下文**替换。实现见
+[`crates/alkh-app/src/render.rs`](../crates/alkh-app/src/render.rs) 的 `build_context`
+与 `crates/alkh-app/src/meta.rs` 的 `render_variables()`（后者是变量清单的**唯一事实来源**，
+同时通过 `GET /api/v1/meta` 提供给管理后台）。
 
-- `alert`：`alertname`、`severity`、`instance`、`job`、`status`、`summary`、`description`、
-  `fingerprint`、`starts_at`、`ends_at`、`generator_url`，以及任意 label / annotation 键。
-- `group`：`group_key`、`group_labels`、`common_labels`、`common_annotations`、`receiver`、
-  `external_url`、`channel_name`、`alert_count`、`firing_count`、`resolved_count`、
-  `truncated_alerts`、`first_seen_at`、`last_seen_at`、`now`。
-- 预渲染块：`${alerts_table}`（Markdown 表格）、`${alerts_list}`（Markdown 列表）、
-  `${alerts_summary}`（`🔥 3 firing / ✅ 1 resolved`）。
-- `severity_color` / `severity_text`：`critical`→`red`/`严重`，`warning`→`orange`/`警告`，
-  `info`→`blue`/`提示`，未知→`grey`/`未知`。
+> **变量清单请勿在文档里另抄一份**——用户向速查表在
+> [README §3.3](../README.md#33-变量速查表)，并有单测
+> `alkh_app::meta::tests::readme_documents_every_variable` 保证它与代码同步。
+> 这里只描述**渲染规则**。
 
-规则：
-- 未知变量渲染为空串，并在 `validate` 接口以 warning 返回（不阻塞保存）。
+渲染规则：
+
 - 变量替换发生在**字符串叶子节点**，不改变 JSON 结构；渲染后校验 JSON 仍合法。
 - 支持 `${a.b.c}` 点号取值与 `${label:foo}` / `${annotation:bar}` 显式取值。
+- **任意标签 / 注解可直接用原名引用**；与内置变量同名时内置优先（内置先写入上下文），
+  此时必须用 `${label:x}` 拿到标签原值。这是取舍而非缺陷，但**新增内置变量名时要注意
+  不要侵占常用的标签名**。
+- 未知变量渲染为空串，并在 `validate` 接口以 warning 返回（不阻塞保存）。
+- 代表告警语义：`starts_at` / `ends_at` / `summary` / `description` / `instance` /
+  `fingerprint` / `generator_url` / `alert_status` 取自**一条代表告警**（优先第一条
+  firing，否则第一条），而不是整组。这与 AlertManager 中「必须写在 `{{ range .Alerts }}`
+  内」的语义不同，是「一张卡片装一组告警」的必要扁平化。
+- 时间变量统一为 `%Y-%m-%d %H:%M:%S UTC` 字符串。
+- 严重级别映射：`critical|fatal|emergency`→`red`/`严重`，`warning|warn|major`→`orange`/`警告`，
+  `info|informational|notice`→`blue`/`提示`，其余→`grey`/`未知`。
+
+命名沿革（避免误解）：本项目用 `${...}` 而非 AlertManager 的 Go 模板 `{{ ... }}`；
+`${...}` 也**不是**飞书官方文档化的语法（官方只有搭建工具的 `template_variable` 键值映射）。
+应用消息流卡片的字段长度上限在渲染时**截断**而非报错以保证告警不丢。
 
 ## 6. 校验规则汇总（管理后台输入校验）
 

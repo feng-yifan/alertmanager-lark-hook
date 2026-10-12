@@ -421,6 +421,79 @@ pub fn meta() -> Meta {
 mod tests {
     use super::*;
 
+    /// 从文本里提取 `${...}` **内置变量名**。
+    ///
+    /// 正则刻意只接受 `[A-Za-z0-9_.]`，因此会自动忽略：
+    /// - 带前缀的取值形式 `${label:team}` / `${annotation:x}`（含冒号）
+    /// - 占位示例 `${名称}`（非 ASCII）
+    fn extract_builtin_variables(text: &str) -> std::collections::BTreeSet<String> {
+        let re = regex::Regex::new(r"\$\{([A-Za-z0-9_.]+)\}").expect("正则必须可编译");
+        re.captures_iter(text).map(|c| c[1].to_string()).collect()
+    }
+
+    /// README §3.3 的变量速查表必须与代码同步。
+    ///
+    /// 这是用户唯一能看到的变量清单，最容易在增删变量时忘记更新——
+    /// 而它一旦过期，用户就会照着写不存在的变量（渲染成空串），且毫无提示。
+    #[test]
+    fn readme_documents_every_variable() {
+        const README: &str = include_str!("../../../README.md");
+        const START: &str = "<!-- variable-table:start -->";
+        const END: &str = "<!-- variable-table:end -->";
+
+        let start = README
+            .find(START)
+            .expect("README 缺少 variable-table:start 标记")
+            + START.len();
+        let end = README
+            .find(END)
+            .expect("README 缺少 variable-table:end 标记");
+        assert!(start < end, "README 的变量表标记顺序不对");
+
+        let documented = extract_builtin_variables(&README[start..end]);
+        let declared: std::collections::BTreeSet<String> =
+            render_variable_names().into_iter().collect();
+
+        let missing: Vec<&String> = declared.difference(&documented).collect();
+        assert!(
+            missing.is_empty(),
+            "README 变量表缺少这些内置变量（新增变量后请同步 README §3.3）：{missing:?}"
+        );
+
+        let extra: Vec<&String> = documented.difference(&declared).collect();
+        assert!(
+            extra.is_empty(),
+            "README 变量表出现了代码里不存在的变量（拼写错误？）：{extra:?}"
+        );
+    }
+
+    #[test]
+    fn builtin_variable_extraction_ignores_prefixed_forms() {
+        let found = extract_builtin_variables(
+            "${alertname} ${label:team} ${annotation:x} ${名称} ${alerts_list}",
+        );
+        assert!(found.contains("alertname"));
+        assert!(found.contains("alerts_list"));
+        assert_eq!(
+            found.len(),
+            2,
+            "带前缀与非 ASCII 的占位符不应被当作内置变量: {found:?}"
+        );
+    }
+
+    #[test]
+    fn all_builtin_variable_names_are_ascii_identifiers() {
+        for name in render_variable_names() {
+            assert!(
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.'),
+                "内置变量名必须是 ASCII 标识符，便于 README 测试与用户拼写: {name}"
+            );
+        }
+    }
+
     #[test]
     fn meta_serializes() {
         let m = meta();
