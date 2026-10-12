@@ -10,3 +10,7 @@
 master.key
 .env
 .DS_Store
+
+# IDE
+.idea/
+.vscode/

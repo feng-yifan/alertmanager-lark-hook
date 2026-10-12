@@ -57,9 +57,22 @@ export interface Meta {
   resolved_policies: EnumOption[];
   group_update_policies: EnumOption[];
   match_ops: EnumOption[];
-  status_label_types: string[];
+  /** 状态标签类型：{value,label} 对象数组（不是字符串数组）。 */
+  status_label_types: EnumOption[];
+  /** 应用消息流卡片按钮类型（default/primary/success），与 status_label_types 不是同一个枚举。 */
+  feed_button_types: EnumOption[];
+  /** 应用消息流卡片 biz_id 生成策略。 */
+  biz_id_sources: EnumOption[];
+  card_sources: EnumOption[];
+  channel_kinds: EnumOption[];
+  receive_id_types: EnumOption[];
   variables: MetaVariable[];
+  /** 严重级别 → 卡片 header 颜色。 */
   severity_colors: Record<string, string>;
+  /** `pin_unresolved` 生效的消息类型（目前仅 app_feed_card）。 */
+  pin_supported_message_types: string[];
+  token_prefix: string;
+  hook_path_template: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -270,6 +283,8 @@ export interface TestMessageResponse {
 export type CardTemplateKind = 'card_message' | 'app_feed_card';
 export type CardSource = 'builder_json' | 'builder_template';
 export type StatusLabelType = 'primary' | 'secondary' | 'success' | 'danger';
+/** 飞书应用消息流卡片按钮类型（`open_app_feed_card_button.button_type`）。 */
+export type FeedButtonType = 'default' | 'primary' | 'success';
 /**
  * `docs/api.md` §5 shows the literal `"alert_group"`; `docs/domain-model.md` names the
  * variants `AlertGroupId | HookId | Custom`. The short forms are used here, and the UI
@@ -301,7 +316,7 @@ export interface LinkSpec {
 export interface FeedButtonSpec {
   text: string;
   url: string;
-  button_type: StatusLabelType;
+  button_type: FeedButtonType;
 }
 
 export interface AppFeedCardSpec {

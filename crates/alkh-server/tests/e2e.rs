@@ -241,10 +241,14 @@ async fn pool() -> SqlitePool {
     p
 }
 
-fn test_config(dir: &std::path::Path) -> Config {
+/// 测试用配置。
+///
+/// `data_dir` 指向 Cargo 提供的 `CARGO_TARGET_TMPDIR`：由于显式提供了 `master_key`，
+/// 不会生成 `master.key`，因此不会写入任何文件，也就无需清理临时目录。
+fn test_config() -> Config {
     Config {
         http_addr: "127.0.0.1:0".parse().unwrap(),
-        data_dir: dir.to_path_buf(),
+        data_dir: std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")),
         database_url: "sqlite::memory:".into(),
         db_max_connections: 1,
         master_key: Some("0f".repeat(32)),
@@ -263,9 +267,7 @@ fn test_config(dir: &std::path::Path) -> Config {
 }
 
 async fn start() -> Harness {
-    let dir = std::env::temp_dir().join(format!("alkh-e2e-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let config = Arc::new(test_config(&dir));
+    let config = Arc::new(test_config());
     let pool = pool().await;
     let fake = Arc::new(FakeLark::with_chats());
 
@@ -468,6 +470,85 @@ async fn health_endpoints_are_public() {
     assert_eq!(resp.status(), 200);
     let text = resp.text().await.unwrap();
     assert!(text.contains("alkh_http_requests_total"));
+}
+
+/// 回归测试：前端曾把 `status_label_types` 当作 `string[]` 使用，导致
+/// `<option key={option.value}>` 的 key 变成重复的 `[object Object]`。
+/// 这里对 `/meta` 的**线格式**加锁：所有枚举列表都必须是 `{value,label}` 对象数组。
+#[tokio::test]
+async fn meta_endpoint_pins_the_wire_format() {
+    let h = start().await;
+    let (status, meta) = h.get("/api/v1/meta").await;
+    assert_eq!(status, 200);
+
+    const ENUM_FIELDS: [&str; 11] = [
+        "message_types",
+        "repeat_policies",
+        "resolved_policies",
+        "group_update_policies",
+        "match_ops",
+        "status_label_types",
+        "feed_button_types",
+        "biz_id_sources",
+        "card_sources",
+        "channel_kinds",
+        "receive_id_types",
+    ];
+
+    for field in ENUM_FIELDS {
+        let items = meta[field]
+            .as_array()
+            .unwrap_or_else(|| panic!("{field} 必须是数组，实际为 {}", meta[field]));
+        assert!(!items.is_empty(), "{field} 不能为空");
+        for item in items {
+            assert!(item.is_object(), "{field} 的元素必须是对象，实际为 {item}");
+            let value = item.get("value").and_then(Value::as_str);
+            let label = item.get("label").and_then(Value::as_str);
+            assert!(value.is_some(), "{field} 的元素缺少字符串 value: {item}");
+            assert!(label.is_some(), "{field} 的元素缺少字符串 label: {item}");
+            // 关键：value 必须是字符串，否则前端会渲染出 [object Object] 作为 key
+            assert_ne!(value.unwrap(), "[object Object]");
+        }
+    }
+
+    // 按钮类型与状态标签类型是两个不同的枚举，不能互相复用
+    let feed: Vec<&str> = meta["feed_button_types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["value"].as_str().unwrap())
+        .collect();
+    assert_eq!(feed, vec!["default", "primary", "success"]);
+    let status_types: Vec<&str> = meta["status_label_types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["value"].as_str().unwrap())
+        .collect();
+    assert!(status_types.contains(&"danger"));
+    assert!(!feed.contains(&"danger"));
+    assert!(!feed.contains(&"secondary"));
+
+    // 变量序列化为 `type`，不能泄露 Rust 字段名 `ty`
+    let variable = &meta["variables"][0];
+    assert!(variable["type"].is_string(), "变量应有 `type`: {variable}");
+    assert!(variable.get("ty").is_none(), "不应出现 `ty`: {variable}");
+
+    // severity_colors 是对象映射，不是枚举数组
+    let colors = meta["severity_colors"]
+        .as_object()
+        .expect("severity_colors 必须是对象");
+    assert_eq!(colors["critical"], "red");
+    assert_eq!(colors["warning"], "orange");
+    assert_eq!(colors["info"], "blue");
+    assert_eq!(colors["default"], "grey");
+
+    assert_eq!(meta["token_prefix"], "alkh_");
+    assert_eq!(
+        meta["hook_path_template"],
+        "/api/v1/hooks/alertmanager/{token}"
+    );
+    assert_eq!(meta["pin_supported_message_types"][0], "app_feed_card");
 }
 
 #[tokio::test]

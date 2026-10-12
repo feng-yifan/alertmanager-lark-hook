@@ -1,9 +1,11 @@
 /**
  * Chinese labels for enum values.
  *
- * Labels come from `docs/api.md` (§0 `meta` labels / example values) and
- * `docs/business-rules.md` §4. They are display-only: the stored value is always the
- * machine string from the contract.
+ * Display-only fallbacks for values that are **not** served by `GET /api/v1/meta`
+ * (e.g. delivery states in the audit/delivery lists). Anything that `/meta` does
+ * serve — message types, policies, status label types, button types, biz_id sources,
+ * match ops — must be read from `meta` instead of being duplicated here, otherwise
+ * the two copies drift and the UI renders stale (or malformed) option lists.
  */
 import type {
   ChannelKind,
@@ -12,7 +14,6 @@ import type {
   DeliveryState,
   MessageType,
   ReceiveIdType,
-  StatusLabelType,
 } from './types';
 
 export const DELIVERY_STATE_LABEL: Record<string, string> = {
@@ -65,13 +66,6 @@ export const CHANNEL_SOURCE_LABEL: Record<string, string> = {
   manual: '手动创建',
 };
 
-export const STATUS_LABEL_TYPE_LABEL: Record<StatusLabelType, string> = {
-  primary: 'primary（蓝色）',
-  secondary: 'secondary（灰色）',
-  success: 'success（绿色）',
-  danger: 'danger（红色）',
-};
-
 export const MATCH_OP_LABEL: Record<string, string> = {
   '=': '等于',
   '!=': '不等于',
@@ -82,12 +76,6 @@ export const MATCH_OP_LABEL: Record<string, string> = {
 export const CARD_SOURCE_LABEL: Record<string, string> = {
   builder_json: '导入卡片 JSON（builder_json）',
   builder_template: '引用搭建工具模板（builder_template）',
-};
-
-export const BIZ_ID_SOURCE_LABEL: Record<string, string> = {
-  alert_group: 'AlertGroup ID（默认）',
-  hook: 'Hook ID',
-  custom: '自定义',
 };
 
 export function label(map: Record<string, string>, value: string | null | undefined, fallback = '—'): string {

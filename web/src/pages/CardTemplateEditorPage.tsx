@@ -30,13 +30,14 @@ import {
   Textarea,
 } from '../components/ui';
 import { useAsync } from '../hooks';
-import { BIZ_ID_SOURCE_LABEL, CARD_SOURCE_LABEL, STATUS_LABEL_TYPE_LABEL } from '../labels';
+import { CARD_SOURCE_LABEL } from '../labels';
 import { enumOptions, useMeta } from '../meta';
 import { useToast } from '../toast';
 import type {
   AppFeedCardSpec,
   BizIdSource,
   CardJson,
+  FeedButtonType,
   CardSource,
   CardTemplate,
   CardTemplateCreate,
@@ -99,9 +100,19 @@ function charLength(value: string): number {
   return Array.from(value).length;
 }
 
-function statusTypeOptions(types: string[], current: string | null | undefined): EnumOption[] {
-  const options = types.map((value) => ({ value, label: STATUS_LABEL_TYPE_LABEL[value as StatusLabelType] ?? value }));
-  return enumOptions(options, current ?? undefined);
+/**
+ * `GET /api/v1/meta` 的枚举列表已经是 `{value,label}` 对象数组（后端自带中文标签），
+ * 这里只做「当前值不在列表中时补一个未知选项」的处理。
+ *
+ * 注意：早先的版本把 `status_label_types` 当成字符串数组，导致 `value` 变成对象、
+ * `key` 被渲染成重复的 `[object Object]`。回归测试见
+ * `alkh_app::meta::tests::meta_wire_format_is_enum_option_objects`。
+ */
+function enumOptionsOf(
+  types: EnumOption[],
+  current: string | null | undefined,
+): EnumOption[] {
+  return enumOptions(types, current ?? undefined);
 }
 
 function LengthHint({ value, max, label }: { value: string; max: number; label?: string }): JSX.Element {
@@ -598,7 +609,7 @@ export default function CardTemplateEditorPage(): JSX.Element {
                     })
                   }
                 >
-                  <Options options={statusTypeOptions(meta.status_label_types, spec.status_label.type_firing)} />
+                  <Options options={enumOptionsOf(meta.status_label_types, spec.status_label.type_firing)} />
                 </Select>
               </Field>
               <Field label="status_label.type_resolved" hint="resolved 时标签颜色">
@@ -610,7 +621,7 @@ export default function CardTemplateEditorPage(): JSX.Element {
                     })
                   }
                 >
-                  <Options options={statusTypeOptions(meta.status_label_types, spec.status_label.type_resolved)} />
+                  <Options options={enumOptionsOf(meta.status_label_types, spec.status_label.type_resolved)} />
                 </Select>
               </Field>
             </div>
@@ -668,14 +679,14 @@ export default function CardTemplateEditorPage(): JSX.Element {
                           patchSpec({
                             buttons: spec.buttons.map((item, position) =>
                               position === index
-                                ? { ...item, button_type: event.target.value as StatusLabelType }
+                                ? { ...item, button_type: event.target.value as FeedButtonType }
                                 : item,
                             ),
                           })
                         }
                         style={{ width: 130 }}
                       >
-                        <Options options={statusTypeOptions(meta.status_label_types, button.button_type)} />
+                        <Options options={enumOptionsOf(meta.feed_button_types, button.button_type)} />
                       </Select>
                       <Button
                         size="sm"
@@ -713,12 +724,7 @@ export default function CardTemplateEditorPage(): JSX.Element {
                   value={spec.biz_id_source}
                   onChange={(event) => patchSpec({ biz_id_source: event.target.value as BizIdSource })}
                 >
-                  <Options
-                    options={enumOptions(
-                      Object.entries(BIZ_ID_SOURCE_LABEL).map(([value, label]) => ({ value, label })),
-                      spec.biz_id_source,
-                    )}
-                  />
+                  <Options options={enumOptionsOf(meta.biz_id_sources, spec.biz_id_source)} />
                 </Select>
               </Field>
             </div>

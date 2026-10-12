@@ -1,9 +1,15 @@
 /**
  * Enum metadata for form controls, loaded from `GET /api/v1/meta`.
  *
- * The values below are the verbatim fallback taken from `docs/api.md` §0 so the UI
- * still renders usable option lists when the endpoint is unreachable. Remote data
- * always wins when it loads.
+ * Enum lists are `{value,label}` objects on the wire. The literal below is a fallback
+ * used only when the endpoint is unreachable; remote data always wins. Every value is
+ * also normalised through `normalizeEnumList`/`normalizeEnumMap` so a shape change on
+ * either side degrades into a readable option list instead of rendering
+ * `[object Object]` React keys.
+ *
+ * Source of truth: `crates/alkh-app/src/meta.rs`, pinned by
+ * `meta::tests::meta_wire_format_is_enum_option_objects` and by
+ * `crates/alkh-server/tests/e2e.rs::meta_endpoint_pins_the_wire_format`.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { getMeta } from './api';
@@ -36,7 +42,38 @@ export const FALLBACK_META: Meta = {
     { value: '=~', label: '正则匹配' },
     { value: '!~', label: '正则不匹配' },
   ],
-  status_label_types: ['primary', 'secondary', 'success', 'danger'],
+  status_label_types: [
+    { value: 'primary', label: '主类型' },
+    { value: 'secondary', label: '次要类型' },
+    { value: 'success', label: '成功类型' },
+    { value: 'danger', label: '危险类型' },
+  ],
+  feed_button_types: [
+    { value: 'default', label: '默认' },
+    { value: 'primary', label: '主要' },
+    { value: 'success', label: '成功' },
+  ],
+  biz_id_sources: [
+    { value: 'alert_group', label: '按告警分组（同分组复用同一张卡片，默认）' },
+    { value: 'hook', label: '按 Hook + 告警分组' },
+  ],
+  card_sources: [
+    { value: 'builder_json', label: '卡片搭建工具 JSON（JSON 2.0）' },
+    { value: 'builder_template', label: '卡片搭建工具模板（template_id）' },
+  ],
+  channel_kinds: [
+    { value: 'group', label: '群聊' },
+    { value: 'p2p_user', label: '单聊用户' },
+  ],
+  receive_id_types: [
+    { value: 'chat_id', label: '群 chat_id' },
+    { value: 'open_id', label: '用户 open_id' },
+    { value: 'user_id', label: '用户 user_id' },
+    { value: 'email', label: '用户邮箱' },
+  ],
+  pin_supported_message_types: ['app_feed_card'],
+  token_prefix: 'alkh_',
+  hook_path_template: '/api/v1/hooks/alertmanager/{token}',
   variables: [
     { name: 'alertname', group: 'alert', type: 'string', description: '告警名称' },
     { name: 'severity', group: 'alert', type: 'string' },
@@ -132,23 +169,90 @@ export function MetaProvider({ children }: { children: ReactNode }): JSX.Element
   return <MetaContext.Provider value={value}>{children}</MetaContext.Provider>;
 }
 
+/**
+ * Defensive coercion into `EnumOption[]`.
+ *
+ * Accepts the documented `[{value,label}]`, tolerates a bare `string[]` (older/looser
+ * servers), and drops anything unusable. This is what keeps a contract drift from
+ * turning every `<option key>` into the duplicate string `[object Object]`.
+ */
+export function normalizeEnumList(raw: unknown): EnumOption[] {
+  if (!Array.isArray(raw)) return [];
+  const out: EnumOption[] = [];
+  for (const item of raw) {
+    if (typeof item === 'string') {
+      out.push({ value: item, label: item });
+      continue;
+    }
+    if (item && typeof item === 'object') {
+      const { value, label } = item as { value?: unknown; label?: unknown };
+      if (typeof value === 'string') {
+        out.push({ value, label: typeof label === 'string' ? label : value });
+      } else if (typeof label === 'string') {
+        // 历史上 severity_colors 曾以 [{value:'critical',label:'red'}] 形式返回
+        out.push({ value: label, label });
+      }
+    }
+  }
+  return out;
+}
+
+/** Accepts both `{critical:'red'}` and `[{value:'critical',label:'red'}]`. */
+export function normalizeEnumMap(raw: unknown): Record<string, string> {
+  if (Array.isArray(raw)) {
+    return Object.fromEntries(normalizeEnumList(raw).map((option) => [option.value, option.label]));
+  }
+  if (raw && typeof raw === 'object') {
+    return Object.fromEntries(
+      Object.entries(raw as Record<string, unknown>).filter(
+        (entry): entry is [string, string] => typeof entry[1] === 'string',
+      ),
+    );
+  }
+  return {};
+}
+
 /** Fills in missing enum lists from the fallback so selects never render empty. */
 function mergeMeta(remote: Meta): Meta {
+  const list = (value: unknown, fallback: EnumOption[]): EnumOption[] =>
+    nonEmpty(normalizeEnumList(value), fallback);
   return {
     version: remote.version ?? FALLBACK_META.version,
-    message_types: nonEmpty(remote.message_types, FALLBACK_META.message_types),
-    repeat_policies: nonEmpty(remote.repeat_policies, FALLBACK_META.repeat_policies),
-    resolved_policies: nonEmpty(remote.resolved_policies, FALLBACK_META.resolved_policies),
-    group_update_policies: nonEmpty(remote.group_update_policies, FALLBACK_META.group_update_policies),
-    match_ops: nonEmpty(remote.match_ops, FALLBACK_META.match_ops),
-    status_label_types: remote.status_label_types?.length ? remote.status_label_types : FALLBACK_META.status_label_types,
+    message_types: list(remote.message_types, FALLBACK_META.message_types),
+    repeat_policies: list(remote.repeat_policies, FALLBACK_META.repeat_policies),
+    resolved_policies: list(remote.resolved_policies, FALLBACK_META.resolved_policies),
+    group_update_policies: list(
+      remote.group_update_policies,
+      FALLBACK_META.group_update_policies,
+    ),
+    match_ops: list(remote.match_ops, FALLBACK_META.match_ops),
+    status_label_types: list(remote.status_label_types, FALLBACK_META.status_label_types),
+    feed_button_types: list(remote.feed_button_types, FALLBACK_META.feed_button_types),
+    biz_id_sources: list(remote.biz_id_sources, FALLBACK_META.biz_id_sources),
+    card_sources: list(remote.card_sources, FALLBACK_META.card_sources),
+    channel_kinds: list(remote.channel_kinds, FALLBACK_META.channel_kinds),
+    receive_id_types: list(remote.receive_id_types, FALLBACK_META.receive_id_types),
     variables: remote.variables?.length ? remote.variables : FALLBACK_META.variables,
-    severity_colors: remote.severity_colors ?? FALLBACK_META.severity_colors,
+    severity_colors: nonEmptyMap(
+      normalizeEnumMap(remote.severity_colors),
+      FALLBACK_META.severity_colors,
+    ),
+    pin_supported_message_types:
+      remote.pin_supported_message_types ?? FALLBACK_META.pin_supported_message_types,
+    token_prefix: remote.token_prefix ?? FALLBACK_META.token_prefix,
+    hook_path_template: remote.hook_path_template ?? FALLBACK_META.hook_path_template,
   };
 }
 
-function nonEmpty(value: EnumOption[] | undefined, fallback: EnumOption[]): EnumOption[] {
-  return value && value.length > 0 ? value : fallback;
+function nonEmpty(value: EnumOption[], fallback: EnumOption[]): EnumOption[] {
+  return value.length > 0 ? value : fallback;
+}
+
+function nonEmptyMap(
+  value: Record<string, string>,
+  fallback: Record<string, string>,
+): Record<string, string> {
+  return Object.keys(value).length > 0 ? value : fallback;
 }
 
 export function useMeta(): MetaContextValue {

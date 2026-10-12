@@ -1,5 +1,7 @@
 //! 元数据：枚举选项与内置渲染变量清单，供管理后台渲染表单（`GET /api/v1/meta`）。
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -13,6 +15,8 @@ pub struct VariableMeta {
     pub name: &'static str,
     /// `alert` | `group` | `block` | `dynamic`
     pub group: &'static str,
+    /// 序列化为 `type`（与 `docs/api.md` 一致）；Rust 侧用 `ty` 避开关键字。
+    #[serde(rename = "type")]
     pub ty: &'static str,
     pub description: &'static str,
 }
@@ -26,11 +30,17 @@ pub struct Meta {
     pub group_update_policies: Vec<EnumOption>,
     pub match_ops: Vec<EnumOption>,
     pub status_label_types: Vec<EnumOption>,
+    /// 应用消息流卡片按钮类型（`default` / `primary` / `success`）。
+    /// 与 `status_label_types` 是**不同**的枚举，前端不要复用。
+    pub feed_button_types: Vec<EnumOption>,
+    /// `app_feed_card.biz_id` 的生成策略。
+    pub biz_id_sources: Vec<EnumOption>,
     pub card_sources: Vec<EnumOption>,
     pub channel_kinds: Vec<EnumOption>,
     pub receive_id_types: Vec<EnumOption>,
     pub variables: Vec<VariableMeta>,
-    pub severity_colors: Vec<EnumOption>,
+    /// 严重级别 → 卡片 header 颜色（对象映射，便于前端直接查表）。
+    pub severity_colors: BTreeMap<&'static str, &'static str>,
     /// 应用消息流卡片 `pin_unresolved` 的有效性提示（R4）。
     pub pin_supported_message_types: Vec<&'static str>,
     pub token_prefix: &'static str,
@@ -96,6 +106,23 @@ pub fn card_sources() -> Vec<EnumOption> {
     opts![
         ("builder_json", "卡片搭建工具 JSON（JSON 2.0）"),
         ("builder_template", "卡片搭建工具模板（template_id）"),
+    ]
+}
+
+/// 应用消息流卡片的按钮类型（飞书 `button_type`）。
+pub fn feed_button_types() -> Vec<EnumOption> {
+    opts![
+        ("default", "默认"),
+        ("primary", "主要"),
+        ("success", "成功")
+    ]
+}
+
+/// 应用消息流卡片的 `biz_id` 生成策略。
+pub fn biz_id_sources() -> Vec<EnumOption> {
+    opts![
+        ("alert_group", "按告警分组（同分组复用同一张卡片，默认）"),
+        ("hook", "按 Hook + 告警分组")
     ]
 }
 
@@ -369,16 +396,20 @@ pub fn meta() -> Meta {
         group_update_policies: group_update_policies(),
         match_ops: match_ops(),
         status_label_types: status_label_types(),
+        feed_button_types: feed_button_types(),
+        biz_id_sources: biz_id_sources(),
         card_sources: card_sources(),
         channel_kinds: channel_kinds(),
         receive_id_types: receive_id_types(),
         variables: render_variables(),
-        severity_colors: opts![
+        severity_colors: [
             ("critical", "red"),
             ("warning", "orange"),
             ("info", "blue"),
             ("default", "grey"),
-        ],
+        ]
+        .into_iter()
+        .collect(),
         // R4：只有应用消息流卡片支持 time_sensitive 即时提醒。
         pin_supported_message_types: vec!["app_feed_card"],
         token_prefix: alkh_domain::hook::TOKEN_PREFIX,
@@ -397,6 +428,76 @@ mod tests {
         assert!(v["message_types"].as_array().unwrap().len() == 2);
         assert!(v["variables"].as_array().unwrap().len() > 20);
         assert_eq!(v["pin_supported_message_types"][0], "app_feed_card");
+        assert_eq!(v["feed_button_types"].as_array().unwrap().len(), 3);
+        assert_eq!(v["biz_id_sources"].as_array().unwrap().len(), 2);
+    }
+
+    /// 回归：前端曾因把 `status_label_types` 当成字符串数组而渲染出重复的
+    /// `[object Object]` key。这里把 `/meta` 的**线格式**固定下来。
+    #[test]
+    fn meta_wire_format_is_enum_option_objects() {
+        let v = serde_json::to_value(meta()).unwrap();
+
+        for field in [
+            "message_types",
+            "repeat_policies",
+            "resolved_policies",
+            "group_update_policies",
+            "match_ops",
+            "status_label_types",
+            "feed_button_types",
+            "biz_id_sources",
+            "card_sources",
+            "channel_kinds",
+            "receive_id_types",
+        ] {
+            let items = v[field]
+                .as_array()
+                .unwrap_or_else(|| panic!("{field} 必须是数组"));
+            assert!(!items.is_empty(), "{field} 不能为空");
+            for item in items {
+                assert!(
+                    item.is_object(),
+                    "{field} 的元素必须是 {{value,label}} 对象，实际为 {item}"
+                );
+                assert!(
+                    item["value"].is_string() && item["label"].is_string(),
+                    "{field} 的元素必须同时有字符串 value/label，实际为 {item}"
+                );
+            }
+        }
+
+        // 变量必须序列化为 `type`（不是 Rust 字段名 `ty`）
+        let var = &v["variables"][0];
+        assert!(var["name"].is_string());
+        assert!(var["group"].is_string());
+        assert!(var["type"].is_string(), "变量应序列化为 `type`: {var}");
+        assert!(var.get("ty").is_none(), "不应泄露 Rust 字段名 `ty`: {var}");
+
+        // severity_colors 是对象映射，而不是枚举数组
+        let colors = v["severity_colors"]
+            .as_object()
+            .expect("severity_colors 必须是对象");
+        assert_eq!(colors["critical"], "red");
+        assert_eq!(colors["warning"], "orange");
+        assert_eq!(colors["info"], "blue");
+        assert_eq!(colors["default"], "grey");
+
+        assert_eq!(v["token_prefix"], "alkh_");
+        assert_eq!(
+            v["hook_path_template"],
+            "/api/v1/hooks/alertmanager/{token}"
+        );
+    }
+
+    #[test]
+    fn feed_button_types_differ_from_status_label_types() {
+        let feed: Vec<&str> = feed_button_types().iter().map(|o| o.value).collect();
+        let status: Vec<&str> = status_label_types().iter().map(|o| o.value).collect();
+        assert_eq!(feed, vec!["default", "primary", "success"]);
+        assert!(status.contains(&"danger"));
+        assert!(!feed.contains(&"danger"), "按钮类型没有 danger");
+        assert!(!feed.contains(&"secondary"), "按钮类型没有 secondary");
     }
 
     #[test]
@@ -408,6 +509,8 @@ mod tests {
             group_update_policies(),
             match_ops(),
             status_label_types(),
+            feed_button_types(),
+            biz_id_sources(),
         ] {
             let mut values: Vec<&str> = set.iter().map(|o| o.value).collect();
             let len = values.len();

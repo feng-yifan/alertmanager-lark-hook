@@ -17,7 +17,7 @@
 | GET | `/api/v1/meta` | 无 | 枚举与内置变量清单，供前端渲染表单 |
 | GET | `/metrics` | 无 | Prometheus 文本指标 |
 
-`GET /api/v1/meta` →
+`GET /api/v1/meta` →（**所有枚举列表统一为 `{value,label}` 对象数组**，不是字符串数组）
 
 ```json
 {
@@ -27,16 +27,35 @@
   "resolved_policies": [{"value":"send","label":"发送"},{"value":"send_and_delete_previous","label":"发送并删除旧告警"},{"value":"update_previous","label":"更新旧告警"}],
   "group_update_policies": [{"value":"update_previous","label":"更新旧告警"},{"value":"send","label":"发送新消息"},{"value":"suppress","label":"不发送"}],
   "match_ops": [{"value":"=","label":"等于"},{"value":"!=","label":"不等于"},{"value":"=~","label":"正则匹配"},{"value":"!~","label":"正则不匹配"}],
-  "status_label_types": ["primary","secondary","success","danger"],
+  "status_label_types": [{"value":"primary","label":"主类型"},{"value":"secondary","label":"次要类型"},{"value":"success","label":"成功类型"},{"value":"danger","label":"危险类型"}],
+  "feed_button_types": [{"value":"default","label":"默认"},{"value":"primary","label":"主要"},{"value":"success","label":"成功"}],
+  "biz_id_sources": [{"value":"alert_group","label":"按告警分组（同分组复用同一张卡片，默认）"},{"value":"hook","label":"按 Hook + 告警分组"}],
+  "card_sources": [{"value":"builder_json","label":"卡片搭建工具 JSON（JSON 2.0）"},{"value":"builder_template","label":"卡片搭建工具模板（template_id）"}],
+  "channel_kinds": [{"value":"group","label":"群聊"},{"value":"p2p_user","label":"单聊用户"}],
+  "receive_id_types": [{"value":"chat_id","label":"群 chat_id"},{"value":"open_id","label":"用户 open_id"},{"value":"user_id","label":"用户 user_id"},{"value":"email","label":"用户邮箱"}],
   "variables": [
     {"name":"alertname","group":"alert","type":"string","description":"告警名称"},
-    {"name":"severity","group":"alert","type":"string"},
-    {"name":"status_text","group":"alert","type":"string","description":"未解决 / 已恢复"},
+    {"name":"severity","group":"alert","type":"string","description":""},
+    {"name":"status_text","group":"group","type":"string","description":"未解决 / 已恢复"},
     {"name":"alerts_table","group":"block","type":"markdown","description":"预渲染告警表格"}
   ],
-  "severity_colors": {"critical":"red","warning":"orange","info":"blue","default":"grey"}
+  "severity_colors": {"critical":"red","warning":"orange","info":"blue","default":"grey"},
+  "pin_supported_message_types": ["app_feed_card"],
+  "token_prefix": "alkh_",
+  "hook_path_template": "/api/v1/hooks/alertmanager/{token}"
 }
 ```
+
+字段约定：
+
+| 字段 | 说明 |
+|---|---|
+| 枚举列表 | 一律为 `[{"value":"…","label":"…"}]`；`value` 是**字符串**，可直接用作 `<option value>` / React `key` |
+| `variables[].type` | `string` / `number` / `bool` / `datetime` / `url` / `json` / `markdown` |
+| `variables[].group` | `alert` / `group` / `block` / `dynamic` |
+| `severity_colors` | **对象映射**（`severity → 卡片 header 颜色`），不是枚举数组 |
+| `feed_button_types` | 应用消息流卡片按钮类型，与 `status_label_types` **不是**同一个枚举 |
+| `pin_supported_message_types` | `pin_unresolved` 真正生效的消息类型（R4：仅 `app_feed_card`） |
 
 ## 1. 鉴权
 
