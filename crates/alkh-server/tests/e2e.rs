@@ -1,0 +1,1114 @@
+//! 端到端集成测试：真实 Axum HTTP 栈 + 内存 SQLite + Fake 飞书网关。
+//!
+//! 覆盖：登录鉴权 → 渠道创建 → Hook 签发 → AlertManager 投递 →
+//! 新告警 / 幂等去重 / 分组更新（原地更新）/ 解决告警 → 查询与指标。
+
+use std::sync::{Arc, Mutex};
+
+use alkh_domain::channel::ReceiveIdType;
+use alkh_domain::ports::{AppFeedCardPayload, LarkChat, LarkGateway, LarkSendOutcome};
+use alkh_server::config::Config;
+use async_trait::async_trait;
+use serde_json::{json, Value};
+use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::SqlitePool;
+
+// ---------------------------------------------------------------------------
+// Fake 飞书网关
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+struct SentMessage {
+    receive_id: String,
+    receive_id_type: String,
+    content: Value,
+    uuid: String,
+}
+
+#[derive(Default)]
+struct FakeState {
+    chats: Vec<LarkChat>,
+    card_entities: Vec<Value>,
+    card_entity_templates: Vec<Value>,
+    messages: Vec<SentMessage>,
+    feed_cards: Vec<AppFeedCardPayload>,
+    updated_card_entities: Vec<(String, Value, i64)>,
+    updated_messages: Vec<(String, Value)>,
+    recalled: Vec<String>,
+    deleted_feed_cards: Vec<String>,
+    seq: u64,
+}
+
+#[derive(Default)]
+struct FakeLark {
+    state: Mutex<FakeState>,
+}
+
+impl FakeLark {
+    fn with_chats() -> Self {
+        let fake = Self::default();
+        {
+            let mut s = fake.state.lock().unwrap();
+            s.chats = vec![
+                LarkChat {
+                    chat_id: "oc_test_group".into(),
+                    name: "运维告警群".into(),
+                    avatar_url: None,
+                    description: None,
+                    external: false,
+                    dissolved: false,
+                },
+                LarkChat {
+                    chat_id: "oc_dissolved".into(),
+                    name: "已解散群".into(),
+                    avatar_url: None,
+                    description: None,
+                    external: false,
+                    dissolved: true,
+                },
+            ];
+        }
+        fake
+    }
+
+    fn next_id(&self, prefix: &str) -> String {
+        let mut s = self.state.lock().unwrap();
+        s.seq += 1;
+        format!("{prefix}_{}", s.seq)
+    }
+
+    fn snapshot(&self) -> std::sync::MutexGuard<'_, FakeState> {
+        self.state.lock().unwrap()
+    }
+}
+
+#[async_trait]
+impl LarkGateway for FakeLark {
+    async fn verify_credentials(&self) -> alkh_domain::PortResult<Vec<LarkChat>> {
+        self.list_chats().await
+    }
+
+    async fn list_chats(&self) -> alkh_domain::PortResult<Vec<LarkChat>> {
+        Ok(self.snapshot().chats.clone())
+    }
+
+    async fn create_card_entity(&self, card_json: &Value) -> alkh_domain::PortResult<String> {
+        self.snapshot().card_entities.push(card_json.clone());
+        Ok(self.next_id("card"))
+    }
+
+    async fn create_card_entity_from_template(
+        &self,
+        template_id: &str,
+        version: Option<&str>,
+        variables: &serde_json::Map<String, Value>,
+    ) -> alkh_domain::PortResult<String> {
+        self.snapshot().card_entity_templates.push(json!({
+            "template_id": template_id,
+            "template_version_name": version,
+            "template_variable": variables,
+        }));
+        Ok(self.next_id("card_tpl"))
+    }
+
+    async fn send_card_entity(
+        &self,
+        receive_id: &str,
+        receive_id_type: ReceiveIdType,
+        card_entity_id: &str,
+        uuid: &str,
+    ) -> alkh_domain::PortResult<LarkSendOutcome> {
+        let content = json!({ "type": "card", "data": { "card_id": card_entity_id } });
+        self.snapshot().messages.push(SentMessage {
+            receive_id: receive_id.to_string(),
+            receive_id_type: receive_id_type.as_str().to_string(),
+            content,
+            uuid: uuid.to_string(),
+        });
+        Ok(LarkSendOutcome {
+            message_id: Some(self.next_id("om")),
+            app_feed_biz_id: None,
+            failed_cards: vec![],
+        })
+    }
+
+    async fn send_message_content(
+        &self,
+        receive_id: &str,
+        receive_id_type: ReceiveIdType,
+        content: &Value,
+        uuid: &str,
+    ) -> alkh_domain::PortResult<LarkSendOutcome> {
+        self.snapshot().messages.push(SentMessage {
+            receive_id: receive_id.to_string(),
+            receive_id_type: receive_id_type.as_str().to_string(),
+            content: content.clone(),
+            uuid: uuid.to_string(),
+        });
+        Ok(LarkSendOutcome {
+            message_id: Some(self.next_id("om")),
+            app_feed_biz_id: None,
+            failed_cards: vec![],
+        })
+    }
+
+    async fn update_card_entity(
+        &self,
+        card_entity_id: &str,
+        card_json: &Value,
+        sequence: i64,
+        _uuid: &str,
+    ) -> alkh_domain::PortResult<()> {
+        self.snapshot().updated_card_entities.push((
+            card_entity_id.to_string(),
+            card_json.clone(),
+            sequence,
+        ));
+        Ok(())
+    }
+
+    async fn update_message_content(
+        &self,
+        message_id: &str,
+        content: &Value,
+    ) -> alkh_domain::PortResult<()> {
+        self.snapshot()
+            .updated_messages
+            .push((message_id.to_string(), content.clone()));
+        Ok(())
+    }
+
+    async fn recall_message(&self, message_id: &str) -> alkh_domain::PortResult<()> {
+        self.snapshot().recalled.push(message_id.to_string());
+        Ok(())
+    }
+
+    async fn send_app_feed_card(
+        &self,
+        _user_id: &str,
+        _user_id_type: ReceiveIdType,
+        payload: &AppFeedCardPayload,
+    ) -> alkh_domain::PortResult<LarkSendOutcome> {
+        self.snapshot().feed_cards.push(payload.clone());
+        Ok(LarkSendOutcome {
+            message_id: None,
+            app_feed_biz_id: payload.biz_id.clone(),
+            failed_cards: vec![],
+        })
+    }
+
+    async fn update_app_feed_card(
+        &self,
+        _user_id: &str,
+        _user_id_type: ReceiveIdType,
+        payload: &AppFeedCardPayload,
+    ) -> alkh_domain::PortResult<()> {
+        self.snapshot().feed_cards.push(payload.clone());
+        Ok(())
+    }
+
+    async fn delete_app_feed_card(
+        &self,
+        _user_id: &str,
+        _user_id_type: ReceiveIdType,
+        biz_id: &str,
+    ) -> alkh_domain::PortResult<()> {
+        self.snapshot().deleted_feed_cards.push(biz_id.to_string());
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 测试脚手架
+// ---------------------------------------------------------------------------
+
+struct Harness {
+    base: String,
+    http: reqwest::Client,
+    token: String,
+    fake: Arc<FakeLark>,
+    hook_token: Option<String>,
+    channel_id: Option<String>,
+}
+
+async fn pool() -> SqlitePool {
+    let p = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("内存 SQLite 连接失败");
+    alkh_infra::migrate(&p).await.expect("迁移失败");
+    p
+}
+
+fn test_config(dir: &std::path::Path) -> Config {
+    Config {
+        http_addr: "127.0.0.1:0".parse().unwrap(),
+        data_dir: dir.to_path_buf(),
+        database_url: "sqlite::memory:".into(),
+        db_max_connections: 1,
+        master_key: Some("0f".repeat(32)),
+        admin_username: "admin".into(),
+        admin_password: Some("test-password-123".into()),
+        public_base_url: Some("http://alkh.test".into()),
+        lark_base_url: "https://open.feishu.cn".into(),
+        log_level: "warn".into(),
+        log_json: false,
+        static_dir: None,
+        cookie_secure: false,
+        worker_tick_ms: 50,
+        retry_interval_secs: 3600,
+        retention_interval_secs: 3600,
+    }
+}
+
+async fn start() -> Harness {
+    let dir = std::env::temp_dir().join(format!("alkh-e2e-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let config = Arc::new(test_config(&dir));
+    let pool = pool().await;
+    let fake = Arc::new(FakeLark::with_chats());
+
+    let state = alkh_server::wiring::build_state(config.clone(), pool, Some(fake.clone()))
+        .await
+        .expect("装配 AppState 失败");
+    let bootstrap = state
+        .auth
+        .ensure_bootstrap_admin("admin", Some("test-password-123".into()))
+        .await
+        .expect("创建管理员失败");
+    assert_eq!(
+        bootstrap,
+        alkh_app::auth::BootstrapOutcome::Created {
+            generated_password: None
+        },
+        "提供密码时应创建账号且不生成随机密码"
+    );
+    // 幂等
+    let second = state
+        .auth
+        .ensure_bootstrap_admin("admin", Some("test-password-123".into()))
+        .await
+        .unwrap();
+    assert_eq!(second, alkh_app::auth::BootstrapOutcome::AlreadyExists);
+    alkh_app::bootstrap::ensure_default_templates(&state.deps)
+        .await
+        .expect("创建默认模板失败");
+
+    let app = alkh_server::build_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let base = format!("http://{addr}");
+
+    let login: Value = http
+        .post(format!("{base}/api/v1/auth/login"))
+        .json(&json!({"username": "admin", "password": "test-password-123"}))
+        .send()
+        .await
+        .expect("登录请求失败")
+        .json()
+        .await
+        .expect("登录响应解析失败");
+
+    Harness {
+        base,
+        http,
+        token: login["token"]
+            .as_str()
+            .expect("登录响应缺少 token")
+            .to_string(),
+        fake,
+        hook_token: None,
+        channel_id: None,
+    }
+}
+
+impl Harness {
+    fn url(&self, path: &str) -> String {
+        format!("{}{path}", self.base)
+    }
+
+    async fn get(&self, path: &str) -> (reqwest::StatusCode, Value) {
+        let resp = self
+            .http
+            .get(self.url(path))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .expect("GET 失败");
+        let status = resp.status();
+        let body = resp.json().await.unwrap_or(Value::Null);
+        (status, body)
+    }
+
+    async fn post(&self, path: &str, body: Value) -> (reqwest::StatusCode, Value) {
+        let resp = self
+            .http
+            .post(self.url(path))
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await
+            .expect("POST 失败");
+        let status = resp.status();
+        let parsed = resp.json().await.unwrap_or(Value::Null);
+        (status, parsed)
+    }
+
+    /// 创建一个群渠道并保存一次性 hook token。
+    async fn create_channel(&mut self) -> String {
+        let (status, body) = self
+            .post(
+                "/api/v1/channels",
+                json!({
+                    "name": "运维告警群",
+                    "receive_id": "oc_test_group",
+                    "receive_id_type": "chat_id"
+                }),
+            )
+            .await;
+        assert_eq!(status, reqwest::StatusCode::CREATED, "创建渠道失败: {body}");
+        let token = body["hook_token"]
+            .as_str()
+            .expect("缺少 hook_token")
+            .to_string();
+        self.channel_id = Some(body["id"].as_str().unwrap().to_string());
+        self.hook_token = Some(token.clone());
+        token
+    }
+
+    /// 以 AlertManager 身份推送 payload（无需会话）。
+    async fn push(&self, payload: Value) -> (reqwest::StatusCode, Value) {
+        let token = self.hook_token.as_ref().expect("尚未创建 hook");
+        let resp = self
+            .http
+            .post(self.url(&format!("/api/v1/hooks/alertmanager/{token}")))
+            .json(&payload)
+            .send()
+            .await
+            .expect("webhook 请求失败");
+        let status = resp.status();
+        let body = resp.json().await.unwrap_or(Value::Null);
+        (status, body)
+    }
+}
+
+fn firing_payload(alerts: usize) -> Value {
+    let list: Vec<Value> = (0..alerts)
+        .map(|i| {
+            json!({
+                "status": "firing",
+                "labels": {"alertname": "HighCPU", "instance": format!("10.0.0.{i}:9100"), "severity": "critical"},
+                "annotations": {"summary": format!("CPU 过高 #{i}")},
+                "startsAt": "2026-10-13T00:00:00Z",
+                "endsAt": "0001-01-01T00:00:00Z",
+                "fingerprint": format!("fp{i}")
+            })
+        })
+        .collect();
+    json!({
+        "version": "4",
+        "groupKey": "{}:{alertname=\"HighCPU\"}",
+        "truncatedAlerts": 0,
+        "status": "firing",
+        "receiver": "lark-ops",
+        "groupLabels": {"alertname": "HighCPU"},
+        "commonLabels": {"alertname": "HighCPU", "severity": "critical"},
+        "commonAnnotations": {"summary": "CPU 过高"},
+        "externalURL": "http://alertmanager:9093",
+        "alerts": list
+    })
+}
+
+fn resolved_payload() -> Value {
+    json!({
+        "version": "4",
+        "groupKey": "{}:{alertname=\"HighCPU\"}",
+        "status": "resolved",
+        "receiver": "lark-ops",
+        "groupLabels": {"alertname": "HighCPU"},
+        "commonLabels": {"alertname": "HighCPU", "severity": "critical"},
+        "commonAnnotations": {"summary": "CPU 已恢复"},
+        "externalURL": "http://alertmanager:9093",
+        "alerts": [{
+            "status": "resolved",
+            "labels": {"alertname": "HighCPU", "instance": "10.0.0.0:9100", "severity": "critical"},
+            "annotations": {"summary": "CPU 已恢复"},
+            "startsAt": "2026-10-13T00:00:00Z",
+            "endsAt": "2026-10-13T01:00:00Z",
+            "fingerprint": "fp0"
+        }]
+    })
+}
+
+// ---------------------------------------------------------------------------
+// 测试
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn health_endpoints_are_public() {
+    let h = start().await;
+    let resp = h.http.get(h.url("/healthz")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+
+    let resp = h.http.get(h.url("/readyz")).send().await.unwrap();
+    assert!(resp.status().is_success() || resp.status() == 503);
+
+    let resp = h.http.get(h.url("/metrics")).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("alkh_http_requests_total"));
+}
+
+#[tokio::test]
+async fn admin_api_requires_authentication() {
+    let h = start().await;
+    let resp = h.http.get(h.url("/api/v1/channels")).send().await.unwrap();
+    assert_eq!(resp.status(), 401);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "unauthenticated");
+
+    // 错误的 token
+    let resp = h
+        .http
+        .get(h.url("/api/v1/channels"))
+        .bearer_auth("bogus")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn meta_and_settings_expose_no_secrets() {
+    let h = start().await;
+    let (status, meta) = h.get("/api/v1/meta").await;
+    assert_eq!(status, 200);
+    assert_eq!(meta["message_types"].as_array().unwrap().len(), 2);
+    assert!(meta["variables"].as_array().unwrap().len() > 20);
+
+    let (status, settings) = h.get("/api/v1/settings").await;
+    assert_eq!(status, 200);
+    assert_eq!(settings["app_secret_set"], false);
+
+    // 写入密钥后不得回显
+    let resp = h
+        .http
+        .put(h.url("/api/v1/settings"))
+        .bearer_auth(&h.token)
+        .json(&json!({
+            "lark_app_id": "cli_test_app",
+            "app_secret": "super-secret-value",
+            "lark_base_url": "https://open.feishu.cn",
+            "public_base_url": "https://alkh.example.com",
+            "retention": {"alert_group_days": 30, "delivery_days": 30, "audit_days": 14}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(
+        !text.contains("super-secret-value"),
+        "响应泄露了 app_secret: {text}"
+    );
+    assert!(text.contains("\"app_secret_set\":true"));
+}
+
+#[tokio::test]
+async fn channel_sync_imports_feishu_chats_and_masks_tokens() {
+    let h = start().await;
+
+    let (status, report) = h.post("/api/v1/channels/sync", json!({})).await;
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(report["discovered"], 2);
+    assert_eq!(report["created"], 2);
+
+    let (status, channels) = h.get("/api/v1/channels").await;
+    assert_eq!(status, 200);
+    assert_eq!(channels["total"], 2);
+
+    // 已解散的群被自动停用
+    let items = channels["items"].as_array().unwrap();
+    let dissolved = items
+        .iter()
+        .find(|c| c["receive_id"] == "oc_dissolved")
+        .unwrap();
+    assert_eq!(dissolved["enabled"], false);
+    let normal = items
+        .iter()
+        .find(|c| c["receive_id"] == "oc_test_group")
+        .unwrap();
+    assert_eq!(normal["enabled"], true);
+    assert_eq!(normal["policy"]["message_type"], "card_message");
+    assert_eq!(normal["policy"]["repeat_policy"], "suppress");
+    assert_eq!(normal["policy"]["resolved_policy"], "send");
+
+    // 列表接口不应泄露明文 token，只给前缀和屏蔽路径
+    let (status, detail) = h
+        .get(&format!(
+            "/api/v1/channels/{}",
+            normal["id"].as_str().unwrap()
+        ))
+        .await;
+    assert_eq!(status, 200);
+    let raw = serde_json::to_string(&detail).unwrap();
+    assert!(raw.contains("alkh_"), "应展示 token 前缀");
+    assert!(!raw.contains("alkh_session"), "不应出现会话信息");
+    for hook in detail["hooks"].as_array().unwrap() {
+        assert!(
+            hook["hook_path"].as_str().unwrap().contains('…'),
+            "hook_path 必须被屏蔽"
+        );
+        assert!(
+            hook["hook_url"].as_str().unwrap().contains('…'),
+            "hook_url 必须被屏蔽"
+        );
+    }
+}
+
+#[tokio::test]
+async fn full_delivery_lifecycle_new_repeat_update_resolve() {
+    let mut h = start().await;
+    let hook_token = h.create_channel().await;
+    assert!(hook_token.starts_with("alkh_"));
+
+    // --- 1. 新告警：发送新消息 ---
+    let (status, body) = h.push(firing_payload(1)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["event"], "new_firing");
+    assert_eq!(body["action"], "send_new");
+    assert_eq!(body["ok"], true);
+    // 指标以实际落库状态为准，而不是"决策动作"
+    assert_eq!(body["delivery_state"], "active");
+
+    {
+        let s = h.fake.snapshot();
+        assert_eq!(s.card_entities.len(), 1, "应创建一个卡片实体");
+        assert_eq!(s.messages.len(), 1, "应发送一条消息");
+        assert_eq!(s.messages[0].receive_id, "oc_test_group");
+        assert_eq!(s.messages[0].receive_id_type, "chat_id");
+        assert_eq!(s.messages[0].content["type"], "card");
+        assert!(s.messages[0].content["data"]["card_id"].is_string());
+        // 卡片 JSON 必须带 schema 2.0 且 update_multi=true
+        assert_eq!(s.card_entities[0]["schema"], "2.0");
+        assert_eq!(s.card_entities[0]["config"]["update_multi"], true);
+        let rendered = s.card_entities[0].to_string();
+        assert!(rendered.contains("HighCPU"), "卡片应包含告警名: {rendered}");
+        assert!(!rendered.contains("${"), "卡片不应残留未替换变量");
+    }
+
+    // --- 2. 完全相同的 payload：幂等去重 ---
+    let (status, body) = h.push(firing_payload(1)).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["skipped"], "duplicate");
+    assert_eq!(h.fake.snapshot().messages.len(), 1, "去重不应重复发送");
+
+    // --- 3. 新增告警（分组更新）：原地更新卡片 ---
+    let (status, body) = h.push(firing_payload(2)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["event"], "updated");
+    assert_eq!(body["action"], "update_in_place");
+    assert_eq!(body["delivery_state"], "active");
+    {
+        let s = h.fake.snapshot();
+        assert_eq!(s.updated_card_entities.len(), 1, "应原地更新卡片实体");
+        let (card_id, card, seq) = &s.updated_card_entities[0];
+        assert!(
+            card_id.starts_with("card_"),
+            "应复用同一个卡片实体: {card_id}"
+        );
+        assert_eq!(*seq, 1, "首次更新的 sequence 必须为 1");
+        assert!(
+            card.to_string().contains("10.0.0.1:9100"),
+            "更新内容应包含新告警"
+        );
+        assert_eq!(s.messages.len(), 1, "原地更新不应发送新消息");
+    }
+
+    // --- 4. 解决告警：默认策略为发送恢复消息 ---
+    let (status, body) = h.push(resolved_payload()).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["event"], "resolved");
+    assert_eq!(body["action"], "send_new");
+    {
+        let s = h.fake.snapshot();
+        assert_eq!(s.messages.len(), 2, "应发送恢复消息");
+        assert!(
+            s.card_entities[1].to_string().contains("已恢复"),
+            "恢复卡片应体现已恢复"
+        );
+    }
+
+    // --- 5. 查询接口 ---
+    let (status, groups) = h.get("/api/v1/alert-groups").await;
+    assert_eq!(status, 200);
+    assert_eq!(groups["total"], 1);
+    let group = &groups["items"][0];
+    assert_eq!(group["status"], "resolved");
+    assert_eq!(group["group_key"], "{}:{alertname=\"HighCPU\"}");
+    assert_eq!(group["firing_count"], 0);
+
+    let (status, resolved_groups) = h.get("/api/v1/alert-groups?status=resolved").await;
+    assert_eq!(status, 200);
+    assert_eq!(resolved_groups["total"], 1);
+    let (_, firing_groups) = h.get("/api/v1/alert-groups?status=firing").await;
+    assert_eq!(firing_groups["total"], 0);
+
+    let (status, deliveries) = h.get("/api/v1/deliveries").await;
+    assert_eq!(status, 200);
+    assert_eq!(deliveries["total"], 2);
+    let states: Vec<&str> = deliveries["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["state"].as_str().unwrap())
+        .collect();
+    assert!(states.contains(&"superseded"), "旧消息应被取代: {states:?}");
+    assert!(states.contains(&"active"), "新消息应为活跃: {states:?}");
+
+    let (status, overview) = h.get("/api/v1/overview").await;
+    assert_eq!(status, 200);
+    assert_eq!(overview["alert_groups"]["resolved"], 1);
+    assert!(overview["deliveries_24h"]["sent"].as_u64().unwrap() >= 2);
+
+    // --- 6. 审计 ---
+    let (status, audit) = h.get("/api/v1/audit-logs?action=message.sent").await;
+    assert_eq!(status, 200);
+    assert!(
+        audit["total"].as_u64().unwrap() >= 2,
+        "应记录发送审计: {audit}"
+    );
+}
+
+#[tokio::test]
+async fn repeat_policy_send_and_revoke_previous_recalls_old_message() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+    let channel_id = h.channel_id.clone().unwrap();
+
+    // 把重复告警策略改为「发送并移除旧告警」
+    let (status, policy) = h
+        .get(&format!("/api/v1/channels/{channel_id}/policy"))
+        .await;
+    assert_eq!(status, 200);
+    let mut policy = policy;
+    policy["repeat_policy"] = json!("send_and_revoke_previous");
+    policy["resolved_policy"] = json!("send_and_delete_previous");
+    policy["pin_unresolved"] = json!(true);
+
+    // 用户级渠道才能用应用消息流卡片；这里保持卡片消息，pin 应被忽略（R4）
+    let resp = h
+        .http
+        .put(h.url(&format!("/api/v1/channels/{channel_id}/policy")))
+        .bearer_auth(&h.token)
+        .json(&policy)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // 新告警 → 发送
+    let (_, body) = h.push(firing_payload(1)).await;
+    assert_eq!(body["action"], "send_new");
+
+    // 相同事件再次到达会因为 event_hash 去重被跳过，所以先改动再触发一次重复通知：
+    // 用 update 让卡片进入活跃状态后，构造"与当前内容一致"的事件即触发 repeated。
+    let (_, body) = h.push(firing_payload(1)).await;
+    assert_eq!(body["skipped"], "duplicate");
+
+    // 解决告警 → 发送恢复消息 + 删除旧消息
+    let (_, body) = h.push(resolved_payload()).await;
+    assert_eq!(body["event"], "resolved");
+    assert_eq!(body["action"], "send_new_then_revoke");
+    let s = h.fake.snapshot();
+    assert_eq!(s.messages.len(), 2, "应发送恢复消息");
+    assert_eq!(s.recalled.len(), 1, "应撤回/删除旧消息");
+}
+
+#[tokio::test]
+async fn label_matchers_filter_alerts() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+    let channel_id = h.channel_id.clone().unwrap();
+
+    let resp = h
+        .http
+        .put(h.url(&format!("/api/v1/channels/{channel_id}/policy")))
+        .bearer_auth(&h.token)
+        .json(&json!({
+            "message_type": "card_message",
+            "pin_unresolved": false,
+            "repeat_policy": "suppress",
+            "resolved_policy": "send",
+            "group_update_policy": "update_previous",
+            "label_matchers": [{"name": "severity", "op": "=", "value": "warning"}],
+            "aggregation_window_secs": 0,
+            "min_send_interval_secs": 0,
+            "max_alerts_per_message": 20,
+            "mute_until": null
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // payload 只有 critical 告警 → 被过滤
+    let (status, body) = h.push(firing_payload(1)).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["skipped"], "filtered");
+    assert_eq!(h.fake.snapshot().messages.len(), 0, "被过滤的告警不应发送");
+
+    // 非法正则应被拒绝
+    let resp = h
+        .http
+        .put(h.url(&format!("/api/v1/channels/{channel_id}/policy")))
+        .bearer_auth(&h.token)
+        .json(&json!({
+            "message_type": "card_message",
+            "pin_unresolved": false,
+            "repeat_policy": "suppress",
+            "resolved_policy": "send",
+            "group_update_policy": "update_previous",
+            "label_matchers": [{"name": "severity", "op": "=~", "value": "(["}],
+            "aggregation_window_secs": 0,
+            "min_send_interval_secs": 0,
+            "max_alerts_per_message": 20,
+            "mute_until": null
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn app_feed_card_is_rejected_for_group_channel() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+    let channel_id = h.channel_id.clone().unwrap();
+
+    // R15：群渠道不能用应用消息流卡片（飞书该接口没有群维度）
+    let resp = h
+        .http
+        .put(h.url(&format!("/api/v1/channels/{channel_id}/policy")))
+        .bearer_auth(&h.token)
+        .json(&json!({
+            "message_type": "app_feed_card",
+            "pin_unresolved": true,
+            "repeat_policy": "suppress",
+            "resolved_policy": "send",
+            "group_update_policy": "update_previous",
+            "label_matchers": [],
+            "aggregation_window_secs": 0,
+            "min_send_interval_secs": 0,
+            "max_alerts_per_message": 20,
+            "mute_until": null
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "应拒绝群渠道 + 应用消息流卡片");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "validation_failed");
+}
+
+#[tokio::test]
+async fn user_channel_app_feed_card_delivers_with_documented_payload() {
+    let mut h = start().await;
+
+    // 用户级渠道（open_id）
+    let (status, body) = h
+        .post(
+            "/api/v1/channels",
+            json!({
+                "name": "值班同学",
+                "receive_id": "ou_test_user",
+                "receive_id_type": "open_id"
+            }),
+        )
+        .await;
+    assert_eq!(status, 201, "{body}");
+    let channel_id = body["id"].as_str().unwrap().to_string();
+    let token = body["hook_token"].as_str().unwrap().to_string();
+    h.hook_token = Some(token);
+    h.channel_id = Some(channel_id.clone());
+
+    let resp = h
+        .http
+        .put(h.url(&format!("/api/v1/channels/{channel_id}/policy")))
+        .bearer_auth(&h.token)
+        .json(&json!({
+            "message_type": "app_feed_card",
+            "pin_unresolved": true,
+            "repeat_policy": "suppress",
+            "resolved_policy": "send",
+            "group_update_policy": "update_previous",
+            "label_matchers": [],
+            "aggregation_window_secs": 0,
+            "min_send_interval_secs": 0,
+            "max_alerts_per_message": 20,
+            "mute_until": null
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let (status, body) = h.push(firing_payload(1)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["action"], "send_new");
+
+    let s = h.fake.snapshot();
+    assert_eq!(s.feed_cards.len(), 1);
+    let card = &s.feed_cards[0];
+    assert!(card.biz_id.as_deref().unwrap().starts_with("alkh-"));
+    assert!(card.title.contains("HighCPU"), "标题应渲染: {}", card.title);
+    // R4：未解决告警 + pin 开关 ⇒ 即时提醒
+    assert!(card.time_sensitive, "firing 告警应设置 time_sensitive");
+}
+
+#[tokio::test]
+async fn unknown_hook_token_is_404() {
+    let h = start().await;
+    let resp = h
+        .http
+        .post(h.url("/api/v1/hooks/alertmanager/alkh_not_a_real_token"))
+        .json(&firing_payload(1))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "unknown_hook");
+}
+
+#[tokio::test]
+async fn malformed_payload_is_rejected() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+
+    let resp = h
+        .http
+        .post(h.url(&format!(
+            "/api/v1/hooks/alertmanager/{}",
+            h.hook_token.as_ref().unwrap()
+        )))
+        .header("content-type", "application/json")
+        .body("{ not json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // 空 alerts 视为心跳，跳过但返回 200
+    let (status, body) = h
+        .push(json!({"version": "4", "groupKey": "g", "status": "firing", "alerts": []}))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["skipped"], "no_alerts");
+}
+
+#[tokio::test]
+async fn card_template_import_validate_preview_and_crud() {
+    let h = start().await;
+
+    let (status, templates) = h.get("/api/v1/card-templates").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        templates.as_array().unwrap().len(),
+        2,
+        "应有两个内置默认模板"
+    );
+
+    // 校验：非法 schema 应失败
+    let (status, report) = h
+        .post(
+            "/api/v1/card-templates/validate",
+            json!({
+                "name": "坏卡片",
+                "kind": "card_message",
+                "card_message": {"source": "builder_json", "card_json": {"elements": []}}
+            }),
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(report["valid"], false);
+    assert!(!report["errors"].as_array().unwrap().is_empty());
+
+    // 校验 + 预览：合法卡片
+    let card_json = json!({
+        "schema": "2.0",
+        "config": {"update_multi": true},
+        "header": {"template": "${severity_color}", "title": {"tag": "plain_text", "content": "【${status_text}】${alertname}"}},
+        "body": {"elements": [{"tag": "markdown", "content": "${alerts_list}\n${unknown_var}"}]}
+    });
+    let (status, report) = h
+        .post(
+            "/api/v1/card-templates/validate",
+            json!({"name": "自定义", "kind": "card_message",
+                   "card_message": {"source": "builder_json", "card_json": card_json}}),
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(report["valid"], true, "{report}");
+    assert!(report["unknown_variables"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("unknown_var")));
+
+    let (status, preview) = h
+        .post(
+            "/api/v1/card-templates/preview",
+            json!({"name": "自定义", "kind": "card_message",
+                   "card_message": {"source": "builder_json", "card_json": card_json},
+                   "sample": "firing"}),
+        )
+        .await;
+    assert_eq!(status, 200, "{preview}");
+    let rendered = preview["rendered_card_json"].to_string();
+    assert!(
+        rendered.contains("HighCPUUsage"),
+        "预览应使用样例数据: {rendered}"
+    );
+    assert!(!rendered.contains("${"), "预览不应残留占位符");
+
+    // 创建 → 列表 → 删除
+    let (status, created) = h
+        .post(
+            "/api/v1/card-templates",
+            json!({"name": "自定义模板", "kind": "card_message",
+                   "card_message": {"source": "builder_json", "card_json": card_json}}),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let id = created["id"].as_str().unwrap().to_string();
+    assert!(created["detected_variables"].as_array().unwrap().len() >= 3);
+
+    let (_, card_only) = h.get("/api/v1/card-templates?kind=card_message").await;
+    assert_eq!(
+        card_only.as_array().unwrap().len(),
+        2,
+        "默认卡片消息模板 + 新建的"
+    );
+    let (_, feed_only) = h.get("/api/v1/card-templates?kind=app_feed_card").await;
+    assert_eq!(feed_only.as_array().unwrap().len(), 1);
+    let (_, all) = h.get("/api/v1/card-templates").await;
+    assert_eq!(all.as_array().unwrap().len(), 3);
+
+    let resp = h
+        .http
+        .delete(h.url(&format!("/api/v1/card-templates/{id}")))
+        .bearer_auth(&h.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+}
+
+#[tokio::test]
+async fn sync_is_idempotent_and_hook_rotation_invalidates_old_token() {
+    let h = start().await;
+
+    let (_, first) = h.post("/api/v1/channels/sync", json!({})).await;
+    assert_eq!(first["created"], 2);
+    let (_, second) = h.post("/api/v1/channels/sync", json!({})).await;
+    assert_eq!(second["created"], 0);
+    assert_eq!(second["updated"], 0);
+    assert_eq!(second["skipped"], 2);
+
+    // 手工创建渠道拿到 token 后轮换
+    let mut h = h;
+    // 用一个新的群避免与 sync 导入的渠道冲突
+    let (status, body) = h
+        .post(
+            "/api/v1/channels",
+            json!({
+                "name": "手工渠道", "receive_id": "oc_manual", "receive_id_type": "chat_id"
+            }),
+        )
+        .await;
+    assert_eq!(status, 201, "{body}");
+    h.channel_id = Some(body["id"].as_str().unwrap().to_string());
+    h.hook_token = Some(body["hook_token"].as_str().unwrap().to_string());
+    let old_token = h.hook_token.clone().unwrap();
+    let channel_id = h.channel_id.clone().unwrap();
+    let (_, detail) = h.get(&format!("/api/v1/channels/{channel_id}")).await;
+    let hook_id = detail["hooks"][0]["id"].as_str().unwrap().to_string();
+
+    let resp = h
+        .http
+        .post(h.url(&format!("/api/v1/hooks/{hook_id}/rotate")))
+        .bearer_auth(&h.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let rotated: Value = resp.json().await.unwrap();
+    let new_token = rotated["token"].as_str().unwrap().to_string();
+    assert_ne!(old_token, new_token);
+
+    // 旧 token 立即失效
+    let resp = h
+        .http
+        .post(h.url(&format!("/api/v1/hooks/alertmanager/{old_token}")))
+        .json(&firing_payload(1))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+
+    // 新 token 可用
+    h.hook_token = Some(new_token);
+    let (status, body) = h.push(firing_payload(1)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["action"], "send_new");
+}
+
+#[tokio::test]
+async fn manual_test_message_and_retry_endpoints() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+    let channel_id = h.channel_id.clone().unwrap();
+
+    let (status, delivery) = h
+        .post(
+            &format!("/api/v1/channels/{channel_id}/test-message"),
+            json!({"sample": "firing"}),
+        )
+        .await;
+    assert_eq!(status, 200, "{delivery}");
+    assert_eq!(delivery["kind"], "test");
+    assert_eq!(delivery["state"], "active");
+    assert_eq!(h.fake.snapshot().messages.len(), 1);
+
+    // 活跃投递不允许重试
+    let delivery_id = delivery["id"].as_str().unwrap();
+    let (status, err) = h
+        .post(
+            &format!("/api/v1/deliveries/{delivery_id}/retry"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, 409, "delivery={delivery} resp={err}");
+
+    // 手动撤回可用
+    let (status, revoked) = h
+        .post(
+            &format!("/api/v1/deliveries/{delivery_id}/revoke"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, 200, "{revoked}");
+    assert_eq!(h.fake.snapshot().recalled.len(), 1);
+}

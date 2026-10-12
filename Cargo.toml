@@ -1,0 +1,61 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/alkh-domain",
+    "crates/alkh-app",
+    "crates/alkh-infra",
+    "crates/alkh-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.82"
+description = "Forward Prometheus AlertManager alerts into Feishu/Lark via cards"
+
+[workspace.dependencies]
+alkh-domain = { path = "crates/alkh-domain" }
+alkh-app = { path = "crates/alkh-app" }
+alkh-infra = { path = "crates/alkh-infra" }
+
+# --- async runtime / web ---
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync", "fs"] }
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["trace"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2", "charset"] }
+
+# --- persistence ---
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros", "json"] }
+
+# --- serialization ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# --- misc ---
+async-trait = "0.1"
+thiserror = "2"
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+regex = "1"
+dashmap = "6"
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
+base64 = "0.22"
+aes-gcm = "0.10"
+argon2 = "0.5"
+rust-embed = "8"
+mime_guess = "2"
+urlencoding = "2"
+
+# --- observability ---
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

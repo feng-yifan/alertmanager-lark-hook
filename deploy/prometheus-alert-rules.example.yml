@@ -1,0 +1,38 @@
+# 演示用告警规则：可配合 promtool 手动触发，验证端到端链路。
+#
+#   promtool check rules deploy/prometheus-alert-rules.example.yml
+#
+# 触发方式（让表达式恒为真即可）：
+#   - 把 expr 临时改成 `vector(1)` 或依赖 up == 0
+groups:
+  - name: alkh-demo
+    rules:
+      - alert: DemoInstanceDown
+        expr: up{job="node"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: sre
+        annotations:
+          summary: "实例 {{ $labels.instance }} 无法抓取"
+          description: "job={{ $labels.job }} 已超过 1 分钟不可用。"
+          runbook_url: "https://runbook.example.com/instance-down"
+
+      - alert: DemoHighCPU
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+          team: sre
+        annotations:
+          summary: "{{ $labels.instance }} CPU 使用率超过 80%"
+          description: "当前值 {{ $value | printf \"%.1f\" }}%"
+
+      - alert: DemoHighMemory
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} 内存使用率超过 85%"
+          description: "当前值 {{ $value | printf \"%.1f\" }}%"

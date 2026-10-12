@@ -1,0 +1,538 @@
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import {
+  ApiError,
+  errorDetails,
+  errorMessage,
+  getChannelPolicy,
+  listCardTemplates,
+  putChannelPolicy,
+} from '../../api';
+import {
+  Badge,
+  Banner,
+  Button,
+  Card,
+  ErrorState,
+  Field,
+  Input,
+  JsonBlock,
+  Loading,
+  Options,
+  RadioGroup,
+  Select,
+  Switch,
+} from '../../components/ui';
+import { useAsync } from '../../hooks';
+import {
+  DECISION_TABLE,
+  MATCH_OP_LABEL,
+  R11_FILTER_NOTE,
+  R4_APP_FEED_NOTE,
+  R4_CARD_MESSAGE_CAVEAT,
+  R5_MUTE_NOTE,
+} from '../../labels';
+import { enumOptions, useMeta } from '../../meta';
+import { useToast } from '../../toast';
+import type {
+  CardTemplate,
+  EnumOption,
+  GroupUpdatePolicy,
+  LabelMatcher,
+  MatchOp,
+  MessageType,
+  NotificationPolicy,
+  NotificationPolicyInput,
+  RepeatPolicy,
+  ResolvedPolicy,
+} from '../../types';
+import { formatDateTime, isoToLocalInput, localInputToIso, shortId } from '../../utils';
+
+interface Props {
+  channelId: string;
+  channelName: string;
+  /** parent reload (hook counts / header) */
+  onSaved: () => void;
+}
+
+interface Draft {
+  message_type: MessageType;
+  card_template_id: string;
+  pin_unresolved: boolean;
+  repeat_policy: RepeatPolicy;
+  resolved_policy: ResolvedPolicy;
+  group_update_policy: GroupUpdatePolicy;
+  label_matchers: LabelMatcher[];
+  aggregation_window_secs: string;
+  min_send_interval_secs: string;
+  max_alerts_per_message: string;
+  mute_until: string;
+}
+
+/** Defaults mirror the example policy in `docs/api.md` §3. */
+const DEFAULT_DRAFT: Draft = {
+  message_type: 'card_message',
+  card_template_id: '',
+  pin_unresolved: false,
+  repeat_policy: 'suppress',
+  resolved_policy: 'send',
+  group_update_policy: 'update_previous',
+  label_matchers: [],
+  aggregation_window_secs: '0',
+  min_send_interval_secs: '0',
+  max_alerts_per_message: '20',
+  mute_until: '',
+};
+
+interface DraftErrors {
+  aggregation?: string;
+  minInterval?: string;
+  maxAlerts?: string;
+  matchers: Record<number, string>;
+}
+
+const NO_ERRORS: DraftErrors = { matchers: {} };
+
+function toRadio<T extends string>(options: EnumOption[]): Array<{ value: T; label: string }> {
+  return options.map((option) => ({ value: option.value as T, label: option.label }));
+}
+
+function templateKindLabel(template: CardTemplate): string {
+  return template.kind === 'card_message' ? '卡片消息' : '应用消息流消息';
+}
+
+export default function PolicyTab({ channelId, channelName, onSaved }: Props): JSX.Element {
+  const toast = useToast();
+  const { meta } = useMeta();
+
+  const { data, loading, error, reload } = useAsync(async (signal) => {
+    const [policy, templates] = await Promise.all([
+      getChannelPolicy(channelId, signal).catch((cause: unknown) => {
+        if (cause instanceof ApiError && cause.status === 404) return null;
+        throw cause;
+      }),
+      listCardTemplates({}, signal).catch(() => null),
+    ]);
+    return { policy, templates };
+  }, [channelId]);
+
+  const [draft, setDraft] = useState<Draft>(DEFAULT_DRAFT);
+  const [errors, setErrors] = useState<DraftErrors>(NO_ERRORS);
+  const [saveError, setSaveError] = useState<unknown>(null);
+  const [saving, setSaving] = useState(false);
+
+  const policy = data?.policy ?? null;
+
+  useEffect(() => {
+    if (!data) return;
+    setDraft(data.policy ? draftFromPolicy(data.policy) : DEFAULT_DRAFT);
+    setErrors(NO_ERRORS);
+    setSaveError(null);
+  }, [data]);
+
+  const templates: CardTemplate[] = useMemo(() => data?.templates?.items ?? [], [data]);
+
+  const matchingTemplates = useMemo(
+    () => templates.filter((template) => template.kind === draft.message_type),
+    [templates, draft.message_type],
+  );
+
+  const selectedTemplate = templates.find((template) => template.id === draft.card_template_id);
+  const selectedTemplateMissing = draft.card_template_id !== '' && !selectedTemplate;
+
+  const templateOptions = useMemo(() => {
+    const options = matchingTemplates.map((template) => ({
+      value: template.id,
+      label: `${template.name}${template.is_default ? ' · 默认' : ''}（${templateKindLabel(template)}）`,
+    }));
+    if (draft.card_template_id && !options.some((option) => option.value === draft.card_template_id)) {
+      const referenced = templates.find((template) => template.id === draft.card_template_id);
+      options.push({
+        value: draft.card_template_id,
+        label: referenced
+          ? `${referenced.name}（${templateKindLabel(referenced)} · 与消息类型不匹配）`
+          : `未知模板 ${shortId(draft.card_template_id)}（不在列表中）`,
+      });
+    }
+    return options;
+  }, [matchingTemplates, templates, draft.card_template_id]);
+
+  const validate = (value: Draft): DraftErrors => {
+    const result: DraftErrors = { matchers: {} };
+
+    const aggregation = Number(value.aggregation_window_secs);
+    if (!Number.isInteger(aggregation) || aggregation < 0 || aggregation > 3600) {
+      result.aggregation = '聚合窗口需为 0–3600 的整数秒（business-rules §6）';
+    }
+    const minInterval = Number(value.min_send_interval_secs);
+    if (!Number.isInteger(minInterval) || minInterval < 0 || minInterval > 3600) {
+      result.minInterval = '最小发送间隔需为 0–3600 的整数秒（business-rules §6）';
+    }
+    const maxAlerts = Number(value.max_alerts_per_message);
+    if (!Number.isInteger(maxAlerts) || maxAlerts < 1 || maxAlerts > 200) {
+      result.maxAlerts = '告警上限需为 1–200 的整数（business-rules §6）';
+    }
+    value.label_matchers.forEach((matcher, index) => {
+      if (!matcher.name.trim()) {
+        result.matchers[index] = 'label 名称不能为空';
+        return;
+      }
+      if (!matcher.value.trim() && matcher.value !== '') {
+        result.matchers[index] = '匹配值不能为空';
+        return;
+      }
+      if ((matcher.op === '=~' || matcher.op === '!~') && matcher.value !== '') {
+        try {
+          // eslint-disable-next-line no-new
+          new RegExp(matcher.value);
+        } catch (cause) {
+          result.matchers[index] = `正则无法编译：${cause instanceof Error ? cause.message : String(cause)}`;
+        }
+      }
+    });
+    return result;
+  };
+
+  const hasErrors = (value: DraftErrors): boolean =>
+    Boolean(value.aggregation || value.minInterval || value.maxAlerts) || Object.keys(value.matchers).length > 0;
+
+  const submit = async (event?: FormEvent) => {
+    event?.preventDefault();
+    const found = validate(draft);
+    setErrors(found);
+    setSaveError(null);
+    if (hasErrors(found)) {
+      toast.error('请先修正表单中的校验错误');
+      return;
+    }
+    const payload: NotificationPolicyInput = {
+      message_type: draft.message_type,
+      card_template_id: draft.card_template_id || null,
+      pin_unresolved: draft.pin_unresolved,
+      repeat_policy: draft.repeat_policy,
+      resolved_policy: draft.resolved_policy,
+      group_update_policy: draft.group_update_policy,
+      label_matchers: draft.label_matchers.map((matcher) => ({
+        name: matcher.name.trim(),
+        op: matcher.op,
+        value: matcher.value,
+      })),
+      aggregation_window_secs: Number(draft.aggregation_window_secs),
+      min_send_interval_secs: Number(draft.min_send_interval_secs),
+      max_alerts_per_message: Number(draft.max_alerts_per_message),
+      mute_until: draft.mute_until ? localInputToIso(draft.mute_until) : null,
+    };
+    setSaving(true);
+    try {
+      await putChannelPolicy(channelId, payload);
+      toast.success('通知策略已保存');
+      reload();
+      onSaved();
+    } catch (cause) {
+      setSaveError(cause);
+      toast.error(errorMessage(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const updateMatcher = (index: number, patch: Partial<LabelMatcher>) => {
+    setDraft((current) => ({
+      ...current,
+      label_matchers: current.label_matchers.map((matcher, position) =>
+        position === index ? { ...matcher, ...patch } : matcher,
+      ),
+    }));
+  };
+
+  if (loading && !data) return <Loading label="正在加载通知策略…" />;
+  if (error && !data) return <ErrorState error={error} onRetry={reload} />;
+
+  return (
+    <form onSubmit={(event) => void submit(event)}>
+      {!policy ? (
+        <Banner tone="info">
+          渠道「{channelName}」当前没有存储的策略（GET /channels/:id/policy 返回 404）。下面的表单使用契约默认值，
+          点击「保存策略」后会创建策略。
+        </Banner>
+      ) : null}
+
+      {saveError ? (
+        <Banner tone="error">
+          <div>{errorMessage(saveError)}</div>
+          {errorDetails(saveError) ? (
+            <div className="mt-8">
+              <JsonBlock value={errorDetails(saveError)} maxHeight={220} />
+            </div>
+          ) : null}
+        </Banner>
+      ) : null}
+
+      <Card
+        title="消息类型与卡片模板"
+        actions={policy ? <span className="faint small">策略更新于 {formatDateTime(policy.updated_at)}</span> : null}
+      >
+        <Field label="message_type" required hint="卡片消息走 im/v1/messages；应用消息流走 im/v2/app_feed_card">
+          <RadioGroup<MessageType>
+            value={draft.message_type}
+            options={toRadio<MessageType>(meta.message_types)}
+            onChange={(next) =>
+              setDraft((current) => {
+                const stillMatches = templates.some(
+                  (template) => template.id === current.card_template_id && template.kind === next,
+                );
+                return { ...current, message_type: next, card_template_id: stillMatches ? current.card_template_id : '' };
+              })
+            }
+          />
+        </Field>
+
+        <Field
+          label="card_template_id"
+          hint="仅列出与 message_type 匹配的模板（domain-model §5 交叉校验）；留空时运行时使用内置默认模板（R12 fallback=default_template）"
+        >
+          <Select
+            value={draft.card_template_id}
+            onChange={(event) => setDraft((current) => ({ ...current, card_template_id: event.target.value }))}
+          >
+            <option value="">（无 · 使用内置默认模板）</option>
+            {templateOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
+        </Field>
+
+        {selectedTemplateMissing ? (
+          <Banner tone="warn">
+            策略引用的模板 {shortId(draft.card_template_id)} 不在当前模板列表中（可能已被删除，R12 禁止保存失效引用）。
+            运行时若模板失效会回退到内置默认模板；请重新选择一个模板后再保存。
+          </Banner>
+        ) : null}
+
+        <div className="mt-8">
+          <Switch
+            checked={draft.pin_unresolved}
+            onChange={(next) => setDraft((current) => ({ ...current, pin_unresolved: next }))}
+            label="pin_unresolved · pin 未解决告警"
+            hint={draft.message_type === 'app_feed_card' ? R4_APP_FEED_NOTE : R4_CARD_MESSAGE_CAVEAT}
+          />
+        </div>
+        {draft.message_type === 'card_message' ? (
+          <div className="callout mt-8">{R4_CARD_MESSAGE_CAVEAT}</div>
+        ) : (
+          <div className="callout info mt-8">{R4_APP_FEED_NOTE}</div>
+        )}
+      </Card>
+
+      <Card title="投递策略" subtitle="对应 docs/business-rules.md §4 决策表">
+        <div className="grid-3">
+          <Field label="repeat_policy" hint="Repeated（重复通知）事件">
+            <RadioGroup<RepeatPolicy>
+              value={draft.repeat_policy}
+              options={toRadio<RepeatPolicy>(meta.repeat_policies)}
+              onChange={(next) => setDraft((current) => ({ ...current, repeat_policy: next }))}
+            />
+          </Field>
+          <Field label="resolved_policy" hint="Resolved（全部恢复）事件">
+            <RadioGroup<ResolvedPolicy>
+              value={draft.resolved_policy}
+              options={toRadio<ResolvedPolicy>(meta.resolved_policies)}
+              onChange={(next) => setDraft((current) => ({ ...current, resolved_policy: next }))}
+            />
+          </Field>
+          <Field label="group_update_policy" hint="Updated（分组内容变化）事件">
+            <RadioGroup<GroupUpdatePolicy>
+              value={draft.group_update_policy}
+              options={toRadio<GroupUpdatePolicy>(meta.group_update_policies)}
+              onChange={(next) => setDraft((current) => ({ ...current, group_update_policy: next }))}
+            />
+          </Field>
+        </div>
+
+        <div className="table-wrap mt-8">
+          <table className="data">
+            <thead>
+              <tr>
+                <th>事件</th>
+                <th>策略字段</th>
+                <th>取值</th>
+                <th>动作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {DECISION_TABLE.map((row, index) => (
+                <tr key={`${row.event}-${row.value}-${index}`}>
+                  <td className="nowrap">{row.event}</td>
+                  <td className="mono">{row.field}</td>
+                  <td className="nowrap">
+                    {row.valueLabel}
+                    {row.field !== '—' ? <span className="faint small mono"> {row.value}</span> : null}
+                  </td>
+                  <td>{row.action}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <Card title="标签过滤（label_matchers）">
+        <div className="callout info mb-16">{R11_FILTER_NOTE}</div>
+        {draft.label_matchers.length === 0 ? (
+          <p className="faint small">未配置匹配条件 —— 全部告警通过。</p>
+        ) : (
+          draft.label_matchers.map((matcher, index) => (
+            <div key={index}>
+              <div className="matcher-row">
+                <Input
+                  value={matcher.name}
+                  placeholder="label 名称，如 severity"
+                  aria-label="label 名称"
+                  onChange={(event) => updateMatcher(index, { name: event.target.value })}
+                />
+                <Select
+                  value={matcher.op}
+                  aria-label="匹配操作"
+                  onChange={(event) => updateMatcher(index, { op: event.target.value as MatchOp })}
+                >
+                  <Options options={enumOptions(meta.match_ops, matcher.op)} />
+                </Select>
+                <Input
+                  className="mono"
+                  value={matcher.value}
+                  placeholder={matcher.op === '=~' || matcher.op === '!~' ? '正则，如 critical|warning' : '匹配值'}
+                  aria-label="匹配值"
+                  onChange={(event) => updateMatcher(index, { value: event.target.value })}
+                />
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() =>
+                    setDraft((current) => ({
+                      ...current,
+                      label_matchers: current.label_matchers.filter((_, position) => position !== index),
+                    }))
+                  }
+                >
+                  删除
+                </Button>
+              </div>
+              {errors.matchers[index] ? <div className="field-error mb-8">{errors.matchers[index]}</div> : null}
+            </div>
+          ))
+        )}
+        <div className="row">
+          <Button
+            size="sm"
+            onClick={() =>
+              setDraft((current) => ({
+                ...current,
+                label_matchers: [
+                  ...current.label_matchers,
+                  { name: 'severity', op: '=~', value: 'critical|warning' } satisfies LabelMatcher,
+                ],
+              }))
+            }
+          >
+            添加匹配条件
+          </Button>
+          <span className="faint small">
+            操作符：
+            {Object.entries(MATCH_OP_LABEL)
+              .map(([value, text]) => `${text} ${value}`)
+              .join(' · ')}
+          </span>
+        </div>
+      </Card>
+
+      <Card title="聚合、限流与静默">
+        <div className="form-grid">
+          <Field
+            label="aggregation_window_secs"
+            hint="R6：>0 时同一 (hook, group_key) 在窗口内的事件合并为一次决策，取最后一个事件的状态与并集告警集；窗口内无新事件时冲刷。0 = 关闭"
+            error={errors.aggregation}
+          >
+            <Input
+              type="number"
+              min={0}
+              max={3600}
+              value={draft.aggregation_window_secs}
+              onChange={(event) => setDraft((current) => ({ ...current, aggregation_window_secs: event.target.value }))}
+            />
+          </Field>
+          <Field
+            label="min_send_interval_secs"
+            hint="R7：同一渠道两次发送的最小间隔；未满足时动作延迟到窗口末端合并执行（不丢弃）。0 = 关闭"
+            error={errors.minInterval}
+          >
+            <Input
+              type="number"
+              min={0}
+              max={3600}
+              value={draft.min_send_interval_secs}
+              onChange={(event) => setDraft((current) => ({ ...current, min_send_interval_secs: event.target.value }))}
+            />
+          </Field>
+          <Field label="max_alerts_per_message" hint="R8：超出的告警折叠为「+N more」；AlertManager 侧已截断时提示总数为下界" error={errors.maxAlerts}>
+            <Input
+              type="number"
+              min={1}
+              max={200}
+              value={draft.max_alerts_per_message}
+              onChange={(event) => setDraft((current) => ({ ...current, max_alerts_per_message: event.target.value }))}
+            />
+          </Field>
+          <Field label="mute_until" hint={R5_MUTE_NOTE}>
+            <div className="row tight">
+              <Input
+                type="datetime-local"
+                value={draft.mute_until}
+                onChange={(event) => setDraft((current) => ({ ...current, mute_until: event.target.value }))}
+                style={{ width: 220 }}
+              />
+              <Button size="sm" onClick={() => setDraft((current) => ({ ...current, mute_until: '' }))}>
+                清除静默
+              </Button>
+            </div>
+            <div className="hint">
+              {draft.mute_until
+                ? `静默至本地时间 ${draft.mute_until.replace('T', ' ')}（提交为 RFC 3339 UTC）`
+                : '当前无静默'}
+            </div>
+          </Field>
+        </div>
+      </Card>
+
+      <div className="row" style={{ justifyContent: 'flex-end' }}>
+        {draft.card_template_id && selectedTemplate ? (
+          <Badge tone="muted">
+            已选模板：{selectedTemplate.name}（{templateKindLabel(selectedTemplate)}）
+          </Badge>
+        ) : null}
+        <Button onClick={() => setDraft(policy ? draftFromPolicy(policy) : DEFAULT_DRAFT)} disabled={saving}>
+          重置
+        </Button>
+        <Button variant="primary" type="submit" loading={saving}>
+          保存策略
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+function draftFromPolicy(policy: NotificationPolicy): Draft {
+  return {
+    message_type: policy.message_type,
+    card_template_id: policy.card_template_id ?? '',
+    pin_unresolved: policy.pin_unresolved,
+    repeat_policy: policy.repeat_policy,
+    resolved_policy: policy.resolved_policy,
+    group_update_policy: policy.group_update_policy,
+    label_matchers: policy.label_matchers.map((matcher) => ({ ...matcher })),
+    aggregation_window_secs: String(policy.aggregation_window_secs),
+    min_send_interval_secs: String(policy.min_send_interval_secs),
+    max_alerts_per_message: String(policy.max_alerts_per_message),
+    mute_until: isoToLocalInput(policy.mute_until),
+  };
+}

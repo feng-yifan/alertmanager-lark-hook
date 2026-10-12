@@ -1,0 +1,53 @@
+# AlertManager 示例配置
+#
+# 使用步骤：
+#   1. 在管理后台创建/同步一个「消息渠道」
+#   2. 在该渠道的「接收 Hook」标签页创建一个 Hook，复制一次性显示的完整 URL
+#   3. 把下面的 <HOOK_TOKEN> 替换为 URL 中的 token（或整段替换 url）
+#
+# 位置：本文件按 docker compose 的 demo profile 挂载到容器内 /etc/alertmanager/alertmanager.yml
+
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: lark-ops
+  # 分组维度决定投递到本服务时的 groupKey；本服务以 (hook, groupKey) 为告警分组主键
+  group_by: ['alertname', 'severity', 'namespace']
+  group_wait: 30s
+  group_interval: 5m
+  # 本服务的「重复告警」策略会与 repeat_interval 配合：
+  #   - 若渠道策略为「不发送」，收到重复通知时只更新内部状态
+  #   - 若为「发送」，每次重复通知都会发一条新消息
+  repeat_interval: 4h
+  routes:
+    # 严重告警可以先送到一个专用渠道（对应另一个 Hook）
+    - matchers:
+        - severity = "critical"
+      receiver: lark-critical
+      group_wait: 10s
+      repeat_interval: 1h
+    - matchers:
+        - alertname =~ "Watchdog|InfoInhibitor"
+      receiver: "null"
+      continue: false
+
+receivers:
+  - name: lark-ops
+    webhook_configs:
+      - url: http://alkh:8080/api/v1/hooks/alertmanager/<HOOK_TOKEN>
+        send_resolved: true # 必须为 true，否则本服务收不到「解决告警」
+        max_alerts: 50 # 超出部分由 AlertManager 截断，payload 里体现为 truncatedAlerts
+        timeout: 10s
+
+  - name: lark-critical
+    webhook_configs:
+      - url: http://alkh:8080/api/v1/hooks/alertmanager/<CRITICAL_HOOK_TOKEN>
+        send_resolved: true
+
+  - name: "null"
+
+inhibit_rules:
+  - source_matchers: [severity = "critical"]
+    target_matchers: [severity =~ "warning|info"]
+    equal: ['alertname', 'instance']

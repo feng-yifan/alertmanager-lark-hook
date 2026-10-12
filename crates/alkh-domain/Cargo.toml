@@ -1,0 +1,19 @@
+[package]
+name = "alkh-domain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Domain layer: aggregates, value objects, domain services and ports (no I/O)"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+regex.workspace = true
+sha2.workspace = true
+rand.workspace = true
+hex.workspace = true

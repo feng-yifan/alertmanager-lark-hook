@@ -1,0 +1,12 @@
+/target
+/data
+/web/node_modules
+/web/dist
+# 前端构建产物：只跟踪占位 index.html，真实产物由 `make web` 生成
+/crates/alkh-server/web-dist/assets/
+*.db
+*.db-shm
+*.db-wal
+master.key
+.env
+.DS_Store

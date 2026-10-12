@@ -1,0 +1,23 @@
+[package]
+name = "alkh-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Application layer: use cases, notification decision table, card rendering"
+
+[dependencies]
+alkh-domain.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+regex.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+dashmap.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
