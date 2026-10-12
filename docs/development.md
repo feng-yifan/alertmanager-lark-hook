@@ -182,10 +182,6 @@ git push origin v0.1.0
 
 用内置的 `GITHUB_TOKEN` 推送（`permissions: packages: write`），不需要额外配置 secret。
 
-> ⚠️ **首次推送后，ghcr 上的包默认是私有的。** 要在集群或其他机器上拉取，需要到
-> GitHub → Packages → 该包 → Package settings 把可见性改成 **Public**，
-> 或者保留私有并配置 `imagePullSecrets`。
-
 默认只构建 `linux/amd64`。需要 `linux/arm64`（树莓派 / Apple Silicon 节点）时，
 在 workflow 里加上 `docker/setup-qemu-action` 并把 `platforms` 改成 `linux/amd64,linux/arm64`
 —— 注意 Dockerfile 内的 Rust 编译在 QEMU 模拟下会慢约一个数量级。

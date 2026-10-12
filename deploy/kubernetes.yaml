@@ -126,8 +126,6 @@ spec:
         - name: alkh
           # 官方镜像在 GitHub Container Registry，由 .github/workflows/publish.yml 推送。
           # 建议把 :latest 换成具体版本（如 :0.1.0）以便回滚与审计。
-          # 若 ghcr 上的包仍为私有，需要在 GitHub 上把它设为 public，
-          # 或在这里配置 imagePullSecrets 并把包授权给对应 ServiceAccount。
           image: ghcr.io/fengyifan/alertmanager-lark-hook:latest
           imagePullPolicy: IfNotPresent
           ports:

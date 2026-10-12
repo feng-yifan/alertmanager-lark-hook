@@ -89,17 +89,6 @@ Prometheus ──▶ AlertManager ──webhook──▶ alertmanager-lark-hook 
 
 ### 2.2 部署方式
 
-**官方镜像**（每次打 tag 会自动构建并推送到 GitHub Container Registry）：
-
-```bash
-ghcr.io/fengyifan/alertmanager-lark-hook:latest     # 跟随主线
-ghcr.io/fengyifan/alertmanager-lark-hook:0.1.0      # 固定版本，生产建议用这个
-```
-
-> ⚠️ ghcr 上的包**首次推送后默认是私有的**。要在集群/其他机器上拉取，需要到
-> GitHub → 你的头像 → Packages → 该包 → Package settings，把可见性改成 **Public**；
-> 或保留私有并配置 `imagePullSecrets`。
-
 **方式一：Docker Compose（单机，最省事）**
 
 ```bash
@@ -113,7 +102,7 @@ docker compose up -d --build
 # 打开 http://<机器地址>:8080
 ```
 
-`--build` 会从源码构建（首次约 3–5 分钟）；只想用官方镜像就去掉 `--build`。
+首次构建约 3–5 分钟。
 
 想顺带起一个演示用的 AlertManager：
 
