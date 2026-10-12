@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 CARGO ?= cargo
 PNPM  ?= pnpm
-IMAGE ?= alertmanager-lark-hook:latest
+IMAGE ?= ghcr.io/fengyifan/alertmanager-lark-hook:latest
 WEB_DIST := crates/alkh-server/web-dist
 
 .DEFAULT_GOAL := help

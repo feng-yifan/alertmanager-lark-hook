@@ -1,0 +1,67 @@
+name: Publish image
+
+# 触发方式：
+#   - 推送 tag（形如 v0.1.0）→ 产出 0.1.0 / 0.1 / 0 / sha-xxxxxxx 标签
+#   - 推送 main             → 产出 main / latest / sha-xxxxxxx 标签
+#   - 手动触发
+#
+# 推送到 ghcr.io/<owner>/<repo>，即 ghcr.io/fengyifan/alertmanager-lark-hook
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+# ghcr 推送需要 packages: write；用内置 GITHUB_TOKEN 即可，无需额外 secret
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  publish:
+    name: 构建并推送镜像
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 准备 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 计算标签与 labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          # 只构建 amd64。若需要 arm64（树莓派 / Apple Silicon 节点），
+          # 加上 setup-qemu-action 并把下面改成 linux/amd64,linux/arm64——
+          # 注意 Dockerfile 里的 Rust 编译在 QEMU 模拟下会慢一个数量级（约 20–40 分钟）。
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

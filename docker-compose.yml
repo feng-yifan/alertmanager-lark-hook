@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: deploy/Dockerfile
-    image: ${ALKH_IMAGE:-alertmanager-lark-hook:latest}
+    image: ${ALKH_IMAGE:-ghcr.io/fengyifan/alertmanager-lark-hook:latest}
     restart: unless-stopped
     ports:
       - "${ALKH_PORT:-8080}:8080"

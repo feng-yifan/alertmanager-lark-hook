@@ -1,0 +1,48 @@
+# alertmanager-lark-hook —— 可选：Ingress 暴露
+#
+# 前置条件：集群里已经装了 ingress controller（本文件按 nginx ingress 写）。
+# 检查：
+#   kubectl get ingressclass
+# 若返回 "No resources found"，说明还没装 controller，请先安装，或改用
+# deploy/kubernetes.yaml 里的 NodePort 方案。
+#
+# 应用：
+#   kubectl apply -f deploy/kubernetes-ingress.yaml
+#
+# 应用后把 ALKH_PUBLIC_BASE_URL 设成这里 hosts 的 https 地址，并重启 Deployment：
+#   kubectl -n alertmanager-lark-hook rollout restart deploy/alkh
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: alkh
+  namespace: alertmanager-lark-hook
+  labels:
+    app.kubernetes.io/name: alertmanager-lark-hook
+  annotations:
+    # AlertManager 的 payload 很小，限制一下更安全
+    nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+    # 接收端点有超时下限，避免网络抖动导致 AlertManager 判定失败
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+    # ⚠️ 接收地址 /api/v1/hooks/alertmanager/{token} 靠 token 鉴权，
+    #    不要在这里加 basic auth 之类的额外鉴权，否则 AlertManager 会 401。
+spec:
+  # 改成你集群里实际的 IngressClass 名称
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - alkh.example.com
+      secretName: alkh-tls
+  rules:
+    - host: alkh.example.com
+      http:
+        paths:
+          # 必须把整个 / 都转发过来：管理后台前端与 API 在同一个端口上
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: alkh
+                port:
+                  name: http

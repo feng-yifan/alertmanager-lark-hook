@@ -80,7 +80,7 @@ Prometheus ──▶ AlertManager ──webhook──▶ alertmanager-lark-hook 
 
 | 需要什么 | 说明 |
 |---|---|
-| 一台能跑容器的机器 | amd64 / arm64 均可；内存 128 MB 足够 |
+| 一台能跑容器的机器，或一个已有 Kubernetes 集群 | amd64 / arm64 均可；内存 128 MB 足够 |
 | 一个飞书企业自建应用 | 需要机器人能力与若干权限，见 **§4** |
 | AlertManager | 任意支持 `webhook_configs` 的版本（协议版本 4） |
 | 一个访问地址 | 能同时被浏览器和 AlertManager 访问到；建议配 HTTPS |
@@ -89,18 +89,31 @@ Prometheus ──▶ AlertManager ──webhook──▶ alertmanager-lark-hook 
 
 ### 2.2 部署方式
 
-**方式一：Docker Compose（推荐）**
+**官方镜像**（每次打 tag 会自动构建并推送到 GitHub Container Registry）：
 
 ```bash
-git clone <本仓库> && cd alertmanager-lark-hook
+ghcr.io/fengyifan/alertmanager-lark-hook:latest     # 跟随主线
+ghcr.io/fengyifan/alertmanager-lark-hook:0.1.0      # 固定版本，生产建议用这个
+```
+
+> ⚠️ ghcr 上的包**首次推送后默认是私有的**。要在集群/其他机器上拉取，需要到
+> GitHub → 你的头像 → Packages → 该包 → Package settings，把可见性改成 **Public**；
+> 或保留私有并配置 `imagePullSecrets`。
+
+**方式一：Docker Compose（单机，最省事）**
+
+```bash
+git clone https://github.com/fengyifan/alertmanager-lark-hook.git && cd alertmanager-lark-hook
 cp .env.example .env
 
-# 生成一个主密钥，填进 .env 的 ALKH_MASTER_KEY
+# 生成主密钥，填进 .env 的 ALKH_MASTER_KEY
 openssl rand -hex 32
 
-docker compose up -d
+docker compose up -d --build
 # 打开 http://<机器地址>:8080
 ```
+
+`--build` 会从源码构建（首次约 3–5 分钟）；只想用官方镜像就去掉 `--build`。
 
 想顺带起一个演示用的 AlertManager：
 
@@ -109,19 +122,33 @@ docker compose --profile demo up -d
 # AlertManager: http://<机器地址>:9093
 ```
 
-**方式二：docker run**
+**方式二：Kubernetes**
+
+清单在 [`deploy/kubernetes.yaml`](deploy/kubernetes.yaml)，包含 Namespace、Secret、ConfigMap、PVC、Deployment、Service；另有一份可选的 [`deploy/kubernetes-ingress.yaml`](deploy/kubernetes-ingress.yaml)。
 
 ```bash
-docker build -f deploy/Dockerfile -t alertmanager-lark-hook:latest .
-
-docker run -d --name alkh \
-  -p 8080:8080 \
-  -v alkh-data:/data \
-  -e ALKH_PUBLIC_BASE_URL=https://alkh.example.com \
-  -e ALKH_ADMIN_PASSWORD='换成你自己的强密码' \
-  -e ALKH_MASTER_KEY="$(openssl rand -hex 32)" \
-  alertmanager-lark-hook:latest
+kubectl apply -f deploy/kubernetes.yaml
 ```
+
+**部署前必须改三处**（清单里都有 ⚠️ 标记）：
+
+1. `Secret` 的 `ALKH_MASTER_KEY`（`openssl rand -hex 32`）与 `ALKH_ADMIN_PASSWORD`
+2. `ConfigMap` 的 `ALKH_PUBLIC_BASE_URL`（否则接收地址不完整）
+3. `image` 建议从 `:latest` 改为固定版本号
+
+暴露服务的三种方式：
+
+| 场景 | 做法 |
+|---|---|
+| 先试跑 | `kubectl -n alertmanager-lark-hook port-forward svc/alkh 8080:80` |
+| 单机 / 内网 | 把 Service 改成 `NodePort`（清单末尾有注释示例） |
+| 有 ingress controller | 应用 `deploy/kubernetes-ingress.yaml` |
+
+**三个必须注意的集群侧约束**（清单注释里也写了）：
+
+- **只能单副本**。嵌入式 SQLite 是单写者；聚合窗口、发送限流、卡片更新序号都是**进程内**状态，多副本会导致重复发送与序号冲突。同理不要配 HPA。需要更高可用请部署多套独立实例，各自服务不同渠道。
+- **更新策略必须是 `Recreate`**。`ReadWriteOnce` 的 PVC 无法同时挂给两个 Pod，滚动更新会卡在等新 Pod 就绪。
+- **确认 StorageClass**。清单里的 PVC 留空 `storageClassName` 以使用默认 class；如果你的集群没有默认 StorageClass，PVC 会一直 `Pending`，需要自行准备 PV 并指定 class（清单末尾有单机 `hostPath` 示例）。SQLite 对 NFS 等共享存储的锁语义支持有限，**优先本地盘**。
 
 **方式三：单文件二进制**
 

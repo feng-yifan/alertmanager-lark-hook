@@ -1,0 +1,33 @@
+# Docker 构建上下文排除项
+#
+# 没有这个文件时，构建会把 target/（可达数 GB）、.git/、node_modules/ 一起发给
+# daemon，CI 上尤其明显。
+
+# --- 构建产物（镜像内会重新生成）---
+/target
+/web/dist
+/web/node_modules
+/crates/alkh-server/web-dist
+# 开发时 `make run` 产生的本地数据库
+/data
+
+# --- 与镜像无关的目录 ---
+/.git
+/.github
+/.idea
+/.vscode
+/docs
+/scripts
+/deploy
+
+# --- 本地配置与敏感文件 ---
+/.env
+*.db
+*.db-shm
+*.db-wal
+
+# --- 文档与元文件 ---
+*.md
+/LICENSE
+/.gitignore
+/.dockerignore

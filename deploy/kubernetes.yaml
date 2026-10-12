@@ -1,0 +1,241 @@
+# alertmanager-lark-hook —— Kubernetes 部署清单
+#
+# 用法：
+#   kubectl apply -f deploy/kubernetes.yaml
+#
+# 真正部署前请先改三处（都有 ⚠️ 标记）：
+#   1. Secret 里的 ALKH_MASTER_KEY / ALKH_ADMIN_PASSWORD
+#   2. ConfigMap 里的 ALKH_PUBLIC_BASE_URL
+#   3. Deployment 里的 image（默认已指向 ghcr，按需改成固定版本或私有仓库）
+#
+# 访问入口：本文件只给 ClusterIP Service。三种暴露方式任选其一：
+#   - 先试跑：kubectl -n alertmanager-lark-hook port-forward svc/alkh 8080:80
+#   - 单机/内网：把 Service 改成 NodePort（文件末尾有注释掉的示例）
+#   - 正式：装好 ingress controller 后应用 deploy/kubernetes-ingress.yaml
+#
+# ⚠️ 本应用**必须单副本**运行，原因写在 Deployment 的注释里，请勿改成多副本。
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: alertmanager-lark-hook
+  labels:
+    app.kubernetes.io/name: alertmanager-lark-hook
+
+---
+# 敏感配置。生产环境建议改用 SealedSecret / External Secrets / Vault，
+# 而不是把明文放进版本库。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alkh-secrets
+  namespace: alertmanager-lark-hook
+type: Opaque
+stringData:
+  # ⚠️ 必须替换：32 字节主密钥，64 位 hex 或 base64
+  #    生成：openssl rand -hex 32
+  #    作用：加密数据库中保存的飞书 app_secret。
+  #    一旦丢失，已保存的 app_secret 将无法解密，只能去管理后台重填。
+  #    注意：保持占位值会导致 Pod 启动失败（这是故意的，避免用了错误的密钥）。
+  ALKH_MASTER_KEY: "REPLACE_WITH_openssl_rand_hex_32"
+  # ⚠️ 必须替换：首次启动创建管理员用的密码。仅在第一次启动生效，
+  #    已有数据卷时改动它不会影响已存在的账号。
+  ALKH_ADMIN_PASSWORD: "REPLACE_WITH_A_STRONG_PASSWORD"
+
+---
+# 非敏感配置
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alkh-config
+  namespace: alertmanager-lark-hook
+data:
+  ALKH_HTTP_ADDR: "0.0.0.0:8080"
+  ALKH_DATA_DIR: "/data"
+  ALKH_LOG_LEVEL: "info"
+  # 集群里建议输出 JSON 日志，便于采集
+  ALKH_LOG_JSON: "true"
+  # ⚠️ 必须替换：生成 AlertManager 接收地址用的对外基址。
+  #    不设置的话，界面上的接收地址只有路径，无法直接粘贴给 AlertManager。
+  ALKH_PUBLIC_BASE_URL: "https://alkh.example.com"
+  # Lark 国际版改为 https://open.larksuite.com
+  ALKH_LARK_BASE_URL: "https://open.feishu.cn"
+  # 通过 HTTPS 访问时必须为 true，会话 Cookie 会带 Secure
+  ALKH_COOKIE_SECURE: "true"
+
+---
+# 数据卷：SQLite 数据库 + 主密钥（未走 Secret 时）
+#
+# 注意 storageClassName：
+#   - 托管集群通常有默认 StorageClass，本字段留空即可
+#   - 若集群**没有**默认 StorageClass（例如仅有一个 no-provisioner 的 class），
+#     PVC 会一直 Pending。此时需要自行准备 PV（见文件末尾的示例）或指定 class。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: alkh-data
+  namespace: alertmanager-lark-hook
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+  # storageClassName: standard
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alkh
+  namespace: alertmanager-lark-hook
+  labels:
+    app.kubernetes.io/name: alertmanager-lark-hook
+spec:
+  # ⚠️⚠️ 必须保持 1，不要改成多副本，也不要配 HPA。原因：
+  #   1. 嵌入式 SQLite 是单写者模型，多副本共享不了一个 PVC；
+  #   2. 聚合窗口、最小发送间隔、卡片更新序号（CardKit sequence）都是**进程内状态**，
+  #      多副本会导致同一条告警被重复发送、或卡片更新序号冲突；
+  #   3. AlertManager 的接收地址是按副本负载均衡的，多副本会打乱幂等。
+  # 需要更高可用时，请部署**多套独立实例**，每套服务不同的渠道。
+  replicas: 1
+  strategy:
+    # RWO 的 PVC 无法同时挂到两个 Pod，滚动更新会卡在等待新 Pod 就绪。
+    # Recreate 会先停旧 Pod 再起新的，配合优雅停机把 WAL 刷盘。
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alertmanager-lark-hook
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alertmanager-lark-hook
+    spec:
+      # 停机时留出时间刷写 SQLite WAL
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        # 让 PVC 对该非 root 用户可写
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: alkh
+          # 官方镜像在 GitHub Container Registry，由 .github/workflows/publish.yml 推送。
+          # 建议把 :latest 换成具体版本（如 :0.1.0）以便回滚与审计。
+          # 若 ghcr 上的包仍为私有，需要在 GitHub 上把它设为 public，
+          # 或在这里配置 imagePullSecrets 并把包授权给对应 ServiceAccount。
+          image: ghcr.io/fengyifan/alertmanager-lark-hook:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: alkh-config
+            - secretRef:
+                name: alkh-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            # 根文件系统只读，给需要临时目录的程序留一个
+            - name: tmp
+              mountPath: /tmp
+          # 就绪探针会同时检查「数据库可读写」与「迁移完成」
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # 启动阶段（迁移 + 首次引导）给足时间，避免被 liveness 误杀
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: alkh-data
+        - name: tmp
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alkh
+  namespace: alertmanager-lark-hook
+  labels:
+    app.kubernetes.io/name: alertmanager-lark-hook
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: alertmanager-lark-hook
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+
+# --- 单机 / 内网想直接暴露时，把上面的 Service 换成下面这段 ---
+#
+# spec:
+#   type: NodePort
+#   selector:
+#     app.kubernetes.io/name: alertmanager-lark-hook
+#   ports:
+#     - name: http
+#       port: 80
+#       targetPort: http
+#       nodePort: 30080
+#
+# 之后把 ALKH_PUBLIC_BASE_URL 设为 http://<任一节点IP>:30080
+
+# --- 集群没有默认 StorageClass 时，手动准备 PV（单机可用 hostPath）---
+#
+# apiVersion: v1
+# kind: PersistentVolume
+# metadata:
+#   name: alkh-data
+# spec:
+#   capacity:
+#     storage: 2Gi
+#   accessModes: ["ReadWriteOnce"]
+#   persistentVolumeReclaimPolicy: Retain
+#   storageClassName: manual
+#   hostPath:
+#     path: /var/lib/alertmanager-lark-hook
+#     type: DirectoryOrCreate
+#
+# 同时把上面 PVC 的 storageClassName 设为 "manual"。
+# ⚠️ hostPath 只适合单节点测试；生产请用带备份能力的存储，
+#    并注意 SQLite 对共享存储（NFS 等）的锁语义支持有限，优先本地盘。

@@ -150,6 +150,56 @@ docker compose up -d --build
 2. `rust:1.85-bookworm` 用桩代码预热依赖缓存，再复制真实源码构建（依赖层可命中缓存）；
 3. `debian:bookworm-slim` 运行，非 root 用户、`/data` 卷、内置 `--healthcheck`。
 
+## 发布与 CI
+
+### 持续集成
+
+`.github/workflows/ci.yml` 在所有 push 到 main 与 PR 上运行两个 job：
+
+| job | 内容 |
+|---|---|
+| `rust` | `cargo fmt --check` → `cargo clippy -D warnings` → `cargo test --workspace` |
+| `web` | `pnpm install --frozen-lockfile` → `tsc --noEmit` → `pnpm build` |
+
+端到端测试自带 Fake 飞书网关，**不需要任何真实凭据或外部服务**，因此在 CI 里可以直接跑通。
+
+### 发布镜像
+
+`.github/workflows/publish.yml` 把镜像推到 GitHub Container Registry：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+产出 `ghcr.io/fengyifan/alertmanager-lark-hook` 的以下标签：
+
+| 标签 | 触发 |
+|---|---|
+| `0.1.0` / `0.1` / `0` | 推送 `v0.1.0` tag |
+| `main` / `latest` | 推送 main 分支 |
+| `sha-xxxxxxx` | 每次构建 |
+
+用内置的 `GITHUB_TOKEN` 推送（`permissions: packages: write`），不需要额外配置 secret。
+
+> ⚠️ **首次推送后，ghcr 上的包默认是私有的。** 要在集群或其他机器上拉取，需要到
+> GitHub → Packages → 该包 → Package settings 把可见性改成 **Public**，
+> 或者保留私有并配置 `imagePullSecrets`。
+
+默认只构建 `linux/amd64`。需要 `linux/arm64`（树莓派 / Apple Silicon 节点）时，
+在 workflow 里加上 `docker/setup-qemu-action` 并把 `platforms` 改成 `linux/amd64,linux/arm64`
+—— 注意 Dockerfile 内的 Rust 编译在 QEMU 模拟下会慢约一个数量级。
+
+### 本地构建镜像
+
+```bash
+make docker        # 等价于 docker build -f deploy/Dockerfile -t ghcr.io/fengyifan/alertmanager-lark-hook:latest .
+```
+
+`.dockerignore` 排除了 `target/`、`web/node_modules`、`web/dist`、`docs/` 等与构建无关的内容
+（否则 `target/` 可能有好几个 GB 会被一起发给 daemon）。**改动它时请确认
+Dockerfile 里所有 `COPY` 的源路径仍然存在于构建上下文中。**
+
 ## 契约维护（重要）
 
 手写的 API 契约与实现很容易悄悄脱节（本项目就踩过一次：`/meta` 的枚举列表后端返回对象数组、文档写成字符串数组，前端照着文档写，结果下拉框渲染出重复的 `[object Object]` key）。目前有三道防线：
