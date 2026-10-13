@@ -66,6 +66,12 @@ pub fn router() -> Router<AppState> {
         )
         .route("/card-templates/validate", post(templates::validate))
         .route("/card-templates/preview", post(templates::preview))
+        .route("/card-templates/default", get(templates::defaults))
+        .route("/card-templates/mock", get(templates::mock_baseline))
+        .route(
+            "/card-templates/send-test",
+            post(templates::send_test_draft),
+        )
         .route(
             "/card-templates/{id}",
             get(templates::get)

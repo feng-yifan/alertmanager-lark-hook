@@ -41,6 +41,9 @@ pub struct TestMessageRequest {
     pub card_template_id: Option<CardTemplateId>,
     #[serde(default)]
     pub sample: Option<TestSample>,
+    /// 预览 / 测试发送的 mock 数据（P1）。
+    #[serde(default)]
+    pub mock: alkh_app::mock::MockSpec,
 }
 
 pub async fn list(
@@ -174,6 +177,7 @@ pub async fn test_message(
                 req.message_type,
                 req.card_template_id,
                 req.sample.unwrap_or_default(),
+                &req.mock,
                 &actor,
             )
             .await

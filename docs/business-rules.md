@@ -144,7 +144,7 @@ POST /api/v1/hooks/alertmanager/{token}
   - `SendNew` → 每次重新创建卡片实体；
   - `UpdateInPlace` → 复用已有实体的 `card_id` 调 `PUT /cardkit/v1/cards/:card_id` 全量更新，
     且 `sequence` 必须相比上一次操作**严格递增**（`Delivery.card_sequence` 自增）；
-  - 卡片来源为 `builder_template` 时，没有卡片实体，原地更新走
+  - 卡片来源为 `builder_template` 时（**已停用，仅历史模板**），没有卡片实体，原地更新走
     `PATCH /im/v1/messages/:message_id`，`content = {"type":"template","data":{...}}`；
   - 两条更新路径均受"仅支持更新 14 天内发送的消息"限制；超期即触发 R1 降级为 `SendNew`。
 - **R17 卡片必须是 `update_multi = true`**：原地更新要求更新前后 `config.update_multi` 均为
@@ -185,22 +185,71 @@ POST /api/v1/hooks/alertmanager/{token}
 `${...}` 也**不是**飞书官方文档化的语法（官方只有搭建工具的 `template_variable` 键值映射）。
 应用消息流卡片的字段长度上限在渲染时**截断**而非报错以保证告警不丢。
 
+### 5.1 mock 数据（预览 / 测试发送，P1）
+
+管理后台编辑卡片时用 mock 数据渲染，实现见
+[`crates/alkh-app/src/mock.rs`](../crates/alkh-app/src/mock.rs)。三层语义，优先级从低到高：
+
+1. **基线**：内置样例分组（`firing` / `resolved`），或一条**历史告警分组**（`alert_group_id`）；
+2. **覆盖**：`variables` 逐项覆盖，支持 `label:` / `annotation:` 动态 key；
+3. 覆盖项里的未知 key 也会写入上下文（便于试写新标签），不报错。
+
+- mock 只影响**渲染**：历史分组只作数据源、**绝不回写**；测试消息仍写入该渠道的
+  「测试分组」行，因此依旧可更新 / 可撤回，且不污染真实告警数据。
+- 指定 `alert_group_id` 时以其状态为准（`firing` / `resolved`），保证应用消息流卡片的
+  状态标签与数据一致。
+- 草稿测试（`POST /card-templates/send-test`）不落库模板，
+  `Delivery.card_template_id` 为 `null`，投递记录仍为 `kind=test` 并写审计。
+- 规模上限：`variables` ≤ 200 项、值 ≤ 4000 字符、key ≤ 128 字符。
+
+### 5.2 本地卡片构建工具与组件目录（P0 / P2）
+
+**不再依赖飞书搭建工具**：卡片在本地可视化构建，产出 CardKit JSON 2.0 并随模板落库。
+契约与实现：
+
+- **组件目录**是唯一事实来源，位于
+  [`crates/alkh-domain/src/card_catalog.rs`](../crates/alkh-domain/src/card_catalog.rs)，
+  通过 `GET /api/v1/meta` 的 `card_components` / `card_presets` 下发给管理后台。
+  前端不另立规则：新增飞书组件只改后端目录。
+- **文档就是 CardKit JSON 2.0 本身**，不存在"本地模型 → 编译成 JSON"这一步，
+  因此画布、`/card-templates/preview`、真实投递三者必然是同一份内容。
+- 硬限制对齐飞书：`schema` 必须 `"2.0"`；`config.update_multi` 强制 `true`；
+  组件 ≤ 200；卡片 ≤ 30KB；`element_id` 全局唯一、字母开头、≤20 字符；
+  `column` 只能位于 `column_set.columns`。
+- **JSON 2.0 传入不支持的属性会直接报错**（1.0 是忽略），所以目录校验同时给出：
+  - **errors（阻断保存）**：废弃组件、结构非法、`element_id` 非法/重复、超限；
+  - **warnings（不阻断）**：未知组件、未知属性、`header.template` 非枚举值。
+  未知组件不阻断是有意的：用户从搭建工具导入的卡片可能含 `chart` / `table` 等
+  本工具未收录的组件，它们会原样保留、只在画布上标为"不可可视化编辑"。
+- **告警积木**（`card_presets`）与变量清单同源，有单测保证积木只引用真实存在的变量
+  （`alkh-app::meta::alert_presets_use_only_builtin_variables`）。
+- **P2：停用 `builder_template`**。新建/更新一律拒绝（`400 validation`）；
+  历史模板仍可读取与预览，编辑器提供「转换为本地卡片」。
+
+> **已修复的历史缺陷**：内置默认卡片原先使用 `note` 组件——这是 JSON 1.0 的组件，
+> **2.0 已废弃**（官方「卡片 JSON 2.0 版本更新说明」的「废弃备注组件 & 交互模块」）。
+> 默认卡片是"模板缺失时的兜底"，一旦发送失败就等于告警丢失。现改为普通文本组件
+> （`div` + `text_size=notation` + `text_color=grey`），并加了
+> `defaults::tests::default_card_uses_no_deprecated_component` 锁死。
+
 ## 6. 校验规则汇总（管理后台输入校验）
 
 | 对象 | 规则 |
 |---|---|
 | 渠道 | 名称 ≤ 64；`receive_id` 非空；同 `(type,id)` 唯一 |
 | Hook | 名称 ≤ 64；token 轮换后旧的立即失效 |
-| 卡片模板（卡片消息） | `schema` 必须 `"2.0"`；JSON 合法；组件数 ≤ 200；体积 ≤ 30KB（发送前预估） |
+| 卡片模板（卡片消息） | `schema` 必须 `"2.0"`；JSON 合法；组件数 ≤ 200；体积 ≤ 30KB（发送前预估）；组件目录校验无 errors（见 §5.2） |
 | 卡片模板（应用消息流） | title ≤ 60；preview ≤ 120；status_label.text ≤ 20；按钮 ≤ 2、文案 ≤ 30；link 必须 `https` |
 | 通知策略 | 正则 matcher 可编译；聚合窗口 0–3600s；最小间隔 0–3600s；告警上限 1–200 |
+| mock 数据 | 变量 ≤ 200 项；单值 ≤ 4000 字符；单 key ≤ 128 字符；`alert_group_id` 必须存在（否则 404） |
+| 卡片来源 | `builder_template` 已停用：新建/更新 `400 validation`（历史模板只读可预览） |
 | 应用设置 | app_id 形如 `cli_*`（仅提示）；app_secret 写入后不再回显 |
 
 ## 7. 与需求条目的对应关系
 
 | 需求 | 落地 |
 |---|---|
-| 1. 导入卡片搭建工具创建的卡片 | `CardTemplate.source = builder_json`（导入 JSON 2.0）或 `builder_template`（导入 template_id + 版本），含变量识别与预览 |
+| 1. 卡片模板 | 本地可视化/JSON 构建 `CardTemplate.card_message.source = builder_json`（CardKit JSON 2.0），含组件目录校验、变量识别、mock 预览与草稿测试发送（§5.1/§5.2）；`builder_template` 已停用 |
 | 2. 通过飞书机器人发送消息 | `LarkGateway` 使用 `tenant_access_token` 调用 `im/v1/messages` 与 `im/v2/app_feed_card` |
 | 3. API 读取可接收消息的渠道 + 每渠道独立 hook | `im/v1/chats` 同步 → Channel；每个 Channel 签发独立 Hook token/URL，可多个 |
 | 4. 发送规则配置 | 第 4 节决策表 + NotificationPolicy 字段 |

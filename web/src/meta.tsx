@@ -119,6 +119,10 @@ export const FALLBACK_META: Meta = {
     { name: '<名称>', group: 'dynamic', type: 'string', description: '标签/注解可直接用原名引用，如 ${team}' },
   ],
   severity_colors: { critical: 'red', warning: 'orange', info: 'blue', default: 'grey' },
+  // 组件目录只来自服务端（`GET /meta`）；离线兜底不提供目录，
+  // 画布会提示「目录为空，请升级后端后刷新」。
+  card_components: [],
+  card_presets: [],
 };
 
 export interface MetaContextValue {
@@ -249,6 +253,10 @@ function mergeMeta(remote: Meta): Meta {
       normalizeEnumMap(remote.severity_colors),
       FALLBACK_META.severity_colors,
     ),
+    // 组件目录没有本地兜底：目录缺失时画布会显示明确提示，
+    // 而不是用一份会漂移的本地副本悄悄产出过时的 JSON。
+    card_components: Array.isArray(remote.card_components) ? remote.card_components : [],
+    card_presets: Array.isArray(remote.card_presets) ? remote.card_presets : [],
     pin_supported_message_types:
       remote.pin_supported_message_types ?? FALLBACK_META.pin_supported_message_types,
     token_prefix: remote.token_prefix ?? FALLBACK_META.token_prefix,

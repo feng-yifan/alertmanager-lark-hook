@@ -68,6 +68,10 @@ export interface Meta {
   channel_kinds: EnumOption[];
   receive_id_types: EnumOption[];
   variables: MetaVariable[];
+  /** 飞书卡片 JSON 2.0 组件目录（本地卡片构建工具的契约来源）。 */
+  card_components: CardComponentMeta[];
+  /** 告警积木（同源下发，避免前端另抄一份模板）。 */
+  card_presets: CardPresetMeta[];
   /** 严重级别 → 卡片 header 颜色。 */
   severity_colors: Record<string, string>;
   /** `pin_unresolved` 生效的消息类型（目前仅 app_feed_card）。 */
@@ -291,12 +295,60 @@ export type BizIdSource = 'alert_group' | 'hook' | 'custom';
 /** CardKit JSON 2.0 is an arbitrary (but valid) JSON document. */
 export type CardJson = Record<string, unknown>;
 
+/* --- 组件目录（服务端 alkh-domain::card_catalog 下发，前端不另立规则） --- */
+
+export type CardPropType = 'text' | 'markdown' | 'number' | 'bool' | 'enum' | 'px' | 'url';
+export type CardPropAccessor = 'field' | 'button_url';
+
+export interface CardPropMeta {
+  name: string;
+  label: string;
+  /** 真实线格式字段名是 `type`（Rust 侧用 `ty` 避开关键字）。 */
+  type: CardPropType;
+  /** JSON 点号路径；`button_url` 走专用读写逻辑。 */
+  path: string;
+  accessor: CardPropAccessor;
+  values: string[];
+  max_chars: number | null;
+  placeholder: string;
+  hint: string;
+}
+
+export interface CardComponentMeta {
+  tag: string;
+  label: string;
+  group: 'container' | 'display' | 'interactive' | 'element' | 'deprecated';
+  description: string;
+  /** 子节点所在字段（`elements` / `columns`）；叶组件为 null。 */
+  children_key: string | null;
+  /** 允许的子组件 tag；空数组表示任意。 */
+  children: string[];
+  /** 允许的父组件 tag；空数组表示任意位置。 */
+  child_of: string[];
+  /** 是否出现在组件面板；`column` / `plain_text` 由父组件自动创建。 */
+  palette: boolean;
+  /** 2.0 已废弃时的原因。 */
+  deprecated?: string;
+  /** 新建节点的默认 JSON（字符串，服务端保证结构合法）。 */
+  default_json: string;
+  props: CardPropMeta[];
+}
+
 export interface TemplateVariable {
   name: string;
   /** 真实线格式字段名是 `ty`（`string` / `number` / `bool`），不是 `type`。 */
   ty: string;
   default: string | null;
   builtin: boolean;
+}
+
+/** 告警积木：服务端下发的告警专用组件预设（保证只用真实变量）。 */
+export interface CardPresetMeta {
+  id: string;
+  label: string;
+  description: string;
+  /** 插入画布的节点数组（JSON 文本）。 */
+  nodes_json: string;
 }
 
 export interface StatusLabelSpec {
@@ -386,6 +438,12 @@ export type CardTemplateCreate = CardTemplateInput;
 /** PATCH 与创建共用同一请求体（`name`/`kind` 同样必填）。 */
 export type CardTemplatePatch = CardTemplateInput;
 
+/** `GET /card-templates/default`：内置默认模板内容。 */
+export interface CardTemplateDefaults {
+  card_message: CardMessageSpec;
+  app_feed_spec: AppFeedCardSpec;
+}
+
 /**
  * `docs/api.md` does not fix the shape of validation entries, so both the plain
  * string form and a structured form are accepted and rendered defensively.
@@ -418,6 +476,32 @@ export interface ValidateResponse {
 export interface PreviewRequest extends ValidateRequest {
   sample?: 'firing' | 'resolved';
   channel_id?: UUID;
+  /** 预览/测试发送的 mock 数据（P1）。 */
+  mock?: MockSpec;
+}
+
+/**
+ * 预览 / 测试发送的 mock 数据。
+ *
+ * - `alert_group_id`：用一条历史告警分组作为基线数据源（设置后 `sample` 只作展示）；
+ * - `variables`：逐项覆盖，支持 `label:` / `annotation:` 动态 key；未知 key 会被直接写入上下文。
+ */
+export interface MockSpec {
+  alert_group_id?: UUID | null;
+  variables?: Record<string, string>;
+}
+
+export type MockSource = 'builtin' | 'alert_group';
+
+/** `GET /card-templates/mock` 的响应。 */
+export interface MockBaseline {
+  source: MockSource;
+  sample: 'firing' | 'resolved';
+  alert_group_id: UUID | null;
+  /** 历史分组摘要，供面板回显；`source = builtin` 时为 null。 */
+  alert_group_label: string | null;
+  /** 变量名 → 基线值（覆盖前的原始值）。 */
+  variables: Record<string, string>;
 }
 
 export interface PreviewResponse {
@@ -429,6 +513,14 @@ export interface PreviewResponse {
 export interface CardTemplateSendTestRequest {
   channel_id: UUID;
   sample?: 'firing' | 'resolved';
+  mock?: MockSpec;
+}
+
+/** `POST /card-templates/send-test`：用**未保存的草稿**模板发测试消息。 */
+export interface DraftSendTestRequest extends ValidateRequest {
+  channel_id: UUID;
+  sample?: 'firing' | 'resolved';
+  mock?: MockSpec;
 }
 
 /* ------------------------------------------------------------------ */

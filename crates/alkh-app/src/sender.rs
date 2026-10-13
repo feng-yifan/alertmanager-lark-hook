@@ -70,27 +70,60 @@ impl NotificationSender {
         channel: &Channel,
         policy: &NotificationPolicy,
     ) -> AppResult<PreparedSend> {
-        let template = self
-            .resolve_template(policy, group.channel_id.clone())
-            .await?;
-        let now = self.deps.now();
-        let ctx = build_context(group, channel, policy, now);
+        self.prepare_with_context(group, channel, policy, None, None)
+            .await
+    }
+
+    /// 渲染并准备一次投递，支持显式模板与显式渲染上下文。
+    ///
+    /// - `explicit`：管理端的**未保存草稿**模板。`None` 时按策略解析（R12 兜底）。
+    ///   草稿不落库，因此不会写进 `Delivery.card_template_id`，避免悬空引用。
+    /// - `context`：管理端 mock 数据渲染出的上下文。`None` 时用 `group` 现场构造。
+    ///   注意 `Delivery` 归属仍由 `group` 决定。
+    pub async fn prepare_with_context(
+        &self,
+        group: &alkh_domain::alert::AlertGroup,
+        channel: &Channel,
+        policy: &NotificationPolicy,
+        explicit: Option<&CardTemplate>,
+        context: Option<&alkh_domain::template::RenderContext>,
+    ) -> AppResult<PreparedSend> {
+        let resolved_template;
+        let template: Option<&CardTemplate> = match explicit {
+            Some(t) => Some(t),
+            None => {
+                resolved_template = self
+                    .resolve_template(policy, group.channel_id.clone())
+                    .await?;
+                resolved_template.as_ref()
+            }
+        };
+        let record_template_id = explicit.is_none();
+
+        let owned_context;
+        let ctx = match context {
+            Some(c) => c,
+            None => {
+                owned_context = build_context(group, channel, policy, self.deps.now());
+                &owned_context
+            }
+        };
         let is_firing = is_firing_group(group);
 
-        let (template_id, template_kind, card_source, content, digest) = match &template {
+        let (template_id, template_kind, card_source, content, digest) = match template {
             Some(t) if t.kind == TemplateKind::CardMessage => {
                 let spec = t
                     .card_message
                     .as_ref()
                     .ok_or_else(|| AppError::internal("卡片消息模板缺少 card_message"))?;
-                let rendered = render_card_message(spec, &ctx).inspect_err(|_| {
+                let rendered = render_card_message(spec, ctx).inspect_err(|_| {
                     self.deps
                         .metrics
                         .incr(alkh_domain::ports::Counter::RenderFailure, 1);
                 })?;
                 let digest = rendered.digest();
                 (
-                    Some(t.id.clone()),
+                    record_template_id.then(|| t.id.clone()),
                     TemplateKind::CardMessage,
                     Some(spec.source),
                     PreparedContent::Card(rendered),
@@ -102,10 +135,10 @@ impl NotificationSender {
                     .app_feed_spec
                     .as_ref()
                     .ok_or_else(|| AppError::internal("应用消息流模板缺少 app_feed_spec"))?;
-                let rendered = render_app_feed_card(spec, &ctx, is_firing);
+                let rendered = render_app_feed_card(spec, ctx, is_firing);
                 let digest = digest_of_app_feed(&rendered);
                 (
-                    Some(t.id.clone()),
+                    record_template_id.then(|| t.id.clone()),
                     TemplateKind::AppFeedCard,
                     None,
                     PreparedContent::AppFeed(rendered),
@@ -119,7 +152,7 @@ impl NotificationSender {
                         let spec = alkh_domain::template::CardMessageSpec::builder_json(
                             crate::defaults::default_card_json(),
                         );
-                        let rendered = render_card_message(&spec, &ctx).inspect_err(|_| {
+                        let rendered = render_card_message(&spec, ctx).inspect_err(|_| {
                             self.deps
                                 .metrics
                                 .incr(alkh_domain::ports::Counter::RenderFailure, 1);
@@ -135,7 +168,7 @@ impl NotificationSender {
                     }
                     MessageType::AppFeedCard => {
                         let spec = AppFeedCardSpec::default();
-                        let rendered = render_app_feed_card(&spec, &ctx, is_firing);
+                        let rendered = render_app_feed_card(&spec, ctx, is_firing);
                         let digest = digest_of_app_feed(&rendered);
                         (
                             None,
@@ -149,7 +182,7 @@ impl NotificationSender {
             }
         };
 
-        let biz_id = match &template {
+        let biz_id = match template {
             Some(t) => match t.app_feed_spec.as_ref().map(|s| s.biz_id_source) {
                 Some(alkh_domain::template::BizIdSource::Hook) => {
                     format!("alkh-{}-{}", group.hook_id, group.id)

@@ -11,6 +11,7 @@ pub mod deps;
 pub mod error;
 pub mod intake;
 pub mod meta;
+pub mod mock;
 pub mod policies;
 pub mod query;
 pub mod render;

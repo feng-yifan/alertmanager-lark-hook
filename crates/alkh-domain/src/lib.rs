@@ -7,6 +7,7 @@
 pub mod alert;
 pub mod audit;
 pub mod auth;
+pub mod card_catalog;
 pub mod channel;
 pub mod error;
 pub mod hook;

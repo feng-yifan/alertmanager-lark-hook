@@ -5,7 +5,7 @@ use alkh_domain::channel::Channel;
 use alkh_domain::ids::CardTemplateId;
 use alkh_domain::policy::NotificationPolicy;
 use alkh_domain::template::{
-    AppFeedCardSpec, CardMessageSpec, CardTemplate, TemplateKind, TemplateVariable,
+    AppFeedCardSpec, CardMessageSpec, CardSource, CardTemplate, TemplateKind, TemplateVariable,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -64,12 +64,34 @@ pub struct PreviewReport {
     pub card_content: Value,
 }
 
+/// 内置默认模板内容：卡片编辑器用它作为「起步卡片」与旧来源转换的落点，
+/// 避免前端另抄一份默认卡片 JSON（会与 `defaults.rs` 漂移）。
+#[derive(Debug, Clone, Serialize)]
+pub struct DefaultTemplatesView {
+    pub card_message: CardMessageSpec,
+    pub app_feed_spec: AppFeedCardSpec,
+}
+
+/// 返回内置默认模板内容（不查库）。
+pub fn default_templates() -> DefaultTemplatesView {
+    DefaultTemplatesView {
+        card_message: CardMessageSpec::builder_json(crate::defaults::default_card_json()),
+        app_feed_spec: AppFeedCardSpec::default(),
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreviewSample {
     #[default]
     Firing,
     Resolved,
+}
+
+impl PreviewSample {
+    pub fn is_resolved(self) -> bool {
+        matches!(self, PreviewSample::Resolved)
+    }
 }
 
 pub struct TemplateService {
@@ -108,7 +130,7 @@ impl TemplateService {
         actor: &AuditActor,
     ) -> AppResult<CardTemplateView> {
         let mut template = build(input)?;
-        template.validate()?;
+        self.enforce(&mut template)?;
         if template.is_default {
             self.deps.templates.clear_default(template.kind).await?;
         }
@@ -134,7 +156,7 @@ impl TemplateService {
         template.id = existing.id.clone();
         template.created_at = existing.created_at;
         template.updated_at = self.deps.now();
-        template.validate()?;
+        self.enforce(&mut template)?;
 
         if template.is_default && !existing.is_default {
             self.deps.templates.clear_default(template.kind).await?;
@@ -179,20 +201,40 @@ impl TemplateService {
             valid: true,
             ..Default::default()
         };
-        let detected = match build(input) {
-            Ok(mut t) => {
-                if let Err(e) = t.validate() {
-                    report.valid = false;
-                    report.errors.push(e.to_string());
-                }
-                t.detected_variables()
-            }
+        let mut built = match build(input) {
+            Ok(t) => Some(t),
             Err(e) => {
                 report.valid = false;
                 report.errors.push(e.to_string());
-                Vec::new()
+                None
             }
         };
+
+        // 组件目录校验：给出**全部**结构错误，并把可疑用法放进 warnings。
+        if let Some(template) = built.as_mut() {
+            if let Some(card) = template
+                .card_message
+                .as_ref()
+                .and_then(|spec| spec.card_json.as_ref())
+            {
+                let catalog = alkh_domain::card_catalog::validate_card_json(card);
+                if !catalog.errors.is_empty() {
+                    report.valid = false;
+                }
+                report.errors.extend(catalog.errors);
+                report.warnings.extend(catalog.warnings);
+            }
+            // 领域级校验：schema / update_multi / 体积 / 应用消息流字段。
+            if let Err(e) = template.validate() {
+                let message = e.to_string();
+                if !report.errors.contains(&message) {
+                    report.valid = false;
+                    report.errors.push(message);
+                }
+            }
+        }
+
+        let detected = built.map(|t| t.detected_variables()).unwrap_or_default();
         report.unknown_variables = unknown_variables(&detected);
         if !report.unknown_variables.is_empty() {
             report.warnings.push(format!(
@@ -204,12 +246,82 @@ impl TemplateService {
         report
     }
 
-    /// 用样例数据渲染，供搭建工具对照（需求 1 的"导入后可预览"）。
+    /// 保存前的强制校验（创建 / 更新 / 草稿测试发送共用）。
+    ///
+    /// 组件目录里的**错误**必须阻断保存：JSON 2.0 对废弃组件与不支持的结构
+    /// 会直接报错（如 200861），等到发送时才失败等于告警丢失。
+    fn enforce(&self, template: &mut CardTemplate) -> AppResult<()> {
+        // P2：停用「卡片搭建工具模板」来源。历史模板仍可读取/预览，
+        // 编辑器提供「转换为本地卡片」。
+        if let Some(spec) = &template.card_message {
+            if spec.source == CardSource::BuilderTemplate {
+                return Err(AppError::validation(
+                    "已停用来源 builder_template：请在卡片编辑器里点「转换为本地卡片」后保存（本地 JSON 卡片同样支持变量与原地更新）",
+                ));
+            }
+        }
+        template.validate()?;
+        if let Some(card) = template
+            .card_message
+            .as_ref()
+            .and_then(|spec| spec.card_json.as_ref())
+        {
+            let catalog = alkh_domain::card_catalog::validate_card_json(card);
+            if let Some(first) = catalog.errors.first() {
+                return Err(AppError::validation(format!(
+                    "卡片结构不合法：{first}（共 {} 处；详见 /card-templates/validate）",
+                    catalog.errors.len()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// 校验并构造**草稿**模板（不落库），供卡片编辑器「预览 / 测试发送」使用。
+    pub fn build_draft(&self, input: TemplateInput) -> AppResult<CardTemplate> {
+        let mut template = build(input)?;
+        self.enforce(&mut template)?;
+        Ok(template)
+    }
+
+    /// 返回指定基线（内置样例 / 历史告警分组）渲染出的**全部**变量，
+    /// 供卡片编辑器的 mock 面板列出与编辑（P1）。
+    pub async fn mock_baseline(
+        &self,
+        channel_id: Option<alkh_domain::ids::ChannelId>,
+        sample: PreviewSample,
+        alert_group_id: Option<alkh_domain::ids::AlertGroupId>,
+    ) -> AppResult<crate::mock::MockBaseline> {
+        let channel = match channel_id {
+            Some(id) => self
+                .deps
+                .channels
+                .get(&id)
+                .await?
+                .ok_or_else(|| AppError::not_found("渠道不存在"))?,
+            None => sample_channel(),
+        };
+        let mock = crate::mock::MockSpec {
+            alert_group_id,
+            variables: Default::default(),
+        };
+        crate::mock::mock_baseline(
+            &self.deps,
+            &channel,
+            sample.is_resolved(),
+            &mock,
+            self.deps.now(),
+        )
+        .await
+    }
+
+    /// 用样例 / mock 数据渲染，供卡片编辑器对照（需求 1 的"导入后可预览"）。
     pub async fn preview(
         &self,
         input: TemplateInput,
         sample: PreviewSample,
         channel_id: Option<alkh_domain::ids::ChannelId>,
+        mock: crate::mock::MockSpec,
     ) -> AppResult<PreviewReport> {
         let mut template = build(input)?;
         template.validate()?;
@@ -236,14 +348,19 @@ impl TemplateService {
             ),
         };
 
+        mock.validate()?;
         let resolved = matches!(sample, PreviewSample::Resolved);
-        let group = crate::query::sample_alert_group(
+        let group = crate::mock::resolve_mock_group(
+            &self.deps,
             &channel,
             alkh_domain::ids::HookId::new(),
             resolved,
+            &mock,
             self.deps.now(),
-        );
-        let ctx = crate::render::build_context(&group, &channel, &policy, self.deps.now());
+        )
+        .await?;
+        let mut ctx = crate::render::build_context(&group, &channel, &policy, self.deps.now());
+        mock.apply(&mut ctx);
         let is_firing = crate::render::is_firing_group(&group);
 
         let variables = serde_json::to_value(ctx.vars())?;

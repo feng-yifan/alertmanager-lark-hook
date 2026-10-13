@@ -406,8 +406,61 @@ impl ChannelService {
         message_type: Option<MessageType>,
         card_template_id: Option<alkh_domain::ids::CardTemplateId>,
         sample: TestSample,
+        mock: &crate::mock::MockSpec,
         actor: &AuditActor,
     ) -> AppResult<alkh_domain::alert::Delivery> {
+        self.send_test_inner(
+            id,
+            message_type,
+            card_template_id,
+            None,
+            sample,
+            mock,
+            actor,
+        )
+        .await
+    }
+
+    /// 用**未保存的草稿模板** + mock 数据发送一条测试消息（管理端卡片编辑器 P1）。
+    ///
+    /// 草稿不会落库，也不写进 `Delivery.card_template_id`；消息本身仍归属该渠道的
+    /// 「测试分组」，因此测试消息依旧可更新 / 可撤回。
+    pub async fn send_test_draft(
+        &self,
+        id: &ChannelId,
+        template: &alkh_domain::template::CardTemplate,
+        sample: TestSample,
+        mock: &crate::mock::MockSpec,
+        actor: &AuditActor,
+    ) -> AppResult<alkh_domain::alert::Delivery> {
+        let message_type = match template.kind {
+            TemplateKind::CardMessage => MessageType::CardMessage,
+            TemplateKind::AppFeedCard => MessageType::AppFeedCard,
+        };
+        self.send_test_inner(
+            id,
+            Some(message_type),
+            None,
+            Some(template),
+            sample,
+            mock,
+            actor,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_test_inner(
+        &self,
+        id: &ChannelId,
+        message_type: Option<MessageType>,
+        card_template_id: Option<alkh_domain::ids::CardTemplateId>,
+        draft: Option<&alkh_domain::template::CardTemplate>,
+        sample: TestSample,
+        mock: &crate::mock::MockSpec,
+        actor: &AuditActor,
+    ) -> AppResult<alkh_domain::alert::Delivery> {
+        mock.validate()?;
         let channel = self
             .deps
             .channels
@@ -425,6 +478,10 @@ impl ChannelService {
         }
         if card_template_id.is_some() {
             policy.card_template_id = card_template_id;
+        }
+        // 草稿由调用方显式提供，策略里的模板引用不应参与解析。
+        if draft.is_some() {
+            policy.card_template_id = None;
         }
         policy.validate(&channel)?;
 
@@ -455,17 +512,40 @@ impl ChannelService {
             .first()
             .map(|h| h.id.clone())
             .unwrap_or_default();
-        let group = crate::query::sample_alert_group(
+
+        // mock 数据源分组：历史分组优先，否则就是内置样例。
+        // 历史分组只作为**渲染数据源**，绝不回写（见 `crate::mock` 模块说明）。
+        let mock_source = crate::mock::resolve_mock_group(
+            &self.deps,
             &channel,
-            hook_id,
+            hook_id.clone(),
             sample.is_resolved(),
+            mock,
             self.deps.now(),
-        );
+        )
+        .await?;
+        // 选了历史分组就以它的状态为准，保证 app_feed_card 的状态标签与数据一致。
+        let resolved = if mock.alert_group_id.is_some() {
+            mock_source.status == alkh_domain::alert::GroupStatus::Resolved
+        } else {
+            sample.is_resolved()
+        };
+        let group = if mock.alert_group_id.is_some() {
+            crate::query::sample_alert_group(&channel, hook_id, resolved, self.deps.now())
+        } else {
+            mock_source.clone()
+        };
         // 必须在发送前落库：Delivery 引用该分组，撤回/重试都需要它存在。
         self.deps.groups.upsert(&group).await?;
 
+        let mut ctx =
+            crate::render::build_context(&mock_source, &channel, &policy, self.deps.now());
+        mock.apply(&mut ctx);
+
         let sender = NotificationSender::new(self.deps.clone());
-        let prepared = sender.prepare(&group, &channel, &policy).await?;
+        let prepared = sender
+            .prepare_with_context(&group, &channel, &policy, draft, Some(&ctx))
+            .await?;
         let result = sender
             .deliver(
                 &prepared,
@@ -480,7 +560,13 @@ impl ChannelService {
             actor,
             audit_action::TEST_MESSAGE,
             channel.id.as_ref(),
-            json!({"delivery_id": result.current.id.to_string(), "state": format!("{:?}", result.current.state)}),
+            json!({
+                "delivery_id": result.current.id.to_string(),
+                "state": format!("{:?}", result.current.state),
+                "draft": draft.map(|t| t.name.clone()),
+                "mock_variables": mock.variables.len(),
+                "mock_alert_group_id": mock.alert_group_id.as_ref().map(|g| g.to_string()),
+            }),
         )
         .await;
         Ok(result.current)

@@ -5,10 +5,13 @@ import {
   errorDetails,
   errorMessage,
   getCardTemplate,
+  getCardTemplateDefaults,
+  listAlertGroups,
   listChannels,
   patchCardTemplate,
   previewCardTemplate,
   sendTestCardTemplate,
+  sendTestCardTemplateDraft,
   validateCardTemplate,
 } from '../api';
 import {
@@ -30,11 +33,13 @@ import {
   Textarea,
 } from '../components/ui';
 import ErrorBoundary from '../components/ErrorBoundary';
+import { MockPanel } from '../components/MockPanel';
+import { CardBuilder } from '../card-builder/Builder';
 import { useAsync } from '../hooks';
-import { CARD_SOURCE_LABEL } from '../labels';
 import { enumOptions, useMeta } from '../meta';
 import { useToast } from '../toast';
 import type {
+  AlertGroup,
   AppFeedCardSpec,
   BizIdSource,
   CardJson,
@@ -46,6 +51,7 @@ import type {
   CardMessageInput,
   CardTemplateKind,
   EnumOption,
+  MockSpec,
   PreviewResponse,
   StatusLabelType,
   ValidateResponse,
@@ -214,6 +220,15 @@ function CardTemplateForm(): JSX.Element {
 
   const { data: channelPage } = useAsync((signal) => listChannels({ limit: 200 }, signal), []);
   const channels = channelPage?.items ?? [];
+  // 内置默认卡片：新建模板的起步内容 + 旧来源（builder_template）的转换落点。
+  // 单一事实来源在后端 defaults.rs，前端不再抄一份。
+  const { data: defaults } = useAsync((signal) => getCardTemplateDefaults(signal), []);
+  // mock 面板的「历史告警分组」下拉：取最近 50 条，firing 优先。
+  const { data: alertGroupPage } = useAsync(
+    (signal) => listAlertGroups({ limit: 50 }, signal),
+    [],
+  );
+  const alertGroups: AlertGroup[] = alertGroupPage?.items ?? [];
 
   const [kind, setKind] = useState<CardTemplateKind>(
     kindFromQuery === 'app_feed_card' ? 'app_feed_card' : 'card_message',
@@ -221,6 +236,8 @@ function CardTemplateForm(): JSX.Element {
   const [name, setName] = useState('');
   const [isDefault, setIsDefault] = useState(false);
   const [source, setSource] = useState<CardSource>('builder_json');
+  /** 卡片内容的编辑方式：可视化画布 / 原始 JSON（编辑同一份文档）。 */
+  const [view, setView] = useState<'visual' | 'json'>('visual');
   const [cardText, setCardText] = useState('');
   const [cardJson, setCardJson] = useState<CardJson | null>(null);
   const [cardTextError, setCardTextError] = useState<string | null>(null);
@@ -235,6 +252,8 @@ function CardTemplateForm(): JSX.Element {
 
   const [sample, setSample] = useState<'firing' | 'resolved'>('firing');
   const [previewChannelId, setPreviewChannelId] = useState('');
+  /** mock 覆盖项：预览与测试发送共用（P1）。 */
+  const [mock, setMock] = useState<MockSpec>({});
   const [validation, setValidation] = useState<ValidateResponse | null>(null);
   const [preview, setPreview] = useState<PreviewResponse | null>(null);
   const [validating, setValidating] = useState(false);
@@ -305,6 +324,42 @@ function CardTemplateForm(): JSX.Element {
     }
   };
 
+  /** 画布的回写：可视化与 JSON 两个视图共享同一份文档状态。 */
+  const applyCardJson = (next: CardJson) => {
+    setCardJson(next);
+    setCardText(prettyJson(next));
+    setCardTextError(null);
+  };
+
+  /** 载入内置的起步卡片（新模板与转换旧来源共用）。 */
+  const loadStarterCard = () => {
+    const starter = defaults?.card_message.card_json;
+    if (!starter) {
+      toast.error('默认卡片尚未加载完成');
+      return;
+    }
+    applyCardJson(starter);
+    setView('visual');
+  };
+
+  /** P2：把已停用的 builder_template 来源转换为本地卡片 JSON。 */
+  const convertLegacyCard = () => {
+    setSource('builder_json');
+    setTemplateId('');
+    setTemplateVersion('');
+    loadStarterCard();
+    toast.success('已切换为本地卡片 JSON，请检查内容后保存');
+  };
+
+  // 新建模板：直接用内置默认卡片起步，不再让用户面对空白 JSON
+  useEffect(() => {
+    if (isEdit || kind !== 'card_message' || !defaults || cardJson) return;
+    const starter = defaults.card_message.card_json;
+    if (!starter) return;
+    setCardJson(starter);
+    setCardText(prettyJson(starter));
+  }, [isEdit, kind, defaults, cardJson]);
+
   const buildCardMessageInput = (): CardMessageInput => ({
     source,
     card_json: source === 'builder_json' ? cardJson : null,
@@ -355,6 +410,20 @@ function CardTemplateForm(): JSX.Element {
     }
   };
 
+  /** 去掉空覆盖，避免把无意义的 `{variables:{}}` 传给后端。 */
+  const effectiveMock = (): MockSpec | undefined => {
+    const variables = Object.fromEntries(
+      Object.entries(mock.variables ?? {}).filter(([key]) => key.trim().length > 0),
+    );
+    const hasVariables = Object.keys(variables).length > 0;
+    const alertGroupId = mock.alert_group_id ?? null;
+    if (!hasVariables && !alertGroupId) return undefined;
+    return {
+      ...(alertGroupId ? { alert_group_id: alertGroupId } : {}),
+      ...(hasVariables ? { variables } : {}),
+    };
+  };
+
   const runPreview = async () => {
     if (!ensureRunnable()) return;
     setPreviewing(true);
@@ -363,6 +432,7 @@ function CardTemplateForm(): JSX.Element {
         ...buildTemplateInput(),
         sample,
         ...(previewChannelId ? { channel_id: previewChannelId } : {}),
+        ...(effectiveMock() ? { mock: effectiveMock() } : {}),
       });
       setPreview(result);
       toast.success('预览已生成');
@@ -370,6 +440,30 @@ function CardTemplateForm(): JSX.Element {
       toast.error(errorMessage(cause));
     } finally {
       setPreviewing(false);
+    }
+  };
+
+  const sendDraftTest = async () => {
+    if (!testChannelId) {
+      toast.error('请选择测试渠道');
+      return;
+    }
+    if (!ensureRunnable()) return;
+    setSendingTest(true);
+    setTestResult(null);
+    try {
+      const result = await sendTestCardTemplateDraft({
+        ...buildTemplateInput(),
+        channel_id: testChannelId,
+        sample,
+        ...(effectiveMock() ? { mock: effectiveMock() } : {}),
+      });
+      setTestResult(result);
+      toast.success('草稿测试消息已提交发送');
+    } catch (cause) {
+      toast.error(errorMessage(cause));
+    } finally {
+      setSendingTest(false);
     }
   };
 
@@ -522,22 +616,64 @@ function CardTemplateForm(): JSX.Element {
 
       {kind === 'card_message' ? (
         <>
-          <Card title="卡片消息内容">
-            <Field
-              label="source"
-              hint="builder_json = 导入搭建工具导出的 JSON 2.0；builder_template = 引用已发布模板 + 固定版本"
-            >
-              <RadioGroup<CardSource>
-                value={source}
-                options={[
-                  { value: 'builder_json', label: CARD_SOURCE_LABEL.builder_json },
-                  { value: 'builder_template', label: CARD_SOURCE_LABEL.builder_template },
-                ]}
-                onChange={setSource}
-              />
-            </Field>
+          <Card
+            title="卡片消息内容"
+            subtitle="本地卡片 JSON 2.0：可视化拖拽或直接改 JSON，两者编辑的是同一份文档"
+            actions={
+              source === 'builder_json' ? (
+                <>
+                  <Button
+                    size="sm"
+                    variant={view === 'visual' ? 'primary' : 'default'}
+                    onClick={() => setView('visual')}
+                  >
+                    可视化
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={view === 'json' ? 'primary' : 'default'}
+                    onClick={() => setView('json')}
+                  >
+                    JSON
+                  </Button>
+                </>
+              ) : null
+            }
+          >
+            {source === 'builder_template' ? (
+              <Banner tone="warn">
+                该模板使用的是<strong>已停用</strong>的来源 <code>builder_template</code>
+                （引用飞书搭建工具模板）。本地没有卡片 JSON 就无法可视化编辑、也无法预览；
+                请点「转换为本地卡片」——本地 JSON 卡片同样支持变量、原地更新与撤回。
+                <div className="row mt-8">
+                  <Button variant="primary" onClick={convertLegacyCard} disabled={!defaults}>
+                    转换为本地卡片
+                  </Button>
+                </div>
+              </Banner>
+            ) : null}
 
-            {source === 'builder_json' ? (
+            {source === 'builder_json' && view === 'visual' ? (
+              cardJson ? (
+                <CardBuilder
+                  card={cardJson}
+                  meta={meta}
+                  starter={defaults?.card_message.card_json ?? null}
+                  onChange={applyCardJson}
+                />
+              ) : (
+                <Banner tone="warn">
+                  当前没有可用的卡片 JSON。请点「载入起步卡片」，或在「JSON」页签粘贴一份。
+                  <div className="row mt-8">
+                    <Button variant="primary" onClick={loadStarterCard} disabled={!defaults}>
+                      载入起步卡片
+                    </Button>
+                  </div>
+                </Banner>
+              )
+            ) : null}
+
+            {source === 'builder_json' && view === 'json' ? (
               <>
                 <Field
                   label="card_json（CardKit JSON 2.0）"
@@ -560,55 +696,36 @@ function CardTemplateForm(): JSX.Element {
                     <span className={cardJson.schema === '2.0' ? '' : 'field-error'}>schema = {String(cardJson.schema)}</span>
                   ) : null}
                 </div>
-              </>
-            ) : (
-              <div className="grid-2">
-                <Field label="template_id" required hint="搭建工具「发布」后的模板 ID">
-                  <Input className="mono" value={templateId} onChange={(event) => setTemplateId(event.target.value)} />
-                </Field>
-                <Field label="template_version_name" hint="固定版本，避免线上被工具改版影响（domain-model §4）">
-                  <Input className="mono" value={templateVersion} onChange={(event) => setTemplateVersion(event.target.value)} />
-                </Field>
-              </div>
-            )}
-            {source === 'builder_template' ? (
-              <div className="callout info">
-                契约说明：<code>/card-templates/validate</code> 与 <code>/card-templates/preview</code> 接收与保存相同的请求体
-                （<code>{'{name, kind, card_message}'}</code>），因此 template_id 会随 <code>card_message</code> 一起提交、可正常校验。
-                但 <code>builder_template</code> 本地没有卡片 JSON 可渲染，如需看到渲染结果，请把搭建工具导出的同一份 JSON
-                粘贴到下面的导入区（保存时仍按 builder_template 提交）。
-              </div>
-            ) : null}
-          </Card>
 
-          <Card title="从卡片搭建工具导入">
-            <Field
-              label="粘贴卡片 JSON"
-              hint="支持原始卡片 JSON，或包含 card_json / cardJson / card 字段的包装对象，也容忍 ```json 代码块"
-              error={importError}
-            >
-              <Textarea
-                className="mono"
-                rows={8}
-                value={importText}
-                placeholder='{"schema":"2.0", ...}'
-                onChange={(event) => setImportText(event.target.value)}
-              />
-            </Field>
-            <div className="row">
-              <Button onClick={importCard} disabled={!importText.trim()}>
-                导入到编辑器
-              </Button>
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  setImportText('');
-                  setImportError(null);
-                }}
-              >
-                清空
-              </Button>
-            </div>
+                <Field
+                  label="粘贴卡片 JSON"
+                  hint="支持原始卡片 JSON，或包含 card_json / cardJson / card 字段的包装对象，也容忍 ```json 代码块（兼容搭建工具导出的卡）"
+                  error={importError}
+                >
+                  <Textarea
+                    className="mono"
+                    rows={6}
+                    value={importText}
+                    placeholder='{"schema":"2.0", ...}'
+                    onChange={(event) => setImportText(event.target.value)}
+                  />
+                </Field>
+                <div className="row">
+                  <Button onClick={importCard} disabled={!importText.trim()}>
+                    导入到编辑器
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      setImportText('');
+                      setImportError(null);
+                    }}
+                  >
+                    清空
+                  </Button>
+                </div>
+              </>
+            ) : null}
           </Card>
         </>
       ) : (
@@ -862,6 +979,18 @@ function CardTemplateForm(): JSX.Element {
         )}
       </Card>
 
+      <MockPanel
+        meta={meta}
+        channels={channels}
+        alertGroups={alertGroups}
+        channelId={previewChannelId}
+        onChannelIdChange={setPreviewChannelId}
+        sample={sample}
+        onSampleChange={setSample}
+        mock={mock}
+        onMockChange={setMock}
+      />
+
       <Card title="校验与预览">
         <div className="form-inline mb-16">
           <Field label="样例（sample）">
@@ -936,38 +1065,47 @@ function CardTemplateForm(): JSX.Element {
             />
           </>
         ) : (
-          <p className="faint small mb-0">预览会调用 POST /card-templates/preview，用样例上下文渲染模板。</p>
+          <p className="faint small mb-0">
+            预览会调用 POST /card-templates/preview，用 mock 基线 + 覆盖项渲染模板。
+          </p>
         )}
       </Card>
 
-      {isEdit && id ? (
-        <Card
-          title="发送测试"
-          subtitle="POST /card-templates/:id/send-test —— 用真实凭据向指定渠道发送一次（会产生投递记录）"
-        >
-          <div className="form-inline">
-            <Field label="渠道（channel_id）" required>
-              <Select value={testChannelId} onChange={(event) => setTestChannelId(event.target.value)} style={{ width: 260 }}>
-                <option value="">（请选择渠道）</option>
-                {channels.map((channel) => (
-                  <option key={channel.id} value={channel.id}>
-                    {channel.name}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            <Field label="样例（sample）">
-              <RadioGroup<'firing' | 'resolved'>
-                value={sample}
-                options={[
-                  { value: 'firing', label: 'firing' },
-                  { value: 'resolved', label: 'resolved' },
-                ]}
-                onChange={setSample}
-              />
-            </Field>
+      <Card
+        title="发送测试"
+        subtitle="草稿测试走 POST /card-templates/send-test（不落库）；已保存模板走 POST /card-templates/:id/send-test。两者都会产生投递记录。"
+      >
+        <div className="form-inline">
+          <Field label="渠道（channel_id）" required>
+            <Select value={testChannelId} onChange={(event) => setTestChannelId(event.target.value)} style={{ width: 260 }}>
+              <option value="">（请选择渠道）</option>
+              {channels.map((channel) => (
+                <option key={channel.id} value={channel.id}>
+                  {channel.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="样例（sample）" hint="选择历史分组时由该分组状态决定">
+            <RadioGroup<'firing' | 'resolved'>
+              value={sample}
+              options={[
+                { value: 'firing', label: 'firing' },
+                { value: 'resolved', label: 'resolved' },
+              ]}
+              onChange={setSample}
+            />
+          </Field>
+          <Button
+            variant="primary"
+            loading={sendingTest}
+            disabled={!testChannelId}
+            onClick={() => void sendDraftTest()}
+          >
+            发送草稿测试
+          </Button>
+          {isEdit && id ? (
             <Button
-              variant="primary"
               loading={sendingTest}
               disabled={!testChannelId}
               onClick={() => {
@@ -975,7 +1113,11 @@ function CardTemplateForm(): JSX.Element {
                   setSendingTest(true);
                   setTestResult(null);
                   try {
-                    const result = await sendTestCardTemplate(id, { channel_id: testChannelId, sample });
+                    const result = await sendTestCardTemplate(id, {
+                      channel_id: testChannelId,
+                      sample,
+                      ...(effectiveMock() ? { mock: effectiveMock() } : {}),
+                    });
                     setTestResult(result);
                     toast.success('测试消息已提交发送');
                   } catch (cause) {
@@ -986,23 +1128,26 @@ function CardTemplateForm(): JSX.Element {
                 })();
               }}
             >
-              发送测试
+              用已保存模板发送
             </Button>
-          </div>
-          {testResult ? (
-            <div className="mt-16">
-              <Banner tone={testResult.state === 'failed' ? 'error' : 'success'}>
-                {testResult.state === 'failed'
-                  ? `发送失败${testResult.last_error ? `：${testResult.last_error}` : ''}`
-                  : `已提交发送（state=${testResult.state}）${
-                      testResult.lark_message_id ? ` · message_id ${testResult.lark_message_id}` : ''
-                    }`}
-              </Banner>
-              <JsonBlock value={testResult} maxHeight={240} />
-            </div>
           ) : null}
-        </Card>
-      ) : null}
+        </div>
+        <p className="faint small mt-8 mb-0">
+          草稿测试使用当前编辑器里的内容（含 mock 覆盖），无需先保存；投递记录里 <code>kind=test</code>。
+        </p>
+        {testResult ? (
+          <div className="mt-16">
+            <Banner tone={testResult.state === 'failed' ? 'error' : 'success'}>
+              {testResult.state === 'failed'
+                ? `发送失败${testResult.last_error ? `：${testResult.last_error}` : ''}`
+                : `已提交发送（state=${testResult.state}）${
+                    testResult.lark_message_id ? ` · message_id ${testResult.lark_message_id}` : ''
+                  }`}
+            </Banner>
+            <JsonBlock value={testResult} maxHeight={240} />
+          </div>
+        ) : null}
+      </Card>
     </>
   );
 }

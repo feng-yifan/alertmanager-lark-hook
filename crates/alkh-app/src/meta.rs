@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use alkh_domain::card_catalog::{alert_presets, card_components, CardComponent, CardPreset};
 use serde::Serialize;
-
 #[derive(Debug, Clone, Serialize)]
 pub struct EnumOption {
     pub value: &'static str,
@@ -39,6 +39,11 @@ pub struct Meta {
     pub channel_kinds: Vec<EnumOption>,
     pub receive_id_types: Vec<EnumOption>,
     pub variables: Vec<VariableMeta>,
+    /// 飞书卡片 JSON 2.0 组件目录：驱动本地卡片构建工具的组件面板/属性面板，
+    /// 也是保存时结构校验的依据（见 `alkh_domain::card_catalog`）。
+    pub card_components: &'static [CardComponent],
+    /// 告警积木（拖进画布即用的高频块，同样来自服务端，保证只用真实变量）。
+    pub card_presets: &'static [CardPreset],
     /// 严重级别 → 卡片 header 颜色（对象映射，便于前端直接查表）。
     pub severity_colors: BTreeMap<&'static str, &'static str>,
     /// 应用消息流卡片 `pin_unresolved` 的有效性提示（R4）。
@@ -402,6 +407,8 @@ pub fn meta() -> Meta {
         channel_kinds: channel_kinds(),
         receive_id_types: receive_id_types(),
         variables: render_variables(),
+        card_components: card_components(),
+        card_presets: alert_presets(),
         severity_colors: [
             ("critical", "red"),
             ("warning", "orange"),
@@ -431,8 +438,7 @@ mod tests {
         re.captures_iter(text).map(|c| c[1].to_string()).collect()
     }
 
-    /// README §3.3 的变量速查表必须与代码同步。
-    ///
+    /// README §3.3 的变量速查表必须与代码同步。    ///
     /// 这是用户唯一能看到的变量清单，最容易在增删变量时忘记更新——
     /// 而它一旦过期，用户就会照着写不存在的变量（渲染成空串），且毫无提示。
     #[test]
@@ -465,6 +471,31 @@ mod tests {
             extra.is_empty(),
             "README 变量表出现了代码里不存在的变量（拼写错误？）：{extra:?}"
         );
+    }
+
+    /// 告警积木（服务端下发给卡片构建工具）只能引用**真实存在**的变量。
+    ///
+    /// 积木是最容易被用户直接拖进卡片的路径：如果它引用了拼错的变量，
+    /// 渲染出来就是空串，而且没有任何提示。
+    #[test]
+    fn alert_presets_use_only_builtin_variables() {
+        let known: std::collections::BTreeSet<String> =
+            render_variable_names().into_iter().collect();
+        for preset in alkh_domain::card_catalog::alert_presets() {
+            let nodes: serde_json::Value = serde_json::from_str(preset.nodes_json)
+                .unwrap_or_else(|e| panic!("积木「{}」不是合法 JSON: {e}", preset.label));
+            for variable in alkh_domain::template::detect_variables_json(&nodes) {
+                // `label:` / `annotation:` 是运行时动态 key，不在静态清单里。
+                if variable.contains(':') {
+                    continue;
+                }
+                assert!(
+                    known.contains(&variable),
+                    "积木「{}」引用了未定义变量 ${{{variable}}}",
+                    preset.label
+                );
+            }
+        }
     }
 
     #[test]

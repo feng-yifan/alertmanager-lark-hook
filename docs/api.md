@@ -61,6 +61,34 @@
 | `severity_colors` | **对象映射**（`severity → 卡片 header 颜色`），不是枚举数组 |
 | `feed_button_types` | 应用消息流卡片按钮类型，与 `status_label_types` **不是**同一个枚举 |
 | `pin_supported_message_types` | `pin_unresolved` 真正生效的消息类型（R4：仅 `app_feed_card`） |
+| `card_components` | 飞书卡片 JSON 2.0 **组件目录**：驱动本地卡片构建工具的面板/属性面板，也是保存时结构校验的依据 |
+| `card_presets` | **告警积木**：`{id,label,description,nodes_json}`，`nodes_json` 是可直接插入 `body.elements` 的节点数组 |
+
+`card_components[]` 的元素：
+
+```jsonc
+{
+  "tag": "markdown",
+  "label": "富文本",
+  "group": "display",              // container | display | interactive | element | deprecated
+  "description": "…",
+  "children_key": null,            // 子节点所在字段：'elements' | 'columns' | null（叶组件）
+  "children": [],                  // 允许的子 tag；空数组 = 任意
+  "child_of": [],                  // 允许的父 tag；空数组 = 任意位置（如 column 只能是 ['column_set']）
+  "palette": true,                 // 是否出现在组件面板
+  "deprecated": "…",               // 仅 2.0 已废弃的组件（note / action）出现
+  "default_json": "{\"tag\":\"markdown\",\"content\":\"\"}",   // 新建节点的默认 JSON
+  "props": [
+    { "name": "content", "label": "内容（Markdown）", "type": "markdown",
+      "path": "content", "accessor": "field", "values": [], "max_chars": null,
+      "placeholder": "${alerts_list}", "hint": "…" }
+  ]
+}
+```
+
+约定：`props[].type` ∈ `text|markdown|number|bool|enum|px|url`；`props[].accessor` ∈ `field|button_url`
+（`button_url` 表示该字段读写 `behaviors[{type:"open_url",default_url}]`）；`path` 是点号路径
+（如 `text.content` / `header.title.content`）。**前端不另立规则**，新增飞书组件只改后端目录。
 
 ## 1. 鉴权
 
@@ -238,9 +266,62 @@
 | GET | `/card-templates/:id` | 详情 |
 | PATCH | `/card-templates/:id` | 更新 |
 | DELETE | `/card-templates/:id` | 被策略引用时 `409 conflict`（**没有细分 code**） |
-| POST | `/card-templates/validate` | body `{name,kind,card_message?,app_feed_spec?,is_default?}`（**`name` 必填，缺了是 422**）→ `{valid,errors:[],warnings:[],detected_variables:[],unknown_variables:[]}` |
-| POST | `/card-templates/preview` | body `{name,kind,card_message?,app_feed_spec?,sample:"firing"|"resolved",channel_id?,is_default?}` → `{kind,rendered_card_json,rendered_app_feed_spec,card_content,variables:{...}}` |
-| POST | `/card-templates/:id/send-test` | body `{channel_id,sample?}` → 真实发送一次，返回 **`Delivery`** |
+| POST | `/card-templates/validate` | body `{name,kind,card_message?,app_feed_spec?,is_default?}`（**`name` 必填，缺了是 422**）→ `{valid,errors:[],warnings:[],detected_variables:[],unknown_variables:[]}`；errors 含**组件目录**的结构错误（废弃组件、`column` 不在 `column_set` 内、`element_id` 重复/非法、超 200 组件…），warnings 含未知组件/未知属性 |
+| GET | `/card-templates/default` | 内置默认模板内容 `{card_message,app_feed_spec}`；卡片编辑器用它作「起步卡片」和旧来源转换的落点（**唯一事实来源在后端**） |
+| POST | `/card-templates/preview` | body `{name,kind,card_message?,app_feed_spec?,sample:"firing"\|"resolved",channel_id?,mock?,is_default?}` → `{kind,rendered_card_json,rendered_app_feed_spec,card_content,variables:{...}}` |
+| GET | `/card-templates/mock?channel_id=&sample=&alert_group_id=` | mock 基线：返回该数据源渲染出的**全部**变量，供编辑器 mock 面板列出（P1） |
+| POST | `/card-templates/send-test` | **草稿**测试发送（不落库）：body `{channel_id,name,kind,card_message?,app_feed_spec?,sample?,mock?}` → 真实发送一次，返回 **`Delivery`** |
+| POST | `/card-templates/:id/send-test` | body `{channel_id,sample?,mock?}` → 用已保存模板真实发送一次，返回 **`Delivery`** |
+| POST | `/channels/:id/test-message` | body `{message_type?,card_template_id?,sample?,mock?}` → 渠道级测试消息 |
+
+> **`source = builder_template` 已停用**（P2）：新建 / 更新时返回 `400 validation`
+> （「已停用来源 builder_template…」）。历史模板仍可 `GET` / `preview` 读取，
+> 编辑器会给出一键「转换为本地卡片」（切到 `builder_json` + 载入 `/card-templates/default` 的内容）。
+> 理由：JSON 导入的卡片不支持循环容器，而搭建工具模板又无法在本地校验/预览/版本化，
+> 两条来源混用会让"预览通过但发送失败"难以排查。
+
+### 5.1 mock 数据（P1）
+
+预览与测试发送共用同一份 mock 契约。三层语义，优先级从低到高：
+
+1. **基线**：`sample=firing|resolved` 的内置样例，或 `alert_group_id` 指定的一条**历史告警分组**；
+2. **覆盖**：`mock.variables` 逐项覆盖，支持 `label:` / `annotation:` 动态 key；
+3. 覆盖里的未知 key 也会写入渲染上下文（用于试写新标签），不会报错。
+
+```jsonc
+// 请求片段（preview / send-test / test-message 通用）
+{
+  "sample": "firing",
+  "channel_id": "…",
+  "mock": {
+    "alert_group_id": null,                       // 设置后作为基线数据源，sample 仅作展示
+    "variables": { "summary": "自定义概要", "label:team": "sre" }
+  }
+}
+```
+
+规则：
+
+- `mock` 只影响**渲染**。历史分组**只作数据源、绝不回写**；测试消息仍归属该渠道的「测试分组」，因此照样可更新 / 可撤回。
+- 指定 `alert_group_id` 时以该分组状态为准（`firing` / `resolved`），保证 `app_feed_card` 的状态标签与数据一致。
+- `POST /card-templates/preview` 返回的 `variables` 是**覆盖后**的有效上下文。
+- 草稿测试（`/card-templates/send-test`）不落库模板，`Delivery.card_template_id` 为 `null`。
+- 规模上限：`variables` 最多 200 项、单个值最多 4000 字符、单个 key 最多 128 字符，超限 `400 validation`。
+
+`GET /card-templates/mock` → 
+
+```json
+{
+  "source": "builtin",
+  "sample": "firing",
+  "alert_group_id": null,
+  "alert_group_label": null,
+  "variables": { "alertname": "HighCPUUsage", "status_text": "未解决", "alerts_list": "…", "label:team": "sre" }
+}
+```
+
+`source=alert_group` 时 `alert_group_id` 非空、`alert_group_label` 给出 `告警名 · 状态 · 条数` 摘要；
+`alert_group_id` 不存在时返回 `404 not_found`（**不会**静默回退到内置样例）。
 
 ## 6. 告警分组与投递
 

@@ -18,6 +18,7 @@ import type {
   AuditLogListParams,
   CardTemplate,
   CardTemplateCreate,
+  CardTemplateDefaults,
   CardTemplateKind,
   CardTemplatePatch,
   CardTemplateSendTestRequest,
@@ -30,12 +31,14 @@ import type {
   ChannelSyncResult,
   Delivery,
   DeliveryListParams,
+  DraftSendTestRequest,
   Hook,
   HookCreated,
   HookTokenResponse,
   LoginRequest,
   LoginResponse,
   Meta,
+  MockBaseline,
   NotificationPolicy,
   NotificationPolicyInput,
   Overview,
@@ -45,6 +48,7 @@ import type {
   SessionResponse,
   SettingsCheckResponse,
   TestMessageRequest,
+  UUID,
   ValidateRequest,
   ValidateResponse,
 } from './types';
@@ -312,6 +316,14 @@ export function getCardTemplate(id: string, signal?: AbortSignal): Promise<CardT
   return request<CardTemplate>(`/card-templates/${id}`, { signal });
 }
 
+/**
+ * 内置默认模板内容：卡片编辑器用作「起步卡片」与旧来源（builder_template）转换的落点。
+ * 单一事实来源在后端 `alkh-app/src/defaults.rs`，前端不再抄一份。
+ */
+export function getCardTemplateDefaults(signal?: AbortSignal): Promise<CardTemplateDefaults> {
+  return request<CardTemplateDefaults>('/card-templates/default', { signal });
+}
+
 export function patchCardTemplate(id: string, body: CardTemplatePatch): Promise<CardTemplate> {
   return request<CardTemplate>(`/card-templates/${id}`, { method: 'PATCH', body });
 }
@@ -328,8 +340,31 @@ export function previewCardTemplate(body: PreviewRequest): Promise<PreviewRespon
   return request<PreviewResponse>('/card-templates/preview', { method: 'POST', body });
 }
 
+/**
+ * 拉取 mock 基线：某条样例（内置 firing/resolved 或历史告警分组）渲染出的全部变量。
+ * 覆盖项由前端本地维护，基线每次重建，避免把上一份覆盖带进来。
+ */
+export function getCardTemplateMock(
+  params: { channel_id?: UUID; sample?: 'firing' | 'resolved'; alert_group_id?: UUID } = {},
+  signal?: AbortSignal,
+): Promise<MockBaseline> {
+  return request<MockBaseline>('/card-templates/mock', {
+    query: {
+      channel_id: params.channel_id,
+      sample: params.sample,
+      alert_group_id: params.alert_group_id,
+    },
+    signal,
+  });
+}
+
 export function sendTestCardTemplate(id: string, body: CardTemplateSendTestRequest): Promise<Delivery> {
   return request<Delivery>(`/card-templates/${id}/send-test`, { method: 'POST', body });
+}
+
+/** 用**未保存的草稿**模板发测试消息：不落库，不污染模板列表。 */
+export function sendTestCardTemplateDraft(body: DraftSendTestRequest): Promise<Delivery> {
+  return request<Delivery>('/card-templates/send-test', { method: 'POST', body });
 }
 
 /* ------------------------------------------------------------------ */

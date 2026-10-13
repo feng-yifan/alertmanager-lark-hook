@@ -7,8 +7,9 @@ use axum::Json;
 use serde::Deserialize;
 
 use alkh_app::channels::TestSample;
+use alkh_app::mock::{MockBaseline, MockSpec};
 use alkh_app::templates::{CardTemplateView, PreviewReport, TemplateInput, ValidationReport};
-use alkh_domain::ids::{CardTemplateId, ChannelId};
+use alkh_domain::ids::{AlertGroupId, CardTemplateId, ChannelId};
 use alkh_domain::template::TemplateKind;
 
 use crate::api::auth::Admin;
@@ -28,6 +29,8 @@ pub struct PreviewRequest {
     pub template: TemplateInput,
     pub sample: Option<SampleArg>,
     pub channel_id: Option<ChannelId>,
+    /// mock 覆盖（P1）：变量覆盖 + 可选的历史告警分组数据源。
+    pub mock: MockSpec,
 }
 
 impl Default for PreviewRequest {
@@ -42,8 +45,19 @@ impl Default for PreviewRequest {
             },
             sample: None,
             channel_id: None,
+            mock: MockSpec::default(),
         }
     }
+}
+
+/// `GET /card-templates/mock` 的查询参数。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct MockQuery {
+    pub channel_id: Option<ChannelId>,
+    pub sample: Option<SampleArg>,
+    /// 用历史告警分组作为基线数据源。
+    pub alert_group_id: Option<AlertGroupId>,
 }
 
 /// 预览样例，接受 `firing` / `resolved`。
@@ -68,6 +82,20 @@ pub struct SendTestRequest {
     pub channel_id: ChannelId,
     #[serde(default)]
     pub sample: Option<TestSample>,
+    #[serde(default)]
+    pub mock: MockSpec,
+}
+
+/// 用**未保存的草稿模板**发送测试消息（卡片编辑器 P1）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct DraftSendTestRequest {
+    pub channel_id: ChannelId,
+    #[serde(flatten)]
+    pub template: TemplateInput,
+    #[serde(default)]
+    pub sample: Option<TestSample>,
+    #[serde(default)]
+    pub mock: MockSpec,
 }
 
 pub async fn list(
@@ -78,6 +106,11 @@ pub async fn list(
     Ok(Json(
         state.templates.list(q.kind).await.map_err(ApiError::from)?,
     ))
+}
+
+/// 内置默认模板内容：卡片编辑器用作「起步卡片」与旧来源转换的落点。
+pub async fn defaults(_admin: Admin) -> ApiResult<Json<alkh_app::templates::DefaultTemplatesView>> {
+    Ok(Json(alkh_app::templates::default_templates()))
 }
 
 pub async fn get(
@@ -155,7 +188,27 @@ pub async fn preview(
     Ok(Json(
         state
             .templates
-            .preview(req.template, preview_sample, req.channel_id)
+            .preview(req.template, preview_sample, req.channel_id, req.mock)
+            .await
+            .map_err(ApiError::from)?,
+    ))
+}
+
+/// 返回某基线（内置样例 / 历史告警分组）渲染出的全部变量，供 mock 面板编辑。
+pub async fn mock_baseline(
+    State(state): State<AppState>,
+    _admin: Admin,
+    Query(q): Query<MockQuery>,
+) -> ApiResult<Json<MockBaseline>> {
+    let sample = q.sample.map(Into::into).unwrap_or(TestSample::Firing);
+    let preview_sample = match sample {
+        TestSample::Firing => alkh_app::templates::PreviewSample::Firing,
+        TestSample::Resolved => alkh_app::templates::PreviewSample::Resolved,
+    };
+    Ok(Json(
+        state
+            .templates
+            .mock_baseline(q.channel_id, preview_sample, q.alert_group_id)
             .await
             .map_err(ApiError::from)?,
     ))
@@ -181,6 +234,33 @@ pub async fn send_test(
                 Some(message_type),
                 Some(id),
                 req.sample.unwrap_or_default(),
+                &req.mock,
+                &actor,
+            )
+            .await
+            .map_err(ApiError::from)?,
+    ))
+}
+
+/// 用请求体里的**草稿**模板发送测试消息：不落库、不污染模板列表。
+pub async fn send_test_draft(
+    State(state): State<AppState>,
+    admin: Admin,
+    Json(req): Json<DraftSendTestRequest>,
+) -> ApiResult<Json<alkh_domain::alert::Delivery>> {
+    let actor = admin.actor();
+    let template = state
+        .templates
+        .build_draft(req.template)
+        .map_err(ApiError::from)?;
+    Ok(Json(
+        state
+            .channels
+            .send_test_draft(
+                &req.channel_id,
+                &template,
+                req.sample.unwrap_or_default(),
+                &req.mock,
                 &actor,
             )
             .await

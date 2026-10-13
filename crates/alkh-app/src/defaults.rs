@@ -29,8 +29,14 @@ const DEFAULT_CARD_JSON: &str = r#"{
         "content": "**接收器**：${receiver}\n**分组**：${group_key}\n**首次出现**：${first_seen_at}\n**最后更新**：${last_seen_at}\n**告警总数**：${alert_count}"
       },
       {
-        "tag": "note",
-        "elements": [{ "tag": "plain_text", "content": "由 alertmanager-lark-hook 投递" }]
+        "tag": "div",
+        "element_id": "footer",
+        "text": {
+          "tag": "plain_text",
+          "content": "由 alertmanager-lark-hook 投递",
+          "text_size": "notation",
+          "text_color": "grey"
+        }
       }
     ]
   }
@@ -61,6 +67,24 @@ mod tests {
         let mut spec = CardMessageSpec::builder_json(default_card_json());
         spec.normalize_and_validate()
             .expect("内置默认卡片必须通过校验");
+    }
+
+    /// 回归：默认卡片曾用 `note`（JSON 2.0 已废弃的 1.0 组件），
+    /// 在飞书侧会直接报错。这里锁死「组件目录零错误零警告」。
+    #[test]
+    fn default_card_uses_no_deprecated_component() {
+        let card = default_card_json();
+        let report = alkh_domain::card_catalog::validate_card_json(&card);
+        assert!(report.is_valid(), "默认卡片结构错误: {:?}", report.errors);
+        assert!(
+            report.warnings.is_empty(),
+            "默认卡片出现可疑用法: {:?}",
+            report.warnings
+        );
+        assert_eq!(
+            alkh_domain::card_catalog::collect_tags(&card),
+            vec!["markdown", "hr", "div"]
+        );
     }
 
     #[test]

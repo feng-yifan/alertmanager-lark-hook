@@ -662,6 +662,53 @@ async fn meta_endpoint_pins_the_wire_format() {
         "/api/v1/hooks/alertmanager/{token}"
     );
     assert_eq!(meta["pin_supported_message_types"][0], "app_feed_card");
+
+    // 组件目录（本地卡片构建工具的契约来源）：驱动面板 + 校验。
+    let components = meta["card_components"]
+        .as_array()
+        .expect("card_components 必须是数组");
+    let tags: Vec<&str> = components
+        .iter()
+        .map(|c| c["tag"].as_str().unwrap())
+        .collect();
+    for expected in ["markdown", "div", "hr", "button", "column_set", "column"] {
+        assert!(
+            tags.contains(&expected),
+            "组件目录缺少 {expected}: {tags:?}"
+        );
+    }
+    // 已废弃组件必须在目录里（校验时要能给出可操作的报错）
+    let note = components
+        .iter()
+        .find(|c| c["tag"] == "note")
+        .expect("目录应包含已废弃的 note");
+    assert!(note["deprecated"].as_str().unwrap().contains("notation"));
+    assert_eq!(note["palette"], false);
+    // 默认 JSON 必须是合法结构（前端新建节点直接用它）
+    for component in components {
+        if component["palette"] == true {
+            let node: Value = serde_json::from_str(component["default_json"].as_str().unwrap())
+                .expect("default_json 必须是合法 JSON");
+            assert_eq!(node["tag"], component["tag"]);
+        }
+        assert!(component["props"].is_array());
+    }
+    // `type` 字段名不得泄露 Rust 字段名 `ty`
+    let prop = &components.iter().find(|c| c["tag"] == "markdown").unwrap()["props"][0];
+    assert!(prop["type"].is_string(), "{prop}");
+    assert!(prop.get("ty").is_none(), "{prop}");
+
+    // 告警积木同样由服务端下发（保证只用真实变量）
+    let presets = meta["card_presets"]
+        .as_array()
+        .expect("card_presets 必须是数组");
+    assert!(presets.len() >= 5, "积木太少：{}", presets.len());
+    for preset in presets {
+        let nodes: Value =
+            serde_json::from_str(preset["nodes_json"].as_str().unwrap()).expect("nodes_json 合法");
+        assert!(nodes.as_array().is_some_and(|a| !a.is_empty()), "{preset}");
+        assert!(preset["label"].is_string(), "{preset}");
+    }
 }
 
 #[tokio::test]
@@ -1890,6 +1937,311 @@ async fn card_template_import_validate_preview_and_crud() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 204);
+}
+
+/// P1：mock 基线、带覆盖的预览、草稿测试发送。
+#[tokio::test]
+async fn card_template_mock_baseline_preview_and_draft_send_test() {
+    let mut h = start().await;
+    h.create_channel().await;
+    let channel_id = h.channel_id.clone().unwrap();
+
+    // --- 1. 内置基线：返回全部变量 ---
+    let (status, baseline) = h.get("/api/v1/card-templates/mock?sample=firing").await;
+    assert_eq!(status, 200, "{baseline}");
+    assert_eq!(baseline["source"], "builtin");
+    assert_eq!(baseline["variables"]["alertname"], "HighCPUUsage");
+    assert_eq!(baseline["variables"]["status_text"], "未解决");
+    assert!(baseline["variables"]["alerts_list"]
+        .as_str()
+        .unwrap()
+        .contains("HighCPUUsage"));
+
+    // --- 2. 覆盖项进入预览渲染 ---
+    let card_json = json!({
+        "schema": "2.0",
+        "config": {"update_multi": true},
+        "header": {"template": "${severity_color}", "title": {"tag": "plain_text", "content": "${alertname}"}},
+        "body": {"elements": [
+            {"tag": "markdown", "content": "${summary} / ${label:team}"}
+        ]}
+    });
+    let (status, preview) = h
+        .post(
+            "/api/v1/card-templates/preview",
+            json!({
+                "sample": "firing",
+                "channel_id": channel_id,
+                "mock": {
+                    "variables": {"summary": "来自 mock 的概要", "label:team": "sre-mock"}
+                },
+                "name": "mock 预览",
+                "kind": "card_message",
+                "card_message": {"source": "builder_json", "card_json": card_json}
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{preview}");
+    let rendered = preview["rendered_card_json"].to_string();
+    assert!(rendered.contains("来自 mock 的概要"), "{rendered}");
+    assert!(
+        rendered.contains("sre-mock"),
+        "动态 label 覆盖应生效: {rendered}"
+    );
+    // 预览返回的是**覆盖后**的有效上下文
+    assert_eq!(preview["variables"]["summary"], "来自 mock 的概要");
+
+    // --- 3. 用历史告警分组作为 mock 基线 ---
+    let (status, pushed) = h.push(firing_payload(1)).await;
+    assert_eq!(status, 200, "{pushed}");
+    let (_, groups) = h.get("/api/v1/alert-groups").await;
+    let group_id = groups["items"][0]["id"].as_str().unwrap().to_string();
+
+    let (status, from_history) = h
+        .get(&format!(
+            "/api/v1/card-templates/mock?sample=firing&alert_group_id={group_id}"
+        ))
+        .await;
+    assert_eq!(status, 200, "{from_history}");
+    assert_eq!(from_history["source"], "alert_group");
+    assert_eq!(from_history["alert_group_id"], group_id);
+    assert_eq!(from_history["variables"]["alertname"], "HighCPU");
+    assert!(
+        from_history["alert_group_label"]
+            .as_str()
+            .unwrap()
+            .contains("HighCPU"),
+        "{from_history}"
+    );
+
+    // 历史分组不存在 → 404（而不是静默回退到样例）
+    let missing = alkh_domain::ids::AlertGroupId::new();
+    let (status, body) = h
+        .get(&format!(
+            "/api/v1/card-templates/mock?alert_group_id={missing}"
+        ))
+        .await;
+    assert_eq!(status, 404, "{body}");
+
+    // --- 4. 草稿测试发送：不落库模板，消息内容反映 mock ---
+    let (_, before) = h.get("/api/v1/card-templates").await;
+    let templates_before = before.as_array().unwrap().len();
+
+    let (status, delivery) = h
+        .post(
+            "/api/v1/card-templates/send-test",
+            json!({
+                "channel_id": channel_id,
+                "sample": "firing",
+                "mock": {"variables": {"summary": "草稿测试概要"}},
+                "name": "草稿模板",
+                "kind": "card_message",
+                "card_message": {"source": "builder_json", "card_json": card_json}
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{delivery}");
+    assert_eq!(delivery["state"], "active");
+    assert_eq!(delivery["kind"], "test");
+    // 草稿不落库 ⇒ Delivery 不记录 template_id
+    assert!(delivery["card_template_id"].is_null(), "{delivery}");
+
+    {
+        let s = h.fake.snapshot();
+        // 第 3 步真实推送也创建过卡片实体，这里只关心最近一次（草稿测试）。
+        let rendered = s.card_entities.last().expect("应创建卡片实体").to_string();
+        assert!(rendered.contains("草稿测试概要"), "{rendered}");
+    }
+
+    let (_, after) = h.get("/api/v1/card-templates").await;
+    assert_eq!(
+        after.as_array().unwrap().len(),
+        templates_before,
+        "草稿测试不得创建模板"
+    );
+
+    // 未选渠道 / 不存在的渠道
+    let (status, body) = h
+        .post(
+            "/api/v1/card-templates/send-test",
+            json!({
+                "channel_id": "00000000-0000-0000-0000-000000000000",
+                "name": "草稿模板",
+                "kind": "card_message",
+                "card_message": {"source": "builder_json", "card_json": card_json}
+            }),
+        )
+        .await;
+    assert_eq!(status, 404, "{body}");
+
+    // --- 5. mock 规模上限 ---
+    let too_many: serde_json::Map<String, Value> =
+        (0..201).map(|i| (format!("k{i}"), json!("v"))).collect();
+    let (status, body) = h
+        .post(
+            "/api/v1/card-templates/preview",
+            json!({
+                "sample": "firing",
+                "mock": {"variables": too_many},
+                "name": "mock 预览",
+                "kind": "card_message",
+                "card_message": {"source": "builder_json", "card_json": card_json}
+            }),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+}
+
+/// P0：组件目录校验 + 停用 builder_template 来源。
+#[tokio::test]
+async fn card_catalog_blocks_deprecated_components_and_legacy_source() {
+    let h = start().await;
+
+    // 0. 内置默认卡片（编辑器「起步卡片」/旧来源转换的落点）必须自身合法
+    let (status, defaults) = h.get("/api/v1/card-templates/default").await;
+    assert_eq!(status, 200, "{defaults}");
+    assert_eq!(defaults["card_message"]["source"], "builder_json");
+    let starter = defaults["card_message"]["card_json"].clone();
+    assert_eq!(starter["schema"], "2.0");
+    let (status, report) = h
+        .post(
+            "/api/v1/card-templates/validate",
+            json!({"name": "起步卡片", "kind": "card_message",
+                   "card_message": {"source": "builder_json", "card_json": starter}}),
+        )
+        .await;
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(report["valid"], true, "起步卡片必须合法: {report}");
+    assert_eq!(
+        report["warnings"].as_array().unwrap().len(),
+        0,
+        "起步卡片不应有警告: {report}"
+    );
+
+    // 1. 已废弃的 note（JSON 2.0 不支持）→ 校验失败，且给出可操作的替代写法
+    let note_card = json!({
+        "schema": "2.0",
+        "config": {"update_multi": true},
+        "body": {"elements": [{"tag": "note", "elements": [{"tag": "plain_text", "content": "脚注"}]}]}
+    });
+    let (status, report) = h
+        .post(
+            "/api/v1/card-templates/validate",
+            json!({"name": "note 卡", "kind": "card_message",
+                   "card_message": {"source": "builder_json", "card_json": note_card}}),
+        )
+        .await;
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(report["valid"], false, "{report}");
+    let errors = report["errors"].as_array().unwrap();
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.as_str().unwrap().contains("notation")),
+        "note 的报错应给出替代写法: {errors:?}"
+    );
+
+    // 2. 未知组件是**警告**而不是错误（导入的卡片仍可保存，只是不能可视化编辑）
+    let unknown_card = json!({
+        "schema": "2.0",
+        "config": {"update_multi": true},
+        "body": {"elements": [{"tag": "chart", "chart_spec": {}}]}
+    });
+    let (_, report) = h
+        .post(
+            "/api/v1/card-templates/validate",
+            json!({"name": "chart 卡", "kind": "card_message",
+                   "card_message": {"source": "builder_json", "card_json": unknown_card}}),
+        )
+        .await;
+    assert_eq!(report["valid"], true, "{report}");
+    assert!(report["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|w| w.as_str().unwrap().contains("chart")));
+
+    // 3. 嵌套容器 + element_id 规则：合法卡片零错误零警告
+    let good_card = json!({
+        "schema": "2.0",
+        "config": {"update_multi": true},
+        "header": {"template": "${severity_color}"},
+        "body": {"elements": [
+            {"tag": "markdown", "element_id": "summary", "content": "${alerts_summary}"},
+            {"tag": "column_set", "flex_mode": "bisect", "columns": [
+                {"tag": "column", "width": "weighted", "weight": 1,
+                 "elements": [{"tag": "div", "text": {"tag": "plain_text", "content": "${firing_count}"}}]},
+                {"tag": "column", "width": "weighted", "weight": 1,
+                 "elements": [{"tag": "collapsible_panel", "expanded": false,
+                               "header": {"title": {"tag": "plain_text", "content": "详情"}},
+                               "elements": [{"tag": "markdown", "content": "${alerts_list}"}]}]}
+            ]},
+            {"tag": "button", "text": {"tag": "plain_text", "content": "查看详情"},
+             "type": "primary", "behaviors": [{"type": "open_url", "default_url": "${external_url}"}]}
+        ]}
+    });
+    let (_, report) = h
+        .post(
+            "/api/v1/card-templates/validate",
+            json!({"name": "合法卡", "kind": "card_message",
+                   "card_message": {"source": "builder_json", "card_json": good_card}}),
+        )
+        .await;
+    assert_eq!(report["valid"], true, "{report}");
+    assert_eq!(
+        report["warnings"].as_array().unwrap().len(),
+        0,
+        "合法卡片不应有警告: {report}"
+    );
+
+    // 4. 保存同样被拦（不能只在 /validate 里提示）
+    let (status, body) = h
+        .post(
+            "/api/v1/card-templates",
+            json!({"name": "note 卡", "kind": "card_message",
+                   "card_message": {"source": "builder_json", "card_json": note_card}}),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("结构不合法"),
+        "{body}"
+    );
+
+    // 5. column 放在 column_set 之外 → 错误
+    let orphan_column = json!({
+        "schema": "2.0",
+        "config": {"update_multi": true},
+        "body": {"elements": [{"tag": "column", "elements": []}]}
+    });
+    let (_, report) = h
+        .post(
+            "/api/v1/card-templates/validate",
+            json!({"name": "孤列", "kind": "card_message",
+                   "card_message": {"source": "builder_json", "card_json": orphan_column}}),
+        )
+        .await;
+    assert_eq!(report["valid"], false, "{report}");
+
+    // 6. builder_template 已停用：新建被拒绝（历史模板仍可读取与预览）
+    let (status, body) = h
+        .post(
+            "/api/v1/card-templates",
+            json!({"name": "旧来源", "kind": "card_message",
+                   "card_message": {"source": "builder_template", "template_id": "AAq123"}}),
+        )
+        .await;
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("builder_template"),
+        "{body}"
+    );
 }
 
 #[tokio::test]
