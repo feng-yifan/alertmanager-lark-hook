@@ -112,9 +112,9 @@ pub enum Counter {
     LarkApiError,
     /// 成功撤回（删除）已发出的消息。
     DeliveryRecalled,
-    /// 成功置顶一条告警卡片（R4）。
+    /// 成功 Pin 一条告警卡片（R4）。
     MessagePinned,
-    /// 成功取消置顶（R4）。
+    /// 成功取消 Pin（R4）。
     MessageUnpinned,
 }
 
@@ -188,14 +188,14 @@ pub trait LarkGateway: Send + Sync {
     /// `DELETE /open-apis/im/v1/messages/:message_id` 撤回消息。
     async fn recall_message(&self, message_id: &str) -> PortResult<()>;
 
-    /// `POST /open-apis/im/v1/pins` 置顶一条消息（R4）。
+    /// `POST /open-apis/im/v1/pins` Pin 一条消息（R4）。
     ///
-    /// 幂等：消息已经被置顶时飞书返回既有 Pin 信息，同样算成功。
+    /// 幂等：消息已经被 Pin 时飞书返回既有 Pin 信息，同样算成功。
     async fn pin_message(&self, message_id: &str) -> PortResult<()>;
 
-    /// `DELETE /open-apis/im/v1/pins/:message_id` 取消置顶（R4）。
+    /// `DELETE /open-apis/im/v1/pins/:message_id` 取消 Pin（R4）。
     ///
-    /// 幂等：消息未被置顶或已被撤回时飞书同样返回成功。
+    /// 幂等：消息未被 Pin 或已被撤回时飞书同样返回成功。
     async fn unpin_message(&self, message_id: &str) -> PortResult<()>;
 }
 

@@ -410,10 +410,10 @@ pub struct AlertGroup {
     pub last_notified_at: Option<Timestamp>,
     pub resolved_at: Option<Timestamp>,
     pub active_delivery_id: Option<DeliveryId>,
-    /// 当前被置顶的卡片消息（`om_…`）；`None` = 该分组没有置顶卡片。
+    /// 当前被 Pin 的卡片消息（`om_…`）；`None` = 该分组没有 Pin 卡片。
     ///
-    /// 只在策略开启「未解决告警置顶」且分组仍处于 firing 时指向当前活跃消息；
-    /// 全部恢复、开关关闭或消息被替换时会取消置顶并清空（R4）。
+    /// 只在策略开启「未解决告警 Pin」且分组仍处于 firing 时指向当前活跃消息；
+    /// 全部恢复、开关关闭或消息被替换时会取消 Pin 并清空（R4）。
     pub pinned_message_id: Option<String>,
 }
 

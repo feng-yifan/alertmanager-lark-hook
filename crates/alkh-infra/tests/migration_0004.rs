@@ -76,7 +76,7 @@ async fn upgrade_from_a_database_without_the_pin_columns() {
     .unwrap();
     assert_eq!(pin, 0, "新开关必须默认关闭");
 
-    // 分组可以记录 / 清空置顶消息。
+    // 分组可以记录 / 清空 Pin 消息。
     sqlx::query(
         "INSERT INTO alert_groups (id, hook_id, channel_id, group_key, status, first_seen_at, \
          last_seen_at, pinned_message_id) VALUES ('g1', 'h1', 'c1', 'k1', 'firing', \
@@ -84,9 +84,9 @@ async fn upgrade_from_a_database_without_the_pin_columns() {
     )
     .execute(&pool)
     .await
-    .expect("置顶消息应能写入");
+    .expect("Pin 消息应能写入");
     sqlx::query("UPDATE alert_groups SET pinned_message_id = NULL WHERE id = 'g1'")
         .execute(&pool)
         .await
-        .expect("置顶消息应能清空");
+        .expect("Pin 消息应能清空");
 }

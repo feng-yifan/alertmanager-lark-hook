@@ -17,7 +17,7 @@ use crate::error::{AppError, AppResult};
 #[serde(default)]
 pub struct PolicyInput {
     pub card_template_id: Option<CardTemplateId>,
-    /// R4：未解决告警时置顶当前卡片，全部恢复后取消置顶（默认关闭）。
+    /// R4：未解决告警时 Pin 当前卡片，全部恢复后取消 Pin（默认关闭）。
     pub pin_unresolved: bool,
     pub repeat_policy: RepeatPolicy,
     pub resolved_policy: ResolvedPolicy,

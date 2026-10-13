@@ -384,16 +384,38 @@ Message has expired when recall message (发出时间过长); `230013` bot has n
 
 ---
 
-## 4.1 Pin / unpin message (置顶消息) — VERIFIED
+## 4.1 Pin 消息 / 取消 Pin —— 注意：这不是「置顶消息」 — VERIFIED
+
+飞书客户端里有两个名字相似、但**产品与接口都不同**的能力，本项目 R4 用的是 **Pin**：
+
+| | **Pin**（本项目使用） | **置顶消息 / 群置顶**（本项目未使用） |
+|---|---|---|
+| 客户端入口 | 消息菜单 → `Pin`；会话里的 **Pin 标签页** | 消息菜单 → `置顶消息`；固定在**会话顶部** |
+| 数量 | 可 Pin 多条，Pin 列表按时间排列 | 用「置顶消息」按钮**只能置顶 1 条**（官方 FAQ 明示） |
+| 可见性 | Pin 列表对会话所有成员可见 | 置顶内容会话各方都能在顶部看到 |
+| 开放接口 | `POST /im/v1/pins`、`DELETE /im/v1/pins/:message_id` | `POST /im/v1/chats/:chat_id/top_notice/put_top_notice`、`DELETE …/delete_top_notice` |
+| 所需权限 | 任一：`im:message` / `im:message.pins:write_only` / `im:message:send_as_bot` | 群信息更新 / 群置顶管理类权限，且调用者需有群内置顶管理权限 |
+
+来源（均为官方文档）：
+
+- 帮助中心《使用 Pin 功能》<https://www.feishu.cn/hc/zh-CN/articles/383903876352>：
+  「你可以将会话中的某条重要消息设为 Pin……**Pin 列表**中的内容对会话中的所有成员可见」，
+  入口是消息菜单里的 `Pin` / `取消 Pin`，查看入口是 **Pin 标签页**。
+- 帮助中心《在会话中置顶重要消息》<https://www.feishu.cn/hc/zh-CN/articles/330585947919>：
+  「将任何一条消息或群公告**置顶在会话顶部**」，FAQ 明确
+  「通过**置顶消息**按钮只能置顶 **1 条**消息。如需置顶多条消息，可以使用 **Pin 功能**」。
+- OpenAPI《 Pin 消息概述》<https://open.feishu.cn/document/im-v1/pin/pin-overview>：
+  「你可以将会话中的某条重要消息设为 Pin……Pin 列表中的内容对会话中的所有成员可见」，
+  即 `im/v1/pins` 对应的是 **Pin 列表**，不是会话顶部的单条置顶。
+
+> 结论：`im/v1/pins` ≠ 会话顶部的「置顶消息」。早期文档/UI 把本项目的能力叫「置顶」是不准确的，
+> 现已统一改称 **Pin**；如果将来要「固定在会话顶部」，必须换用下面的 `top_notice` 接口。
+
+### Pin — `POST /open-apis/im/v1/pins`
 
 Sources:
 <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/pin/create.md?lang=zh-CN> ·
 <https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/pin/delete.md?lang=zh-CN>
-
-这就是本项目 R4「未解决告警置顶」用的官方能力：普通卡片消息（`im/v1/messages`）
-没有 `time_sensitive` 之类的字段，但可以作为一个**消息**被置顶到会话顶部。
-
-### Pin — `POST /open-apis/im/v1/pins`
 
 | | |
 |---|---|
@@ -409,7 +431,7 @@ Sources:
 
 Body: `message_id` (required) — e.g. `om_dc13264520392913993dd051dba21dcf`.
 
-Response `data.pin`: `{message_id, chat_id, operator_id, operator_id_type (open_id|app_id), create_time}`.
+Response `data.pin`: `{message_id, chat_id, operator_id, operator_id_type (open_id|app_id), create_time}`。
 
 错误码（400）：`230001` 参数错误; `230002` 机器人不在群组中; `230006` 未开启机器人能力;
 `230011` 消息已被撤回; `230013` 机器人对该用户不可用; `230027` 权限不足;
@@ -426,14 +448,32 @@ Response `data.pin`: `{message_id, chat_id, operator_id, operator_id_type (open_
 | 权限要求 | 与 Pin 相同（任一即可） |
 
 前提与限制同 Pin。注意：**如果消息未被 Pin 或已被撤回，该接口返回成功**
-（`{"code":0,"msg":"success","data":{}}`），因此「取消置顶」天然幂等。
+（`{"code":0,"msg":"success","data":{}}`），因此「取消 Pin」天然幂等。
 
 对本项目的含义：
 
 - 不需要为新能力单独申请权限 —— 发送卡片已经在用的 `im:message:send_as_bot` 就够；
-- `230046` 是生产里最容易踩的错：群设置只允许群主/管理员置顶，而机器人通常只是普通成员。
+- `230046` 是生产里最容易踩的错：群设置只允许群主/管理员 Pin，而机器人通常只是普通成员。
   因此 R4 的失败必须是**非阻塞**的（只记日志与指标，告警照常投递）；
 - 应答里的 `operator_id_type = app_id` 说明这条 Pin 是机器人自己做的，可用于排查。
+
+### 置顶消息 / 群置顶（`top_notice`）— 本项目未使用
+
+Source: <https://open.feishu.cn/document/server-docs/group/chat/put_top_notice> ·
+<https://open.feishu.cn/document/server-docs/group/chat/delete_top_notice>
+
+| | |
+|---|---|
+| HTTP URL | `POST https://open.feishu.cn/open-apis/im/v1/chats/:chat_id/top_notice/put_top_notice` |
+| 撤销 | `DELETE …/chats/:chat_id/top_notice/delete_top_notice` |
+| Body | `{"chat_top_notice":[{"action_type":"2","message_id":"om_…"}]}`（`action_type` 见原文档枚举） |
+| 说明 | 「Updates the pinned information in a group chat. A group message or announcement can be pinned.」 |
+| 权限 | 群信息更新 / 群置顶管理类权限；调用者必须在该群内且同租户 |
+| 典型错误 | `232011` 机器人不在群内；`232014` 无群内置顶管理权限；`232033` 外部群不支持 |
+
+**与 Pin 的区别**：它把内容固定在**会话顶部**（单条，客户端按钮只能置顶 1 条），
+而 Pin 是把消息加入**Pin 列表**（多条，Pin 标签页查看）。
+本项目 R4 用的是 Pin；若产品上要的是「会话顶部的横幅式置顶」，应改接这套接口。
 
 ---
 

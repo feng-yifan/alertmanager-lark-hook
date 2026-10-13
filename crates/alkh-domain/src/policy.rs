@@ -127,10 +127,11 @@ impl LabelMatcher {
 pub struct NotificationPolicy {
     pub channel_id: ChannelId,
     pub card_template_id: Option<CardTemplateId>,
-    /// 「未解决告警置顶」（R4，默认关闭）：分组仍有 firing 告警时，把当前活跃卡片
-    /// 置顶（`POST /open-apis/im/v1/pins`）；全部恢复后取消置顶。
+    /// 「未解决告警 Pin」（R4，默认关闭）：分组仍有 firing 告警时，把当前活跃卡片
+    /// Pin 到会话的 Pin 列表（`POST /open-apis/im/v1/pins`）；全部恢复后取消 Pin。
     ///
-    /// 置顶失败（如群设置只允许群主/管理员 Pin、机器人权限不足）不阻塞投递，
+    /// 注意这是飞书的 **Pin**（Pin 列表），不是固定在会话顶部的「置顶消息」。
+    /// Pin 失败（如群设置只允许群主/管理员 Pin、机器人权限不足）不阻塞投递，
     /// 只记日志与指标，下一次事件会重试。
     pub pin_unresolved: bool,
     pub repeat_policy: RepeatPolicy,

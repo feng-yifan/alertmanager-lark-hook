@@ -185,7 +185,7 @@ export default function AlertGroupDetailPage(): JSX.Element {
               value: group.active_delivery_id ? <span className="mono break-all">{group.active_delivery_id}</span> : '—',
             },
             {
-              label: '置顶消息',
+              label: '当前 Pin 消息',
               value: group.pinned_message_id ? (
                 <span className="mono break-all">{group.pinned_message_id}</span>
               ) : (

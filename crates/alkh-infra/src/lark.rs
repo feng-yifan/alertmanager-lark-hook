@@ -11,8 +11,8 @@
 //! | 发送消息 | `POST /open-apis/im/v1/messages?receive_id_type=` |
 //! | 更新已发卡片消息 | `PATCH /open-apis/im/v1/messages/:message_id` |
 //! | 撤回消息 | `DELETE /open-apis/im/v1/messages/:message_id` |
-//! | 置顶消息 | `POST /open-apis/im/v1/pins` |
-//! | 取消置顶 | `DELETE /open-apis/im/v1/pins/:message_id` |
+//! | Pin 消息 | `POST /open-apis/im/v1/pins` |
+//! | 取消 Pin | `DELETE /open-apis/im/v1/pins/:message_id` |
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

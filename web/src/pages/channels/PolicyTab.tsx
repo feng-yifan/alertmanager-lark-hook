@@ -332,15 +332,15 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
       </Card>
 
       <Card
-        title="未解决告警置顶"
-        subtitle="有未解决告警时把卡片置顶到会话顶部，全部恢复后自动取消（默认关闭）"
+        title="未解决告警 Pin"
+        subtitle="有未解决告警时把当前卡片 Pin 到会话的 Pin 列表，全部恢复后自动取消（默认关闭；与飞书的「置顶消息」不是同一个功能）"
       >
         <div className="callout info mb-16">{PIN_NOTE}</div>
         <Switch
           checked={draft.pin_unresolved}
           onChange={(next) => setDraft((current) => ({ ...current, pin_unresolved: next }))}
-          label="有未解决告警时置顶当前卡片"
-          hint="关闭开关后，该分组的下一个事件就会取消已有置顶，不必等告警恢复。"
+          label="有未解决告警时 Pin 当前卡片"
+          hint="关闭开关后，该分组的下一个事件就会取消已有 Pin，不必等告警恢复。"
         />
       </Card>
 

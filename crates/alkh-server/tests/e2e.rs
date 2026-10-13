@@ -915,7 +915,7 @@ async fn repeat_policy_send_and_revoke_previous_recalls_old_message() {
     assert_eq!(s.recalled.len(), 1, "应撤回/删除旧消息");
 }
 
-/// 读取某个分组的置顶消息记录（R4）。
+/// 读取某个分组的 Pin 消息记录（R4）。
 async fn group_pinned_message(h: &Harness) -> Option<String> {
     sqlx::query_scalar("SELECT pinned_message_id FROM alert_groups LIMIT 1")
         .fetch_one(&h.pool)
@@ -941,41 +941,41 @@ async fn put_policy_flag(h: &Harness, channel_id: &str, key: &str, value: Value)
     assert_eq!(resp.status(), 200, "保存策略应成功");
 }
 
-/// R4：开启「未解决告警置顶」后，firing 期间卡片被置顶，全部恢复后取消置顶。
+/// R4：开启「未解决告警 Pin」后，firing 期间卡片被 Pin，全部恢复后取消 Pin。
 #[tokio::test]
 async fn pin_unresolved_pins_firing_message_and_unpins_on_resolve() {
     let mut h = start().await;
     let _ = h.create_channel().await;
     let channel_id = h.channel_id.clone().unwrap();
 
-    // 默认关闭：firing 也不置顶（opt-in，避免存量渠道行为突变）。
+    // 默认关闭：firing 也不 Pin（opt-in，避免存量渠道行为突变）。
     let (_, body) = h.push(firing_payload(1)).await;
     assert_eq!(body["action"], "send_new");
     assert!(
         h.fake.snapshot().pinned.is_empty(),
-        "开关默认关闭时不应调用置顶接口"
+        "开关默认关闭时不应调用 Pin 接口"
     );
 
     put_policy_flag(&h, &channel_id, "pin_unresolved", json!(true)).await;
 
-    // 分组内容变化 → 原地更新同一条卡片；此时才第一次置顶。
+    // 分组内容变化 → 原地更新同一条卡片；此时才第一次 Pin。
     let (_, body) = h.push(firing_payload(2)).await;
     assert_eq!(body["event"], "updated");
     let pinned = {
         let s = h.fake.snapshot();
-        assert_eq!(s.pinned.len(), 1, "未解决时应置顶当前活跃卡片");
+        assert_eq!(s.pinned.len(), 1, "未解决时应 Pin 当前活跃卡片");
         s.pinned[0].clone()
     };
     assert_eq!(
         group_pinned_message(&h).await.as_deref(),
         Some(pinned.as_str()),
-        "置顶消息必须落库，恢复时才能精确取消"
+        "Pin 消息必须落库，恢复时才能精确取消"
     );
     assert!(
         metric(&h, "alkh_messages_pinned_total").await >= 1,
-        "置顶成功应计入指标"
+        "Pin 成功应计入指标"
     );
-    // HTTP 线格式也要暴露置顶状态，便于后台排查「到底有没有置顶成功」。
+    // HTTP 线格式也要暴露 Pin 状态，便于后台排查「到底有没有 Pin 成功」。
     let group_id = body["alert_group_id"]
         .as_str()
         .expect("缺少 alert_group_id");
@@ -983,34 +983,34 @@ async fn pin_unresolved_pins_firing_message_and_unpins_on_resolve() {
     assert_eq!(status, 200);
     assert_eq!(group["pinned_message_id"].as_str(), Some(pinned.as_str()));
 
-    // 再次内容变化：卡片被原地更新，仍是同一条消息 ⇒ 不应重复调用置顶接口。
+    // 再次内容变化：卡片被原地更新，仍是同一条消息 ⇒ 不应重复调用 Pin 接口。
     let (_, body) = h.push(firing_payload(3)).await;
     assert_eq!(body["event"], "updated");
     assert_eq!(
         h.fake.snapshot().pinned.len(),
         1,
-        "同一条消息不应重复置顶（Pin 接口幂等，但没必要每次都调）"
+        "同一条消息不应重复 Pin（Pin 接口幂等，但没必要每次都调）"
     );
 
-    // 全部恢复 → 发恢复卡片 + 取消旧卡片的置顶。
+    // 全部恢复 → 发恢复卡片 + 取消旧卡片的 Pin。
     let (_, body) = h.push(resolved_payload()).await;
     assert_eq!(body["event"], "resolved");
     {
         let s = h.fake.snapshot();
-        assert_eq!(s.unpinned, vec![pinned.clone()], "恢复后必须取消置顶");
+        assert_eq!(s.unpinned, vec![pinned.clone()], "恢复后必须取消 Pin");
     }
     assert_eq!(
         group_pinned_message(&h).await,
         None,
-        "取消置顶后分组记录必须清空"
+        "取消 Pin 后分组记录必须清空"
     );
     assert!(
         metric(&h, "alkh_messages_unpinned_total").await >= 1,
-        "取消置顶成功应计入指标"
+        "取消 Pin 成功应计入指标"
     );
 }
 
-/// R4：firing 期间关闭开关，下一个事件就要把旧置顶取消掉（不能永久留一条置顶）。
+/// R4：firing 期间关闭开关，下一个事件就要把旧 Pin 取消掉（不能永久留一条 Pin）。
 #[tokio::test]
 async fn disabling_pin_unresolved_unpins_on_next_event() {
     let mut h = start().await;
@@ -1022,7 +1022,7 @@ async fn disabling_pin_unresolved_unpins_on_next_event() {
     assert_eq!(body["action"], "send_new");
     let pinned = {
         let s = h.fake.snapshot();
-        assert_eq!(s.pinned.len(), 1, "开启后 firing 应置顶");
+        assert_eq!(s.pinned.len(), 1, "开启后 firing 应 Pin");
         s.pinned[0].clone()
     };
 
@@ -1031,7 +1031,7 @@ async fn disabling_pin_unresolved_unpins_on_next_event() {
     assert_eq!(body["event"], "updated");
     {
         let s = h.fake.snapshot();
-        assert_eq!(s.unpinned, vec![pinned], "关闭开关后下一个事件应取消置顶");
+        assert_eq!(s.unpinned, vec![pinned], "关闭开关后下一个事件应取消 Pin");
     }
     assert_eq!(group_pinned_message(&h).await, None);
 }
