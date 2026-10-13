@@ -221,8 +221,8 @@ changelog 按 **Conventional Commits** 分组（`feat` / `fix` / `perf` / `refac
   会重新构建并覆盖同名附件，不需要删 tag 重打。
 - **发布前校验**：`verify` job（`cargo fmt --check` + `cargo test --workspace`）先跑，
   通过后才构建，避免把没测过的提交发出去。
-- **镜像可见性**：ghcr 包首次推送后需在 `Packages → alertmanager-lark-hook → Package settings`
-  里把可见性改成 Public，未登录的 `docker pull` 才能拉取；离线镜像包不受影响。
+- **镜像可见性**：包是公开的，未登录也能拉取（已用匿名 token 实测 registry 取 manifest 返回
+  200，不存在的包则 403）；若日后改成私有包，拉取方需先 `docker login ghcr.io`，离线镜像包不受影响。
 - 推送镜像与创建 Release 都用内置 `GITHUB_TOKEN`（`packages: write` / `contents: write`），
   不需要额外配置 secret。
 - 默认只构建 `linux/amd64`；要出 `linux/arm64` 的改法写在 `release.yml` 文件末尾的注释里
