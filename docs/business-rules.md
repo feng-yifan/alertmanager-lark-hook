@@ -190,6 +190,9 @@ POST /api/v1/hooks/alertmanager/{token}
 - 时间变量统一为 `%Y-%m-%d %H:%M:%S UTC` 字符串。
 - 严重级别映射：`critical|fatal|emergency`→`red`/`严重`，`warning|warn|major`→`orange`/`警告`，
   `info|informational|notice`→`blue`/`提示`，其余→`grey`/`未知`。
+- 状态颜色映射：`status_color` 在分组仍有未解决告警时等于 `severity_color`；**全部恢复后固定为
+  `green`**。内置默认卡片的标题颜色用 `${status_color}`（而不是只按严重级别取色的
+  `${severity_color}`），否则 warning 卡片恢复后标题仍是橙色。
 
 命名沿革（避免误解）：本项目用 `${...}` 而非 AlertManager 的 Go 模板 `{{ ... }}`；
 `${...}` 也**不是**飞书官方文档化的语法（官方只有搭建工具的 `template_variable` 键值映射）。

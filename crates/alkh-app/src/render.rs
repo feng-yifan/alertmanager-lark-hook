@@ -226,6 +226,18 @@ pub fn severity_color(severity: Option<&str>) -> &'static str {
     }
 }
 
+/// 分组状态 → 卡片 header 颜色。
+///
+/// 还有未解决告警时按严重级别配色（`severity_color`）；**全部恢复后统一为 `green`**，
+/// 否则「已恢复」的卡片会保留原来的告警色（如 warning 的 orange），标题颜色不随状态变化。
+pub fn status_color(is_firing: bool, severity: Option<&str>) -> &'static str {
+    if is_firing {
+        severity_color(severity)
+    } else {
+        "green"
+    }
+}
+
 /// 严重级别 → 中文展示。
 pub fn severity_text(severity: Option<&str>) -> &'static str {
     match severity.map(|s| s.to_ascii_lowercase()).as_deref() {
@@ -285,6 +297,7 @@ pub fn build_context(
     let severity = group.severity.clone();
     ctx.set("severity", severity.clone().unwrap_or_default());
     ctx.set("severity_color", severity_color(severity.as_deref()));
+    ctx.set("status_color", status_color(is_firing, severity.as_deref()));
     ctx.set("severity_text", severity_text(severity.as_deref()));
 
     ctx.set(
@@ -639,6 +652,7 @@ mod tests {
         assert_eq!(ctx.lookup("status_text"), Some("未解决"));
         assert_eq!(ctx.lookup("status"), Some("firing"));
         assert_eq!(ctx.lookup("severity_color"), Some("red"));
+        assert_eq!(ctx.lookup("status_color"), Some("red"));
         assert_eq!(ctx.lookup("alertname"), Some("HighCPU"));
         assert_eq!(ctx.lookup("channel_name"), Some("运维告警群"));
         assert_eq!(ctx.lookup("instance"), Some("10.0.0.1:9100"));
@@ -687,6 +701,18 @@ mod tests {
         assert_eq!(severity_color(Some("nonsense")), "grey");
     }
 
+    /// 回归：未恢复时标题颜色按严重级别；**全部恢复后必须变绿**，
+    /// 否则 warning 卡片恢复后仍是 orange，标题颜色不随状态变化。
+    #[test]
+    fn status_color_turns_green_only_after_full_recovery() {
+        assert_eq!(status_color(true, Some("warning")), "orange");
+        assert_eq!(status_color(true, Some("critical")), "red");
+        assert_eq!(status_color(true, None), "grey");
+        assert_eq!(status_color(false, Some("warning")), "green");
+        assert_eq!(status_color(false, Some("critical")), "green");
+        assert_eq!(status_color(false, None), "green");
+    }
+
     #[test]
     fn digest_is_stable_and_content_sensitive() {
         let a = RenderedCardMessage::Json(json!({"a": 1}));
@@ -722,8 +748,7 @@ mod tests {
         assert!(list.contains("另有 **1** 条告警未在此展示"), "{list}");
     }
 
-    #[test]
-    fn resolved_group_reports_resolved_status() {
+    fn resolved_warning_group() -> AlertGroup {
         let payload: AlertManagerPayload = serde_json::from_value(serde_json::json!({
             "version":"4","groupKey":"g","status":"resolved","receiver":"r",
             "commonLabels":{"alertname":"X","severity":"warning"},
@@ -731,7 +756,12 @@ mod tests {
         }))
         .unwrap();
         let event = NormalizedEvent::from_payload(&payload).unwrap();
-        let group = AlertGroup::new(HookId::new(), ChannelId::new(), &event, chrono::Utc::now());
+        AlertGroup::new(HookId::new(), ChannelId::new(), &event, chrono::Utc::now())
+    }
+
+    #[test]
+    fn resolved_group_reports_resolved_status() {
+        let group = resolved_warning_group();
         let channel = Channel::new(
             "u",
             "ou_1",
@@ -743,7 +773,38 @@ mod tests {
         let ctx = build_context(&group, &channel, &policy, chrono::Utc::now());
         assert_eq!(ctx.lookup("status_text"), Some("已恢复"));
         assert_eq!(ctx.lookup("is_firing"), Some("false"));
+        // 严重级别本身不变（仍是 warning），但状态色必须变绿
         assert_eq!(ctx.lookup("severity_color"), Some("orange"));
+        assert_eq!(ctx.lookup("status_color"), Some("green"));
         assert_eq!(ctx.lookup("status"), Some("resolved"));
+    }
+
+    /// 回归：默认模板的标题颜色取自 `${status_color}`，警告恢复后必须由 orange 变 green。
+    #[test]
+    fn default_card_header_turns_green_after_recovery() {
+        let group = resolved_warning_group();
+        let channel = Channel::new(
+            "u",
+            "ou_1",
+            alkh_domain::channel::ReceiveIdType::OpenId,
+            alkh_domain::channel::ChannelKind::P2pUser,
+            ChannelSource::Manual,
+        );
+        let policy = NotificationPolicy::default_for(channel.id.clone());
+        let ctx = build_context(&group, &channel, &policy, chrono::Utc::now());
+
+        let spec = CardMessageSpec::builder_json(crate::defaults::default_card_json());
+        let rendered = render_card_message(&spec, &ctx).unwrap();
+        let RenderedCardMessage::Json(card) = rendered else {
+            panic!("默认模板必须是本地卡片 JSON");
+        };
+        assert_eq!(
+            card["header"]["template"], "green",
+            "警告恢复后默认模板标题颜色应变为 green: {card}"
+        );
+        assert_eq!(
+            card["header"]["title"]["content"], "【已恢复】X",
+            "标题文案也应显示已恢复: {card}"
+        );
     }
 }

@@ -267,6 +267,7 @@ const HEADER_TEMPLATES = [
   'grey',
 ];
 
+const STATUS_COLOR_TOKEN = '${status_color}';
 const SEVERITY_COLOR_TOKEN = '${severity_color}';
 
 function CardSettings({
@@ -306,13 +307,17 @@ function CardSettings({
         variables={meta.variables}
         onChange={(value) => set('header.subtitle.content', value, '修改副标题')}
       />
-      <Field label="标题颜色" hint="按严重级别配色请选 ${severity_color}">
+      <Field
+        label="标题颜色"
+        hint="按状态配色（恢复后变绿）请选 ${status_color}；只按严重级别配色请选 ${severity_color}"
+      >
         <select
           className="select"
           value={read('header.template')}
           onChange={(event) => set('header.template', event.target.value, '修改标题颜色')}
         >
           <option value="">（默认）</option>
+          <option value={STATUS_COLOR_TOKEN}>{`${STATUS_COLOR_TOKEN}（按状态，恢复变绿）`}</option>
           <option value={SEVERITY_COLOR_TOKEN}>{`${SEVERITY_COLOR_TOKEN}（按严重级别）`}</option>
           {HEADER_TEMPLATES.map((template) => (
             <option key={template} value={template}>

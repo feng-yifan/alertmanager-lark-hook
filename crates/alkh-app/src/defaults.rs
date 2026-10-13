@@ -12,7 +12,7 @@ const DEFAULT_CARD_JSON: &str = r#"{
     "summary": { "content": "${status_text} · ${alertname}" }
   },
   "header": {
-    "template": "${severity_color}",
+    "template": "${status_color}",
     "title": { "tag": "plain_text", "content": "【${status_text}】${alertname}" },
     "subtitle": { "tag": "plain_text", "content": "渠道：${channel_name}" }
   },
@@ -94,5 +94,16 @@ mod tests {
             assert!(known.contains(v), "默认卡片引用了未定义变量: {v}");
         }
         assert!(!vars.is_empty());
+    }
+
+    /// 回归：默认卡片标题颜色必须随状态变化（`${status_color}`）。
+    /// 曾用只按严重级别取色的 `${severity_color}`，导致 warning 恢复后仍是橙色。
+    #[test]
+    fn default_card_header_color_follows_status() {
+        let card = default_card_json();
+        assert_eq!(
+            card["header"]["template"], "${status_color}",
+            "默认卡片标题颜色应使用状态色变量"
+        );
     }
 }

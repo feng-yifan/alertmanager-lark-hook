@@ -40,6 +40,7 @@
     {"name":"alertname","group":"alert","type":"string","description":"告警名称"},
     {"name":"severity","group":"group","type":"string","description":"严重级别原始值"},
     {"name":"status_text","group":"group","type":"string","description":"未解决 / 已恢复"},
+    {"name":"status_color","group":"group","type":"string","description":"状态对应卡片颜色（未恢复按严重级别，已恢复 green）"},
     {"name":"alerts_table","group":"block","type":"markdown","description":"预渲染告警表格"}
   ],
   "severity_colors": {"critical":"red","warning":"orange","info":"blue","default":"grey"},

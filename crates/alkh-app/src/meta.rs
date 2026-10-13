@@ -198,6 +198,12 @@ pub fn render_variables() -> Vec<VariableMeta> {
             description: "未解决 / 已恢复",
         },
         V {
+            name: "status_color",
+            group: "group",
+            ty: "string",
+            description: "状态对应卡片颜色（未恢复按严重级别，已恢复 green）",
+        },
+        V {
             name: "is_firing",
             group: "group",
             ty: "bool",

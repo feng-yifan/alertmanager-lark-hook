@@ -294,7 +294,7 @@ receivers:
 {
   "schema": "2.0",
   "header": {
-    "template": "${severity_color}",
+    "template": "${status_color}",
     "title": { "tag": "plain_text", "content": "【${status_text}】${alertname}" }
   },
   "body": {
@@ -331,6 +331,7 @@ receivers:
 |---|---|---|---|
 | `${status}` | 分组状态 | **AM 标准**（`.Status`） | `firing` / `resolved` |
 | `${status_text}` | 同上，中文文案 | 本项目 | `未解决` / `已恢复` |
+| `${status_color}` | 状态对应的卡片颜色：未恢复按严重级别，**全部恢复后为 `green`** | 本项目 | `red` / `orange` / `blue` / `grey` / `green` |
 | `${is_firing}` | 是否还有未解决告警 | 本项目 | `true` / `false` |
 | `${receiver}` | AlertManager 的 receiver 名 | **AM 标准**（`.Receiver`） | `lark-ops` |
 | `${group_key}` | 告警分组键 | AM webhook 字段 `groupKey` | `{}:{alertname="HighCPU"}` |
@@ -341,7 +342,7 @@ receivers:
 | `${truncated_alerts}` | 被 AlertManager 截断的条数 | AM webhook 字段 | `0` |
 | `${severity}` | 严重级别原值（优先取公共标签） | **社区约定** | `critical` |
 | `${severity_text}` | 严重级别中文 | 本项目 | `严重` / `警告` / `提示` / `未知` |
-| `${severity_color}` | 严重级别对应的卡片颜色 | 本项目 | `red` / `orange` / `blue` / `grey` |
+| `${severity_color}` | 严重级别对应的卡片颜色（**不随恢复变化**，需要状态色请用 `${status_color}`） | 本项目 | `red` / `orange` / `blue` / `grey` |
 | `${channel_name}` | 消息渠道名（群名或用户名） | 本项目 | `运维告警群` |
 | `${channel_id}` | 渠道的接收者 ID | 本项目 | `oc_a0553eda...` |
 | `${first_seen_at}` | 该分组**首次**出现的时间 | 本项目 | `2026-10-13 00:00:00 UTC` |
