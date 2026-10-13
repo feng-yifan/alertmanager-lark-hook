@@ -131,19 +131,22 @@
   "bot_can_send": true,
   "hook_count": 1,
   "policy": { "...NotificationPolicy..." },
-  "hooks": [{"id":"...","name":"ops","token_prefix":"alkh_a1b2","hook_path":"/api/v1/hooks/alertmanager/<token>","hook_url":"https://alkh.example.com/api/v1/hooks/alertmanager/<token>","enabled":true,"last_called_at":null,"call_count":0,"created_at":"..."}],
+  "hooks": [{"id":"...","name":"ops","token_prefix":"alkh_a1b2","hook_path":"/api/v1/hooks/alertmanager/alkh_a1b2...","hook_url":"https://alkh.example.com/api/v1/hooks/alertmanager/alkh_a1b2...","hook_url_available":true,"enabled":true,"last_called_at":null,"call_count":0,"created_at":"..."}],
   "created_at": "2026-10-13T00:00:00Z",
   "updated_at": "2026-10-13T00:00:00Z"
 }
 ```
 
-> `hook_url` 中的明文 token **仅在创建/轮换该 hook 的响应中出现一次**；
-> 列表接口返回 `hook_path` 的占位形式（`<token>`）与 `token_prefix`。
+> Hook 地址**不是**只显示一次的秘密：列表接口就返回完整 `hook_path` / `hook_url`（含 token），
+> 供运维随时复制，泄露后轮换即可。地址的主机部分来自 `public_base_url`（可填集群内 DNS），
+> 与浏览器访问地址无关。`token_hash` 仍只用于鉴权，数据库中保存的 token 为密文（AES-256-GCM）。
+> 0003 迁移前创建的旧 Hook 无法回显，`hook_url_available=false` 且 `hook_url` 为遮蔽形式（含 `…`），
+> 轮换一次即可恢复。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/channels?enabled=&q=&limit=&offset=` | 列表 |
-| POST | `/channels` | body `{name,receive_id,receive_id_type,kind?,enabled?}` → `201` 渠道（自动创建默认策略与 1 个默认 Hook，响应附带 `hook_token` 明文一次） |
+| POST | `/channels` | body `{name,receive_id,receive_id_type,kind?,enabled?}` → `201` 渠道（自动创建默认策略与 1 个默认 Hook，响应附带 `hook_token`） |
 | GET | `/channels/:id` | 详情 |
 | PATCH | `/channels/:id` | body 任意子集 `{name,enabled}` |
 | DELETE | `/channels/:id` | 级联删除 hooks/policies；已有投递记录时改为软删（`enabled=false`）并返回 `409 conflict`（**没有细分 code**），除非 `?force=true` |
@@ -175,9 +178,9 @@
 |---|---|---|---|
 | POST | `/hooks/alertmanager/:token` | token 即凭证 | AlertManager webhook 接收 |
 | GET | `/hooks` | 会话 | 所有 hook 列表（跨渠道），返回**裸数组**（不是分页信封） |
-| POST | `/hooks` | 会话 | body `{channel_id,name}` → `201` + 明文 **`hook_token`**/`hook_url`（仅此一次）。注意轮换用的是另一个字段名 `token` |
+| POST | `/hooks` | 会话 | body `{channel_id,name}` → `201` + 明文 **`hook_token`**/`hook_url`。注意轮换用的是另一个字段名 `token` |
 | PATCH | `/hooks/:id` | 会话 | `{name?,enabled?}` |
-| POST | `/hooks/:id/rotate` | 会话 | 轮换 token → `{"token":"alkh_...","hook_url":"..."}` |
+| POST | `/hooks/:id/rotate` | 会话 | 轮换 token → `{"token":"alkh_...","hook_url":"...","hook_path":"..."}`；旧 token 立即失效，新地址在列表中可随时回看 |
 | DELETE | `/hooks/:id` | 会话 | 删除 |
 
 `POST /hooks/alertmanager/:token` 响应：

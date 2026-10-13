@@ -59,7 +59,9 @@ data:
   ALKH_LOG_LEVEL: "info"
   # 集群里建议输出 JSON 日志，便于采集
   ALKH_LOG_JSON: "true"
-  # ⚠️ 必须替换：生成 AlertManager 接收地址用的对外基址。
+  # ⚠️ 必须替换：生成 AlertManager 接收地址用的基址 —— 也就是 AlertManager **实际访问**
+  #    本服务的地址。集群内使用可填 Service DNS（如 http://alkh.monitoring.svc:8080），
+  #    不要求与浏览器访问管理后台的地址一致。
   #    不设置的话，界面上的接收地址只有路径，无法直接粘贴给 AlertManager。
   # ⚠️ 语义：**只在数据库中该值为空时生效**（首次启动播种一次），之后以管理后台
   #    「设置」页为准。改完这里重启却没生效，就是库里已经有值了 —— 启动日志里会有

@@ -153,7 +153,10 @@ pub struct PageQuery {
     pub offset: u32,
 }
 
-/// 把创建/轮换 Hook 的明文 token 合并进渠道/ Hook 响应（只此一次返回）。
+/// 把创建/轮换 Hook 的明文 token 合并进渠道 / Hook 响应。
+///
+/// Hook 地址已可在列表接口随时获取，这里保留 `hook_token` / `hook_url` 只是为了
+/// 创建 / 轮换的即时反馈与向后兼容，不再是「唯一一次机会」。
 pub fn attach_token(value: &mut serde_json::Value, token: &str, hook_url: &str) {
     if let Some(obj) = value.as_object_mut() {
         obj.insert("hook_token".into(), json!(token));

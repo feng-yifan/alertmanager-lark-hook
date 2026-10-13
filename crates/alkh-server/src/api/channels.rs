@@ -213,7 +213,7 @@ pub struct RotateHookResponse {
     pub hook_url: String,
     pub hook_path: String,
     pub token_prefix: String,
-    /// 明文只返回这一次。
+    /// 提示：旧 token 已失效，新地址已保存、可随时回显。
     pub warning: &'static str,
 }
 
@@ -232,7 +232,9 @@ pub async fn list_hooks(
     Ok(Json(
         hooks
             .iter()
-            .map(|h| alkh_app::channels::HookView::from_hook(h, &settings))
+            .map(|h| {
+                alkh_app::channels::HookView::from_hook(h, &settings, state.deps.cipher.as_ref())
+            })
             .collect(),
     ))
 }
@@ -253,8 +255,10 @@ pub async fn create_hook(
         return Err(ApiError(AppError::not_found("渠道不存在")));
     }
 
-    let (hook, token) = alkh_domain::hook::Hook::issue(req.channel_id.clone(), req.name);
+    let (mut hook, token) = alkh_domain::hook::Hook::issue(req.channel_id.clone(), req.name);
     hook.validate().map_err(|e| ApiError(e.into()))?;
+    // 加密落库，让列表接口能随时回显完整 Hook 地址（不再「只显示一次」）。
+    hook.set_encrypted_token(state.deps.cipher.encrypt(&token)?);
     state
         .deps
         .hooks
@@ -273,8 +277,11 @@ pub async fn create_hook(
     .detail(serde_json::json!({"channel_id": req.channel_id.to_string(), "name": hook.name}));
     let _ = state.deps.audit.append(&log).await;
 
-    let mut value =
-        serde_json::to_value(alkh_app::channels::HookView::from_hook(&hook, &settings))?;
+    let mut value = serde_json::to_value(alkh_app::channels::HookView::from_hook(
+        &hook,
+        &settings,
+        state.deps.cipher.as_ref(),
+    ))?;
     crate::api::attach_token(&mut value, &token, &settings.hook_url(&token));
     Ok((StatusCode::CREATED, Json(value)).into_response())
 }
@@ -308,7 +315,9 @@ pub async fn update_hook(
 
     let settings = state.deps.settings.get().await.map_err(ApiError::from)?;
     Ok(Json(alkh_app::channels::HookView::from_hook(
-        &hook, &settings,
+        &hook,
+        &settings,
+        state.deps.cipher.as_ref(),
     )))
 }
 
@@ -341,6 +350,7 @@ pub async fn rotate_hook(
         .map_err(ApiError::from)?
         .ok_or_else(|| ApiError(AppError::not_found("Hook 不存在")))?;
     let token = hook.rotate();
+    hook.set_encrypted_token(state.deps.cipher.encrypt(&token)?);
     state
         .deps
         .hooks
@@ -363,6 +373,6 @@ pub async fn rotate_hook(
         hook_url: settings.hook_url(&token),
         hook_path: alkh_domain::hook::hook_path(&token),
         token_prefix: hook.token_prefix.clone(),
-        warning: "明文 token 仅返回这一次，请立即写入 AlertManager 配置；旧的 token 已失效。",
+        warning: "旧 token 已立即失效。新地址已加密保存，之后可随时在 Hook 列表查看 / 复制。",
     }))
 }

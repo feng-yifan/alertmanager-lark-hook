@@ -4,12 +4,23 @@ use alkh_domain::error::PortResult;
 use alkh_domain::hook::Hook;
 use alkh_domain::ids::{ChannelId, HookId};
 use alkh_domain::ports::HookRepository;
+use alkh_domain::settings::EncryptedSecret;
 use alkh_domain::Timestamp;
 use async_trait::async_trait;
 use sqlx::sqlite::SqliteRow;
 use sqlx::SqlitePool;
 
 use super::common::{self, b, ts, ts_opt, RowExt};
+
+/// 把 `token_nonce` / `token_ciphertext` 两列还原成密文；任一为空都视为「不可回显」。
+fn token_enc(row: &SqliteRow) -> PortResult<Option<EncryptedSecret>> {
+    let nonce = row.opt_str_col("token_nonce")?;
+    let ciphertext = row.opt_str_col("token_ciphertext")?;
+    Ok(match (nonce, ciphertext) {
+        (Some(nonce), Some(ciphertext)) => Some(EncryptedSecret { nonce, ciphertext }),
+        _ => None,
+    })
+}
 
 fn row_to_hook(row: &SqliteRow) -> PortResult<Hook> {
     Ok(Hook {
@@ -18,6 +29,7 @@ fn row_to_hook(row: &SqliteRow) -> PortResult<Hook> {
         name: row.str_col("name")?,
         token_hash: row.str_col("token_hash")?,
         token_prefix: row.str_col("token_prefix")?,
+        token_enc: token_enc(row)?,
         enabled: row.bool_col("enabled")?,
         last_called_at: row.opt_ts_col("last_called_at")?,
         call_count: row.u64_col("call_count")?,
@@ -79,15 +91,17 @@ impl HookRepository for SqliteHookRepository {
     async fn insert(&self, hook: &Hook) -> PortResult<()> {
         sqlx::query(
             "INSERT INTO hooks \
-             (id, channel_id, name, token_hash, token_prefix, enabled, last_called_at, call_count, \
-              created_at, rotated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, channel_id, name, token_hash, token_prefix, token_nonce, token_ciphertext, \
+              enabled, last_called_at, call_count, created_at, rotated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(hook.id.as_str())
         .bind(hook.channel_id.as_str())
         .bind(&hook.name)
         .bind(&hook.token_hash)
         .bind(&hook.token_prefix)
+        .bind(hook.token_enc.as_ref().map(|e| e.nonce.as_str()))
+        .bind(hook.token_enc.as_ref().map(|e| e.ciphertext.as_str()))
         .bind(b(hook.enabled))
         .bind(ts_opt(hook.last_called_at))
         .bind(hook.call_count as i64)
@@ -102,12 +116,15 @@ impl HookRepository for SqliteHookRepository {
     async fn update(&self, hook: &Hook) -> PortResult<()> {
         sqlx::query(
             "UPDATE hooks SET channel_id = ?, name = ?, token_hash = ?, token_prefix = ?, \
+             token_nonce = ?, token_ciphertext = ?, \
              enabled = ?, last_called_at = ?, call_count = ?, rotated_at = ? WHERE id = ?",
         )
         .bind(hook.channel_id.as_str())
         .bind(&hook.name)
         .bind(&hook.token_hash)
         .bind(&hook.token_prefix)
+        .bind(hook.token_enc.as_ref().map(|e| e.nonce.as_str()))
+        .bind(hook.token_enc.as_ref().map(|e| e.ciphertext.as_str()))
         .bind(b(hook.enabled))
         .bind(ts_opt(hook.last_called_at))
         .bind(hook.call_count as i64)
@@ -232,6 +249,34 @@ mod tests {
         let got = repo.get(&hook.id).await.unwrap().unwrap();
         assert_eq!(got.call_count, 2);
         assert_eq!(got.last_called_at, Some(at));
+    }
+
+    #[tokio::test]
+    async fn encrypted_token_roundtrips_and_is_cleared_by_rotation() {
+        let pool = pool().await;
+        let channel_id = seed_channel(&pool).await;
+        let repo = SqliteHookRepository::new(pool);
+
+        let (mut hook, _) = sample(channel_id, "receiver-a");
+        let enc = EncryptedSecret {
+            nonce: "bm9uY2U=".into(),
+            ciphertext: "Y2lwaGVydGV4dA==".into(),
+        };
+        hook.set_encrypted_token(enc.clone());
+        repo.insert(&hook).await.unwrap();
+
+        let got = repo.get(&hook.id).await.unwrap().unwrap();
+        assert_eq!(
+            got.token_enc,
+            Some(enc),
+            "密文必须能原样读回，供后台回显地址"
+        );
+
+        // 轮换会清空密文；旧密文绝不能继续被当成新地址展示。
+        let _ = hook.rotate();
+        repo.update(&hook).await.unwrap();
+        let got = repo.get(&hook.id).await.unwrap().unwrap();
+        assert!(got.token_enc.is_none());
     }
 
     #[tokio::test]

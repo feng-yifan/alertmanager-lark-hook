@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{DomainError, DomainResult};
 use crate::ids::{ChannelId, HookId};
+use crate::settings::EncryptedSecret;
 use crate::Timestamp;
 
 /// hook token 的固定前缀，便于人眼识别与日志脱敏。
@@ -48,6 +49,12 @@ pub struct Hook {
     pub name: String,
     pub token_hash: String,
     pub token_prefix: String,
+    /// 加密后的完整 token：仅用于管理后台回显 / 复制 Hook 地址。
+    ///
+    /// Hook 地址不是需要藏起来的秘密（泄露了轮换即可），因此不再「只显示一次」；
+    /// 但仍以主密钥加密落库，避免数据库被拷走后直接得到可用地址。
+    /// 0003 迁移之前的旧 Hook 为 `None`，提示用户轮换一次即可恢复完整地址。
+    pub token_enc: Option<EncryptedSecret>,
     pub enabled: bool,
     pub last_called_at: Option<Timestamp>,
     pub call_count: u64,
@@ -68,6 +75,7 @@ impl Hook {
             name: name.into(),
             token_hash: hash_token(&token),
             token_prefix: token_prefix(&token),
+            token_enc: None,
             enabled: true,
             last_called_at: None,
             call_count: 0,
@@ -78,12 +86,21 @@ impl Hook {
     }
 
     /// 轮换 token，返回新的明文 token。
+    ///
+    /// 会先清空 `token_enc`：调用方必须用新 token 重新加密写入，否则旧密文被当成
+    /// 新地址展示出来（看起来能用，实际已经 404）。
     pub fn rotate(&mut self) -> String {
         let token = generate_token();
         self.token_hash = hash_token(&token);
         self.token_prefix = token_prefix(&token);
+        self.token_enc = None;
         self.rotated_at = Some(crate::now());
         token
+    }
+
+    /// 写入加密后的 token（创建 / 轮换后由应用层调用；加密需要主密钥，不在领域层做）。
+    pub fn set_encrypted_token(&mut self, enc: EncryptedSecret) {
+        self.token_enc = Some(enc);
     }
 
     pub fn validate(&self) -> DomainResult<()> {
@@ -141,9 +158,27 @@ mod tests {
     }
 
     #[test]
+    fn rotate_clears_stale_encrypted_token() {
+        let (mut hook, _) = Hook::issue(ChannelId::new(), "ops");
+        hook.set_encrypted_token(EncryptedSecret {
+            nonce: "n".into(),
+            ciphertext: "c".into(),
+        });
+        let _ = hook.rotate();
+        assert!(
+            hook.token_enc.is_none(),
+            "轮换后必须让应用层重新写入密文，否则会展示已失效的旧地址"
+        );
+    }
+
+    #[test]
     fn secret_is_not_stored_in_plaintext() {
         let (hook, token) = Hook::issue(ChannelId::new(), "ops");
         assert_ne!(hook.token_hash, token);
         assert!(hook.token_prefix.len() < token.len());
+        assert!(
+            hook.token_enc.is_none(),
+            "domain 层不持有明文，密文由应用层写入"
+        );
     }
 }

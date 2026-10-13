@@ -102,7 +102,7 @@ deploy/
 | `ALKH_MASTER_KEY` | 32 字节密钥（hex/base64），用于加密飞书密钥 | 自动生成到 `{data_dir}/master.key` |
 | `ALKH_ADMIN_USERNAME` | 初始管理员用户名 | `admin` |
 | `ALKH_ADMIN_PASSWORD` | 初始管理员密码（仅首次启动生效） | 随机生成并打印到日志 |
-| `ALKH_PUBLIC_BASE_URL` | 生成 hook 绝对地址用 | 空 |
+| `ALKH_PUBLIC_BASE_URL` | 生成 hook 绝对地址用（可填集群内 DNS，不必与浏览器地址一致） | 空 |
 | `ALKH_LARK_BASE_URL` | 飞书 OpenAPI 基址 | `https://open.feishu.cn` |
 | `ALKH_LOG_LEVEL` | 日志级别 | `info` |
 | `ALKH_STATIC_DIR` | 覆盖内嵌前端目录（开发用） | 空（用内嵌） |

@@ -174,10 +174,15 @@ export interface Hook {
   id: UUID;
   name: string;
   token_prefix: string;
-  /** placeholder form, e.g. `/api/v1/hooks/alertmanager/<token>` */
+  /** 完整 Hook 路径（含 token）；旧数据无法回显时为遮蔽形式（含 `…`）。 */
   hook_path: string;
-  /** placeholder URL in list responses; the real one is returned only on create/rotate */
+  /**
+   * 完整 Hook 地址：服务端用「设置 → 对外访问地址」拼出，与浏览器当前地址无关。
+   * 因此集群内使用的 hook（如 `http://alkh.monitoring.svc:8080/...`）不会被复制成浏览器地址。
+   */
   hook_url: string;
+  /** token 是否已回显；旧版本创建的 Hook 为 false，轮换一次即可恢复完整地址。 */
+  hook_url_available: boolean;
   enabled: boolean;
   last_called_at: ISODateTime | null;
   call_count: number;
@@ -187,7 +192,7 @@ export interface Hook {
   rotated_at?: ISODateTime | null;
 }
 
-/** Response of `POST /hooks` — the plaintext token is returned exactly once. */
+/** Response of `POST /hooks` — 明文 token 也随创建响应返回（地址之后可随时在列表查看）。 */
 export interface HookCreated extends Hook {
   /** 真实线格式字段名是 `hook_token`（不是 `token`）；`hook_url` 同样带回明文地址。 */
   hook_token: string;

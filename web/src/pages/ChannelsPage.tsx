@@ -211,9 +211,13 @@ export default function ChannelsPage(): JSX.Element {
       />
 
       {oneTime ? (
-        <Banner tone="warn" onClose={() => setOneTime(null)}>
+        <Banner tone="info" onClose={() => setOneTime(null)}>
           <div>
-            <strong>⚠ 请立即保存渠道「{oneTime.channelName}」的默认 Hook 凭证 —— 明文 token 只显示一次。</strong>
+            <strong>渠道「{oneTime.channelName}」已创建默认 Hook。</strong>
+            <div className="small mt-8">
+              token 与 Hook 地址已保存，之后可随时在渠道详情的「接收 Hook」列表查看、复制；
+              轮换或删除后旧地址立即失效。
+            </div>
             <div className="mt-8">
               <div className="small mb-8">Token</div>
               <div className="copy-row">

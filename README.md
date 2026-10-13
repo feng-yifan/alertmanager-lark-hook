@@ -58,7 +58,7 @@ Prometheus ──▶ AlertManager ──webhook──▶ alertmanager-lark-hook 
 | **撤回 / 删除旧消息** | ❌ | ✅ |
 | **每个渠道独立的发送策略** | ❌（只能靠 AlertManager 的 route 硬拆） | ✅ 每个群 / 每个人一套 |
 | 多群管理 | 每个群一个 webhook URL，模板手抄 N 份 | 同步一次，模板共用 |
-| 凭据安全 | webhook URL 泄露 = 可任意发消息 | 应用凭据加密落库、永不回显 |
+| 凭据安全 | webhook URL 泄露 = 可任意发消息 | 飞书应用凭据加密落库、永不回显；Hook 地址可随时查看、一键轮换 |
 | 告警去重（AlertManager 重投） | ❌ 会重复发 | ✅ 双重幂等 |
 | 发送失败重试 | ❌ | ✅ 自动退避重试 + 手动重试 |
 | 审计日志 / 指标 | ❌ | ✅ |
@@ -69,7 +69,7 @@ Prometheus ──▶ AlertManager ──webhook──▶ alertmanager-lark-hook 
 2. 在「设置」里填写飞书应用的 `app_id` / `app_secret`（应用准备见 §4）
 3. 在「渠道」页一键同步机器人所在的群，或手工添加用户
 4. 在「卡片模板」页导入卡片（见 §3）
-5. 在渠道详情里配置发送规则，并**创建一个接收 Hook**，复制那个一次性显示的 URL
+5. 在渠道详情里配置发送规则，并**创建一个接收 Hook**，复制列表里的 Hook 地址（地址由「设置 → 对外访问地址」拼出，随时可再看）
 6. 把 URL 填进 AlertManager 的 `webhook_configs`（见 §2.6）
 
 ---
@@ -158,7 +158,7 @@ kubectl apply -f deploy/kubernetes.yaml
 | 变量 | 作用 | 必填性 | 默认值 |
 |---|---|---|---|
 | `ALKH_MASTER_KEY` | 加密数据库中保存的飞书 `app_secret`（AES-256-GCM）。32 字节，64 位 hex 或 base64 | **生产必填** | 未设置时自动生成到 `/data/master.key` |
-| `ALKH_PUBLIC_BASE_URL` | 生成接收地址用的对外基址，例如 `https://alkh.example.com` | **生产必填** | 空（此时界面上的接收地址只有路径，无法直接粘贴给 AlertManager） |
+| `ALKH_PUBLIC_BASE_URL` | 生成接收地址用的对外基址，例如 `https://alkh.example.com`；**集群内使用时可以填 Service 的 DNS**（如 `http://alkh.monitoring.svc:8080`），不要求与浏览器访问地址一致 | **生产必填** | 空（此时界面上的接收地址只有路径，无法直接粘贴给 AlertManager） |
 | `ALKH_ADMIN_PASSWORD` | 首次启动创建管理员用的密码 | **生产必填** | 空（此时随机生成一个，**只在启动日志里打印一次**） |
 | `ALKH_ADMIN_USERNAME` | 管理员用户名 | 建议设置 | `admin` |
 | `ALKH_LARK_BASE_URL` | 飞书开放平台基址 | 用 Lark 国际版时必填 | `https://open.feishu.cn`（国际版为 `https://open.larksuite.com`） |
@@ -183,7 +183,7 @@ kubectl apply -f deploy/kubernetes.yaml
 
 | 路径 | 内容 |
 |---|---|
-| `/data/alkh.db`（含 `-wal` / `-shm`） | 渠道、Hook、模板、策略、告警历史、投递记录、审计日志、加密后的飞书凭据 |
+| `/data/alkh.db`（含 `-wal` / `-shm`） | 渠道、Hook（含加密后的 Hook token，用于回显地址）、模板、策略、告警历史、投递记录、审计日志、加密后的飞书凭据 |
 | `/data/master.key` | 仅在未设置 `ALKH_MASTER_KEY` 时存在 |
 
 备份：把整个 `/data` 卷（或目录）复制走即可。停止容器后复制最稳妥；运行中复制也可以，因为 SQLite 开了 WAL。
@@ -216,6 +216,10 @@ kubectl apply -f deploy/kubernetes.yaml
 ```
 https://alkh.example.com/api/v1/hooks/alertmanager/alkh_xxxxxxxxxxxxxxxx
 ```
+
+> 地址的主机部分来自「设置 → 对外访问地址」（`ALKH_PUBLIC_BASE_URL`），**不是**你当前浏览器的地址：
+> AlertManager 在集群内访问本项目时，这里就该填集群内可达的 DNS（例如 `http://alkh.monitoring.svc:8080`）。
+> 后台列表里的 Hook 地址始终按这个配置生成，可以随时查看、复制；地址泄露就点一次「轮换 token」。
 
 把地址填进 AlertManager 的 receiver：
 

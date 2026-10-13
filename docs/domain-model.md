@@ -60,8 +60,9 @@ pub struct Hook {
     pub id: HookId,
     pub channel_id: ChannelId,
     pub name: String,             // 便于在 AlertManager 配置里区分
-    pub token_hash: String,       // 明文 token 只在生成时返回一次
+    pub token_hash: String,       // 鉴权用；明文 token 不再「只返回一次」
     pub token_prefix: String,     // 便于识别，如 "alkh_a1b2"
+    pub token_enc: Option<EncryptedSecret>,  // token 密文，供后台随时回显完整 Hook 地址
     pub enabled: bool,
     pub last_called_at: Option<Timestamp>,
     pub call_count: u64,
@@ -72,8 +73,11 @@ pub struct Hook {
 
 不变量：
 - 一个渠道可以有多个 Hook（例如区分 `severity` 不同的 receiver），但每个 Hook 只有一个渠道。
-- `token` 明文 = `alkh_` + 32 字节 CSPRNG 的 base62；仅存储 SHA-256 哈希与 8 字符前缀。
-- Hook URL = `{public_base_url}/api/v1/hooks/alertmanager/{token}`。
+- `token` 明文 = `alkh_` + 32 字节 CSPRNG 的 base62；鉴权只比对 SHA-256 哈希。
+- Hook 地址**不是**需要保密的秘密：token 以 AES-256-GCM 密文随 Hook 落库，后台可随时回显、
+  复制完整地址，泄露后轮换即可（轮换先清空密文，避免展示已失效的旧地址）。
+- Hook URL = `{public_base_url}/api/v1/hooks/alertmanager/{token}`；`public_base_url` 可填集群内
+  DNS，与浏览器访问地址无关。
 
 ## 4. CardTemplate（卡片模板，聚合根）
 
@@ -322,7 +326,8 @@ channels(id PK, name, receive_id, receive_id_type, kind, avatar_url, external,
          bot_can_send, enabled, source, created_at, updated_at,
          UNIQUE(receive_id_type, receive_id))
 
-hooks(id PK, channel_id FK, name, token_hash UNIQUE, token_prefix, enabled,
+hooks(id PK, channel_id FK, name, token_hash UNIQUE, token_prefix,
+      token_nonce, token_ciphertext, enabled,
       last_called_at, call_count, created_at, rotated_at)
 
 card_templates(id PK, name, card_message JSON, is_default,

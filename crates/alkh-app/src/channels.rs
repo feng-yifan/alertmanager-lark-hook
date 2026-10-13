@@ -4,7 +4,7 @@ use alkh_domain::audit::{action as audit_action, AuditActor, AuditLog};
 use alkh_domain::channel::{Channel, ChannelKind, ChannelSource, ReceiveIdType};
 use alkh_domain::ids::{ChannelId, HookId};
 use alkh_domain::policy::NotificationPolicy;
-use alkh_domain::ports::{ChannelFilter, DeliveryFilter};
+use alkh_domain::ports::{ChannelFilter, DeliveryFilter, SecretCipher};
 use alkh_domain::settings::AppSettings;
 use alkh_domain::{Page, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -19,9 +19,12 @@ pub struct HookView {
     pub id: HookId,
     pub name: String,
     pub token_prefix: String,
-    /// 屏蔽 token 的路径模板，供 UI 展示"该往哪里配"。
+    /// 完整 Hook 路径（含 token）；旧数据无法回显时退化为遮蔽形式（含 `…`）。
     pub hook_path: String,
+    /// 完整 Hook 地址：由「设置 → 对外访问地址」拼出，**与浏览器当前地址无关**。
     pub hook_url: String,
+    /// token 是否已回显。旧版本（0003 迁移前）创建的 Hook 为 `false`，轮换一次即可恢复完整地址。
+    pub hook_url_available: bool,
     pub enabled: bool,
     pub last_called_at: Option<Timestamp>,
     pub call_count: u64,
@@ -30,14 +33,41 @@ pub struct HookView {
 }
 
 impl HookView {
-    pub fn from_hook(h: &alkh_domain::hook::Hook, settings: &AppSettings) -> Self {
-        let masked = format!("{}…", h.token_prefix);
+    pub fn from_hook(
+        h: &alkh_domain::hook::Hook,
+        settings: &AppSettings,
+        cipher: &dyn SecretCipher,
+    ) -> Self {
+        // Hook 地址不再「只显示一次」：只要密文能解开就回显完整地址（含 token）。
+        // 解不开（旧数据 / 主密钥不匹配）时退回遮蔽形式，由前端提示轮换。
+        let token = h
+            .token_enc
+            .as_ref()
+            .and_then(|enc| cipher.decrypt(enc).ok());
+        let (token_prefix, hook_path, hook_url, hook_url_available) = match token {
+            Some(token) => (
+                h.token_prefix.clone(),
+                alkh_domain::hook::hook_path(&token),
+                settings.hook_url(&token),
+                true,
+            ),
+            None => {
+                let masked = format!("{}…", h.token_prefix);
+                (
+                    h.token_prefix.clone(),
+                    format!("/api/v1/hooks/alertmanager/{masked}"),
+                    settings.hook_url(&masked),
+                    false,
+                )
+            }
+        };
         Self {
             id: h.id.clone(),
             name: h.name.clone(),
-            token_prefix: h.token_prefix.clone(),
-            hook_path: format!("/api/v1/hooks/alertmanager/{masked}"),
-            hook_url: settings.hook_url(&masked),
+            token_prefix,
+            hook_path,
+            hook_url,
+            hook_url_available,
             enabled: h.enabled,
             last_called_at: h.last_called_at,
             call_count: h.call_count,
@@ -144,7 +174,7 @@ impl ChannelService {
             .list(Some(id))
             .await?
             .iter()
-            .map(|h| HookView::from_hook(h, &settings))
+            .map(|h| HookView::from_hook(h, &settings, self.deps.cipher.as_ref()))
             .collect();
         Ok(ChannelDetail { summary, hooks })
     }
@@ -216,7 +246,9 @@ impl ChannelService {
         let policy = NotificationPolicy::default_for(channel.id.clone());
         self.deps.policies.upsert(&policy).await?;
 
-        let (hook, token) = alkh_domain::hook::Hook::issue(channel.id.clone(), "default");
+        let (mut hook, token) = alkh_domain::hook::Hook::issue(channel.id.clone(), "default");
+        // Hook 地址要能随时回显：把 token 加密落库（鉴权仍走 token_hash）。
+        hook.set_encrypted_token(self.deps.cipher.encrypt(&token)?);
         hook.validate()?;
         self.deps.hooks.insert(&hook).await?;
 
@@ -375,7 +407,8 @@ impl ChannelService {
                         .policies
                         .upsert(&NotificationPolicy::default_for(c.id.clone()))
                         .await?;
-                    let (hook, _token) = alkh_domain::hook::Hook::issue(c.id.clone(), "default");
+                    let (mut hook, token) = alkh_domain::hook::Hook::issue(c.id.clone(), "default");
+                    hook.set_encrypted_token(self.deps.cipher.encrypt(&token)?);
                     self.deps.hooks.insert(&hook).await?;
                     report.created += 1;
                 }

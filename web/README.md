@@ -59,8 +59,10 @@ pnpm preview          # 预览构建产物
 | `/settings` | `pages/SettingsPage.tsx` | 飞书凭据（app_secret 只写）、base URL、保留天数、测试凭据、修改密码、审计日志查看器 |
 
 所有数据视图都有加载中 / 空 / 错误（可重试）状态；所有操作都有 toast 反馈，按钮在请求期间禁用。
-「明文 token / hook_url 只显示一次」在渠道创建、Hook 创建、Hook 轮换三处都用独立的一次性面板
-（`⚠ 只显示一次` 警告 + 复制按钮 + 「我已保存」关闭）呈现，列表只显示 `token_prefix` 与占位 `hook_path`。
+Hook 地址不再「只显示一次」：列表直接展示服务端按「设置 → 对外访问地址」拼好的完整 `hook_url`
+并提供复制按钮（**不使用** `window.location.origin`，因为 hook 可能只在集群内可达）；
+创建 / 轮换仍会弹一次确认面板，但关闭后随时能在列表里再看。
+旧数据（0003 迁移前签发、无密文可解）显示遮蔽地址并提示轮换一次。
 
 ## 目录结构
 
@@ -103,9 +105,9 @@ web/
    `source` 的 `builder_json` / `builder_template`、`DeliveryKind` 的 `firing_created` /
    `repeated` / `updated` / `resolved` / `test`、`DeliveryState` 的 `pending` / `active` /
    `superseded` / `recalled` / `resolved` / `failed`。
-3. **一次性明文 `hook_token`**：`POST /channels`、`POST /hooks` 的一次性字段名都是 `hook_token`
+3. **`hook_token` 字段名**：`POST /channels`、`POST /hooks` 的字段名都是 `hook_token`
    （不是 `token`），并同时返回完整 `hook_url`；`POST /hooks/:id/rotate` 的响应字段仍是 `token`。
-   页面只在一次性面板中展示，关闭后不可再查看。
+   它只用于创建 / 轮换的即时反馈，列表里的 `hook_url` 才是长期可复制的地址。
 4. **`validate` 的 `errors`/`warnings` 元素结构**：后端实际返回字符串数组；`types.ts` 保留
    `ValidationItem = string | { code?, message?, path?, field? }`，渲染统一走
    `utils.validationText()`，两种形态都能显示。

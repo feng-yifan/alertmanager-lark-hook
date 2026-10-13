@@ -681,7 +681,7 @@ async fn meta_and_settings_expose_no_secrets() {
 }
 
 #[tokio::test]
-async fn channel_sync_imports_feishu_chats_and_masks_tokens() {
+async fn channel_sync_imports_feishu_chats_and_exposes_hook_urls() {
     let h = start().await;
 
     let (status, report) = h.post("/api/v1/channels/sync", json!({})).await;
@@ -708,7 +708,8 @@ async fn channel_sync_imports_feishu_chats_and_masks_tokens() {
     assert_eq!(normal["policy"]["repeat_policy"], "suppress");
     assert_eq!(normal["policy"]["resolved_policy"], "send");
 
-    // 列表接口不应泄露明文 token，只给前缀和屏蔽路径
+    // Hook 地址不再「只显示一次」：详情接口直接回显完整地址，且主机来自 public_base_url
+    // （测试里是 http://alkh.test），不是本次请求的 Host/浏览器地址。
     let (status, detail) = h
         .get(&format!(
             "/api/v1/channels/{}",
@@ -720,13 +721,27 @@ async fn channel_sync_imports_feishu_chats_and_masks_tokens() {
     assert!(raw.contains("alkh_"), "应展示 token 前缀");
     assert!(!raw.contains("alkh_session"), "不应出现会话信息");
     for hook in detail["hooks"].as_array().unwrap() {
+        assert_eq!(
+            hook["hook_url_available"], true,
+            "同步创建的 Hook 也必须能回显地址: {hook}"
+        );
+        let url = hook["hook_url"].as_str().unwrap();
         assert!(
-            hook["hook_path"].as_str().unwrap().contains('…'),
-            "hook_path 必须被屏蔽"
+            url.starts_with("http://alkh.test/api/v1/hooks/alertmanager/alkh_"),
+            "地址必须由 public_base_url 拼出，且含完整 token: {url}"
+        );
+        assert!(!url.contains('…'), "地址不应再被遮蔽: {url}");
+        assert_eq!(
+            hook["hook_path"].as_str().unwrap(),
+            url.trim_start_matches("http://alkh.test"),
+            "hook_path 与 hook_url 必须指向同一个 token"
         );
         assert!(
-            hook["hook_url"].as_str().unwrap().contains('…'),
-            "hook_url 必须被屏蔽"
+            hook["hook_url"]
+                .as_str()
+                .unwrap()
+                .contains(hook["token_prefix"].as_str().unwrap()),
+            "URL 里的 token 应与 token_prefix 对应: {hook}"
         );
     }
 }
@@ -2009,6 +2024,26 @@ async fn sync_is_idempotent_and_hook_rotation_invalidates_old_token() {
     let rotated: Value = resp.json().await.unwrap();
     let new_token = rotated["token"].as_str().unwrap().to_string();
     assert_ne!(old_token, new_token);
+
+    // 列表回显的地址必须换成新 token（旧地址不再出现），且主机仍是 public_base_url
+    let (_, detail) = h.get(&format!("/api/v1/channels/{channel_id}")).await;
+    let hook = detail["hooks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["id"] == hook_id.as_str())
+        .expect("轮换的 hook 应在列表里");
+    let listed_url = hook["hook_url"].as_str().unwrap();
+    assert_eq!(hook["hook_url_available"], true, "{hook}");
+    assert!(
+        listed_url.ends_with(&new_token),
+        "列表必须回显轮换后的新地址: {listed_url}"
+    );
+    assert!(
+        !listed_url.contains(&old_token),
+        "列表不得再出现已失效的旧地址: {listed_url}"
+    );
+    assert!(listed_url.starts_with("http://alkh.test/api/v1/hooks/alertmanager/"));
 
     // 旧 token 立即失效
     let resp = h

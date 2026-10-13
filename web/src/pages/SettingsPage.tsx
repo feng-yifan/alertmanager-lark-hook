@@ -304,7 +304,10 @@ export default function SettingsPage(): JSX.Element {
                   onChange={(event) => setForm({ ...form, lark_base_url: event.target.value })}
                 />
               </Field>
-              <Field label="对外访问地址" hint="用于生成 Hook 的绝对地址：该地址 + /api/v1/hooks/alertmanager/{token}">
+              <Field
+                label="对外访问地址"
+                hint="用于拼接 Hook 地址：该地址 + /api/v1/hooks/alertmanager/{token}。可填集群内 DNS（如 http://alkh.monitoring.svc:8080），不必与浏览器当前地址一致。"
+              >
                 <Input
                   className="mono"
                   value={form.public_base_url}

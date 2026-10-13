@@ -48,6 +48,8 @@ export default function HooksTab({ channel, onChanged }: Props): JSX.Element {
   const [deleting, setDeleting] = useState(false);
 
   const hooks = channel.hooks ?? [];
+  // 对外访问地址没配时，服务端只能给出相对路径 —— 复制到 AlertManager 没用，必须提示。
+  const needsBaseUrl = hooks.length > 0 && !hooks.some((h) => /^https?:\/\//i.test(h.hook_url));
 
   const toggleEnabled = async (hook: Hook, next: boolean) => {
     setBusyId(hook.id);
@@ -157,17 +159,23 @@ export default function HooksTab({ channel, onChanged }: Props): JSX.Element {
       >
         <div style={{ padding: '0 16px' }}>
           <div className="callout info mt-8 mb-8">
-            列表只返回 Hook 路径的占位形式（<code>&lt;token&gt;</code>）与 token 前缀；
-            明文 token 与完整 Hook 地址 <strong>仅在创建 / 轮换的响应中出现一次</strong>。轮换后旧 token 立即失效。
+            Hook 地址由<strong>「设置 → 对外访问地址」</strong>拼出，与浏览器当前地址无关；
+            集群内使用时可把它填成集群 DNS。地址里含 token，泄露后点「轮换 token」即可立即失效。
           </div>
+          {needsBaseUrl ? (
+            <div className="callout danger mt-8 mb-8">
+              尚未配置「对外访问地址」，下面显示的是相对路径，不能直接填进 AlertManager。
+              请到「设置」填写集群内可访问的地址，例如{' '}
+              <code>http://alkh.monitoring.svc:8080</code>。
+            </div>
+          ) : null}
         </div>
         <div className="table-wrap">
           <table className="data">
             <thead>
               <tr>
                 <th>名称</th>
-                <th>token 前缀</th>
-                <th>Hook 路径</th>
+                <th>Hook 地址</th>
                 <th>启用</th>
                 <th className="num">调用次数</th>
                 <th>最近调用</th>
@@ -177,17 +185,25 @@ export default function HooksTab({ channel, onChanged }: Props): JSX.Element {
             </thead>
             <tbody>
               {hooks.length === 0 ? (
-                <EmptyRow colSpan={8} title="暂无 Hook" description="新建一个 Hook 并把它配置到 AlertManager 的 webhook_configs。" />
+                <EmptyRow colSpan={7} title="暂无 Hook" description="新建一个 Hook 并把它配置到 AlertManager 的 webhook_configs。" />
               ) : (
                 hooks.map((hook) => (
                   <tr key={hook.id}>
                     <td>{hook.name}</td>
-                    <td className="mono">{hook.token_prefix}</td>
                     <td>
-                      <div className="row tight">
-                        <span className="mono break-all">{hook.hook_path}</span>
-                        <CopyButton value={`${window.location.origin}${hook.hook_path}`} small label="复制 URL" />
-                      </div>
+                      {hook.hook_url_available ? (
+                        <div className="row tight">
+                          <span className="mono break-all">{hook.hook_url}</span>
+                          <CopyButton value={hook.hook_url} small label="复制地址" />
+                        </div>
+                      ) : (
+                        <div>
+                          <span className="mono break-all">{hook.hook_url}</span>
+                          <div className="faint small">
+                            旧数据未保存可回显的 token，点「轮换 token」后即可看到完整地址
+                          </div>
+                        </div>
+                      )}
                     </td>
                     <td>
                       <Switch
@@ -247,26 +263,25 @@ export default function HooksTab({ channel, onChanged }: Props): JSX.Element {
           <Input value={newName} autoFocus onChange={(event) => setNewName(event.target.value)} />
         </Field>
         <p className="faint small mb-0">
-          创建后立即返回明文 token 与完整 Hook 地址，只显示一次；请复制到 AlertManager 的{' '}
+          创建后返回 token 与完整 Hook 地址；之后可随时在列表中查看、复制，填到 AlertManager 的{' '}
           <code>webhook_configs[].url</code>。
         </p>
       </Modal>
 
       <Modal
         open={oneTime !== null}
-        title="⚠ Hook 凭证（只显示一次）"
+        title="Hook 凭证"
         onClose={() => setOneTime(null)}
         footer={
           <Button variant="primary" onClick={() => setOneTime(null)}>
-            我已保存
+            关闭
           </Button>
         }
       >
         {oneTime ? (
           <>
-            <Banner tone="warn">
-              <strong>只显示一次</strong>：关闭本对话框后无法再次查看明文 token / Hook 地址（服务端只存 SHA-256
-              哈希与 8 字符前缀）。请立即复制保存，并更新 AlertManager 配置。
+            <Banner tone="info">
+              地址已保存，之后可随时在 Hook 列表中查看、复制；无需现在抄下来。轮换或删除后旧地址立即失效。
             </Banner>
             <div className="small mb-8">{oneTime.title}</div>
             <Field label="明文 token">
@@ -288,7 +303,7 @@ export default function HooksTab({ channel, onChanged }: Props): JSX.Element {
               <pre className="code-block mt-8">{`receivers:
   - name: 'lark-ops'
     webhook_configs:
-      - url: '${oneTime.hookUrl ?? `${window.location.origin}/api/v1/hooks/alertmanager/<token>`}'`}</pre>
+      - url: '${oneTime.hookUrl ?? '<请先在「设置 → 对外访问地址」填写集群内地址>'}'`}</pre>
             </div>
           </>
         ) : null}
@@ -319,7 +334,7 @@ export default function HooksTab({ channel, onChanged }: Props): JSX.Element {
         message={
           <>
             将立即为 Hook「{rotateTarget?.name}」生成新 token，<strong>旧 token 立即失效</strong>
-            ，使用旧 URL 的 AlertManager 将收到 404 unknown_hook。轮换后新凭证只显示一次。
+            ，使用旧 URL 的 AlertManager 将收到 404 unknown_hook。轮换后新地址会显示在列表中，可随时复制。
           </>
         }
       />
