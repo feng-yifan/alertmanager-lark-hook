@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { ApiError, deleteCardTemplate, errorMessage, listCardTemplates, patchCardTemplate } from '../api';
+import { deleteCardTemplate, errorMessage, listCardTemplates, patchCardTemplate } from '../api';
 import {
   Badge,
   Button,
@@ -16,16 +16,47 @@ import {
 import { useAsync } from '../hooks';
 import { CARD_SOURCE_LABEL, MESSAGE_TYPE_LABEL } from '../labels';
 import { useToast } from '../toast';
-import type { CardTemplate, CardTemplateKind } from '../types';
+import type { CardTemplate, CardTemplateInput, CardTemplateKind } from '../types';
 import { formatDateTime, shortId } from '../utils';
 
 function sourceLabel(template: CardTemplate): string {
   if (template.kind !== 'card_message') return '—';
-  return CARD_SOURCE_LABEL[template.source] ?? template.source;
+  const source = template.card_message?.source;
+  return source ? CARD_SOURCE_LABEL[source] ?? source : '—';
+}
+
+/**
+ * PATCH 走的是「整份替换」语义（后端用请求体重新 build 模板），所以「设为默认」必须
+ * 回传模板现有内容，否则后端会用内置默认卡片覆盖用户内容。
+ */
+function templateToInput(template: CardTemplate, isDefault: boolean): CardTemplateInput {
+  if (template.kind === 'card_message') {
+    const spec = template.card_message;
+    return {
+      name: template.name,
+      kind: 'card_message',
+      is_default: isDefault,
+      card_message: spec
+        ? {
+            source: spec.source,
+            card_json: spec.card_json,
+            template_id: spec.template_id,
+            template_version_name: spec.template_version_name,
+            variables: spec.variables,
+          }
+        : null,
+    };
+  }
+  return {
+    name: template.name,
+    kind: 'app_feed_card',
+    is_default: isDefault,
+    app_feed_spec: template.app_feed_spec,
+  };
 }
 
 function templateReferencedHint(): string {
-  return '模板被渠道策略引用时删除会返回 409 template_in_use（domain-model §4），请先解除引用。';
+  return '模板被渠道策略引用时删除会被服务端以 409 conflict 拒绝，请先解除引用。';
 }
 
 export default function CardTemplatesPage(): JSX.Element {
@@ -46,12 +77,12 @@ export default function CardTemplatesPage(): JSX.Element {
   const [deleting, setDeleting] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  const items = data?.items ?? [];
+  const items = data ?? [];
 
   const setDefault = async (template: CardTemplate) => {
     setBusyId(template.id);
     try {
-      await patchCardTemplate(template.id, { is_default: true });
+      await patchCardTemplate(template.id, templateToInput(template, true));
       toast.success(`「${template.name}」已设为默认模板`);
       reload();
     } catch (cause) {
@@ -70,11 +101,7 @@ export default function CardTemplatesPage(): JSX.Element {
       setDeleteTarget(null);
       reload();
     } catch (cause) {
-      if (cause instanceof ApiError && cause.code === 'template_in_use') {
-        toast.error('该模板正被某个渠道的通知策略引用（409 template_in_use），请先在渠道的「发送规则」中解除引用。');
-      } else {
-        toast.error(errorMessage(cause));
-      }
+      toast.error(errorMessage(cause));
       setDeleteTarget(null);
     } finally {
       setDeleting(false);
@@ -105,7 +132,7 @@ export default function CardTemplatesPage(): JSX.Element {
       <Card
         tight
         title="模板列表"
-        subtitle={`共 ${data?.total ?? 0} 个模板`}
+        subtitle={`共 ${data?.length ?? 0} 个模板`}
         actions={
           <Select value={kind} onChange={(event) => setKindFilter(event.target.value)} style={{ width: 190 }}>
             <option value="">全部类型</option>
@@ -152,11 +179,11 @@ export default function CardTemplatesPage(): JSX.Element {
                         </td>
                         <td className="small">{sourceLabel(template)}</td>
                         <td>
-                          <span title={template.detected_variables.join(', ')}>
-                            {template.detected_variables.length} 个
+                          <span title={(template.detected_variables ?? []).join(', ')}>
+                            {(template.detected_variables ?? []).length} 个
                           </span>
-                          {template.kind === 'card_message' && template.variables.length > 0 ? (
-                            <span className="faint small"> · 声明 {template.variables.length}</span>
+                          {template.kind === 'card_message' && (template.card_message?.variables.length ?? 0) > 0 ? (
+                            <span className="faint small"> · 声明 {template.card_message?.variables.length ?? 0}</span>
                           ) : null}
                         </td>
                         <td>{template.is_default ? <Badge tone="accent">默认</Badge> : <span className="faint">—</span>}</td>

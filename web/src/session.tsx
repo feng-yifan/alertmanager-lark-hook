@@ -14,8 +14,8 @@ import { setUnauthorizedHandler } from './api';
 export interface SessionUser {
   username: string;
   /**
-   * `GET /auth/session` only returns `{authenticated, username}`; the flag is known
-   * from the login response and kept in memory for the lifetime of the tab.
+   * `GET /auth/session` 也返回真实的 `must_change_password`，因此刷新页面后
+   * 「需修改密码」标记与强制跳转仍然有效；登录响应同样携带该标记。
    */
   must_change_password: boolean;
 }
@@ -41,7 +41,10 @@ export function SessionProvider({ children }: { children: ReactNode }): JSX.Elem
     try {
       const session = await api.getSession();
       if (session.authenticated) {
-        setUser((previous) => ({ username: session.username, must_change_password: previous?.must_change_password ?? false }));
+        setUser({
+          username: session.username,
+          must_change_password: session.must_change_password ?? false,
+        });
         setStatus('authenticated');
       } else {
         setUser(null);

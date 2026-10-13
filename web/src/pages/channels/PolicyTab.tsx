@@ -129,7 +129,7 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
     setSaveError(null);
   }, [data]);
 
-  const templates: CardTemplate[] = useMemo(() => data?.templates?.items ?? [], [data]);
+  const templates: CardTemplate[] = useMemo(() => data?.templates ?? [], [data]);
 
   const matchingTemplates = useMemo(
     () => templates.filter((template) => template.kind === draft.message_type),

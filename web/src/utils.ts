@@ -81,9 +81,25 @@ export function outcomeTone(outcome: unknown): 'ok' | 'warn' | 'danger' | 'muted
   return 'muted';
 }
 
+/**
+ * Normalises the audit `Outcome` serialization.
+ *
+ * 真实线格式是 serde 的 internally-tagged enum：
+ * `{"type":"ok"}` / `{"type":"skipped","reason":"duplicate"}` / `{"type":"failed","error":"..."}`。
+ * 旧的字符串与 `{ok}/{skipped}/{failed}` 形态继续兼容。
+ */
 export function outcomeText(outcome: unknown): string {
   if (typeof outcome === 'string') return outcome;
   if (isPlainObject(outcome)) {
+    const type = typeof outcome.type === 'string' ? outcome.type : null;
+    if (type) {
+      if (type === 'ok') return 'ok';
+      if (type === 'skipped') return typeof outcome.reason === 'string' && outcome.reason ? `skipped:${outcome.reason}` : 'skipped';
+      if (type === 'failed' || type === 'error') {
+        return typeof outcome.error === 'string' && outcome.error ? `failed:${outcome.error}` : 'failed';
+      }
+      return type;
+    }
     if (typeof outcome.skipped === 'string') return `skipped:${outcome.skipped}`;
     if (typeof outcome.failed === 'string') return `failed:${outcome.failed}`;
     if (outcome.ok === true) return 'ok';
@@ -101,16 +117,27 @@ export function outcomeLabel(outcome: unknown): string {
   return text;
 }
 
-/** Normalises the unspecified `AuditActor` serialization. */
+/**
+ * Normalises the `AuditActor` serialization.
+ *
+ * 真实线格式是 serde 的 internally-tagged enum：
+ * `{"type":"admin","username":"x"}` / `{"type":"alert_manager","hook_id":"..."}` / `{"type":"system","job":"..."}`。
+ * 旧的 `{user|hook|job|name}` 形态继续兼容；admin 显示 username（而不是只显示角色名）。
+ */
 export function actorText(actor: unknown): string {
   if (actor === null || actor === undefined) return '—';
   if (typeof actor === 'string') return actor;
   if (isPlainObject(actor)) {
-    if (typeof actor.type === 'string') {
-      const who = actor.user ?? actor.hook ?? actor.job ?? actor.name;
-      return who ? `${actor.type}:${String(who)}` : actor.type;
-    }
-    return prettyJson(actor).replace(/\s+/g, ' ');
+    const pick = (value: unknown): string | null => (typeof value === 'string' && value ? value : null);
+    const type = pick(actor.type);
+    const username = pick(actor.username) ?? pick(actor.user) ?? pick(actor.name);
+    const hookId = pick(actor.hook_id) ?? pick(actor.hook);
+    const job = pick(actor.job);
+    if (type === 'admin' || type === 'user') return username ?? type;
+    if (type === 'alert_manager' || type === 'hook') return hookId ? `hook:${hookId}` : type;
+    if (type === 'system' || type === 'job') return job ?? type;
+    if (type) return username ?? hookId ?? job ?? type;
+    return username ?? hookId ?? job ?? prettyJson(actor).replace(/\s+/g, ' ');
   }
   return String(actor);
 }

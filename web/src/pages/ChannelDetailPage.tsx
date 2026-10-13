@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ApiError, deleteChannel, errorMessage, getChannel, patchChannel } from '../api';
+import { deleteChannel, errorMessage, getChannel, patchChannel } from '../api';
 import {
   Button,
   ConfirmModal,
@@ -43,7 +43,6 @@ export default function ChannelDetailPage(): JSX.Element {
   const [renaming, setRenaming] = useState(false);
   const [toggling, setToggling] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [force, setForce] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
   const submitRename = async () => {
@@ -83,17 +82,12 @@ export default function ChannelDetailPage(): JSX.Element {
     if (!channel) return;
     setDeleting(true);
     try {
-      await deleteChannel(channel.id, force);
-      toast.success(force ? '渠道已强制删除' : '渠道已删除');
+      await deleteChannel(channel.id);
+      toast.success('渠道已删除');
       navigate('/channels');
     } catch (cause) {
-      if (cause instanceof ApiError && cause.code === 'channel_has_deliveries' && !force) {
-        setForce(true);
-      } else {
-        toast.error(errorMessage(cause));
-        setDeleteOpen(false);
-        setForce(false);
-      }
+      toast.error(errorMessage(cause));
+      setDeleteOpen(false);
     } finally {
       setDeleting(false);
     }
@@ -142,10 +136,7 @@ export default function ChannelDetailPage(): JSX.Element {
             </Button>
             <Button
               variant="danger"
-              onClick={() => {
-                setForce(false);
-                setDeleteOpen(true);
-              }}
+              onClick={() => setDeleteOpen(true)}
             >
               删除渠道
             </Button>
@@ -202,24 +193,17 @@ export default function ChannelDetailPage(): JSX.Element {
 
       <ConfirmModal
         open={deleteOpen}
-        title={force ? '强制删除渠道' : '删除渠道'}
+        title="删除渠道"
         tone="danger"
-        confirmLabel={force ? '仍要删除（force=true）' : '删除'}
+        confirmLabel="删除"
         busy={deleting}
-        onCancel={() => {
-          setDeleteOpen(false);
-          setForce(false);
-        }}
+        onCancel={() => setDeleteOpen(false)}
         onConfirm={() => void submitDelete()}
         message={
-          force ? (
-            <>
-              渠道「{channel.name}」已有投递记录：普通删除只会软删为 <code>enabled=false</code> 并返回 409
-              channel_has_deliveries。使用 <code>?force=true</code> 会级联删除 hooks / policies。
-            </>
-          ) : (
-            <>将删除渠道「{channel.name}」及其 hooks 与通知策略；如已有投递记录，服务端将返回 409 并改为软删。</>
-          )
+          <>
+            将删除渠道「{channel.name}」及其 hooks 与通知策略。若服务端因已存在投递记录等原因拒绝，会返回 409 conflict
+            并保持数据不变（当前后台未提供「强制删除」入口）。
+          </>
         }
       />
     </>

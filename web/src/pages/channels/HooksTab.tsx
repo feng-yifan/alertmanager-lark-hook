@@ -77,7 +77,7 @@ export default function HooksTab({ channel, onChanged }: Props): JSX.Element {
       toast.success(`Hook「${created.name}」已创建`);
       setCreateOpen(false);
       setNewName('');
-      setOneTime({ title: `新 Hook「${created.name}」`, token: created.token, hookUrl: created.hook_url });
+      setOneTime({ title: `新 Hook「${created.name}」`, token: created.hook_token, hookUrl: created.hook_url });
       onChanged();
     } catch (cause) {
       toast.error(errorMessage(cause));

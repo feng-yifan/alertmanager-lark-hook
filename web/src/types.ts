@@ -1,12 +1,13 @@
 /**
- * DTOs mirroring `docs/api.md` verbatim.
+ * DTOs for the REST contract.
  *
- * Naming rules derived from the contract:
- *  - JSON field names are `snake_case` (as in every example in `docs/api.md`).
- *  - Enum values are the *string literals that appear in `docs/api.md`*; where the
- *    contract only shows one member of an enum (e.g. `receive_id_type: "chat_id"`)
- *    the remaining members are the `snake_case` rendering of `docs/domain-model.md`
- *    (e.g. `OpenId` -> `open_id`). Every such guess is listed in `web/README.md`.
+ * 数据形状以**后端真实线格式**为准（`crates/alkh-server/tests/e2e.rs` 已 pin 住），
+ * 当 `docs/api.md` 与真实响应不一致时（如卡片模板的嵌套 `card_message`、审计的带 tag
+ * 对象、钩子的 `hook_token`），以后端实际行为为准。
+ *
+ * Naming rules:
+ *  - JSON field names are `snake_case`.
+ *  - Enum values are the string literals the server actually serializes (`snake_case`).
  *  - Timestamps are RFC 3339 UTC strings, IDs are UUID v4 strings.
  */
 
@@ -92,6 +93,11 @@ export interface LoginResponse {
 export interface SessionResponse {
   authenticated: boolean;
   username: string;
+  /**
+   * `GET /auth/session` 也返回真实的 `must_change_password`（不只是登录响应），
+   * 因此刷新页面后仍能触发「需修改密码」提示与强制跳转。
+   */
+  must_change_password: boolean;
 }
 
 export interface ChangePasswordRequest {
@@ -129,7 +135,6 @@ export interface AppSettingsUpdate {
 
 export interface SettingsCheckResponse {
   ok: boolean;
-  bot_name?: string;
   chat_count?: number;
   error_code?: number | string;
   message?: string;
@@ -191,12 +196,9 @@ export interface Hook {
 }
 
 /** Response of `POST /hooks` — the plaintext token is returned exactly once. */
-export interface HookCreated extends Partial<Hook> {
-  id: UUID;
-  channel_id: UUID;
-  name: string;
-  token: string;
-  hook_url: string;
+export interface HookCreated extends Hook {
+  /** 真实线格式字段名是 `hook_token`（不是 `token`）；`hook_url` 同样带回明文地址。 */
+  hook_token: string;
 }
 
 export interface HookTokenResponse {
@@ -266,14 +268,8 @@ export interface ChannelSyncResult {
 export interface TestMessageRequest {
   message_type?: MessageType;
   card_template_id?: UUID;
-  kind?: 'firing' | 'resolved';
-}
-
-export interface TestMessageResponse {
-  ok: boolean;
-  delivery_id?: UUID;
-  message_id?: string;
-  [key: string]: unknown;
+  /** 后端请求字段名是 `sample`（不是 `kind`）；省略时后端按 firing 处理。 */
+  sample?: 'firing' | 'resolved';
 }
 
 /* ------------------------------------------------------------------ */
@@ -297,8 +293,9 @@ export type CardJson = Record<string, unknown>;
 
 export interface TemplateVariable {
   name: string;
-  type: string;
-  default: string;
+  /** 真实线格式字段名是 `ty`（`string` / `number` / `bool`），不是 `type`。 */
+  ty: string;
+  default: string | null;
   builtin: boolean;
 }
 
@@ -330,16 +327,24 @@ export interface AppFeedCardSpec {
   biz_id_source: BizIdSource;
 }
 
-export interface CardMessageTemplate {
-  id: UUID;
-  kind: 'card_message';
-  name: string;
+/** 卡片消息内容：真实线格式是嵌在 `CardTemplate.card_message` 下的对象。 */
+export interface CardMessageSpec {
   source: CardSource;
   card_json: CardJson | null;
   template_id: string | null;
   template_version_name: string | null;
   variables: TemplateVariable[];
+}
+
+export interface CardMessageTemplate {
+  id: UUID;
+  kind: 'card_message';
+  name: string;
+  /** 卡片内容嵌套在此字段下（顶层没有扁平的 source/card_json/variables）。 */
+  card_message: CardMessageSpec | null;
+  app_feed_spec: AppFeedCardSpec | null;
   detected_variables: string[];
+  unknown_variables: string[];
   is_default: boolean;
   created_at: ISODateTime;
   updated_at: ISODateTime;
@@ -349,8 +354,10 @@ export interface AppFeedCardTemplate {
   id: UUID;
   kind: 'app_feed_card';
   name: string;
-  app_feed_spec: AppFeedCardSpec;
+  card_message: CardMessageSpec | null;
+  app_feed_spec: AppFeedCardSpec | null;
   detected_variables: string[];
+  unknown_variables: string[];
   is_default: boolean;
   created_at: ISODateTime;
   updated_at: ISODateTime;
@@ -358,26 +365,26 @@ export interface AppFeedCardTemplate {
 
 export type CardTemplate = CardMessageTemplate | AppFeedCardTemplate;
 
-export interface CardMessageTemplateCreate {
-  kind: 'card_message';
-  name: string;
+export interface CardMessageInput {
   source: CardSource;
   card_json?: CardJson | null;
   template_id?: string | null;
   template_version_name?: string | null;
   variables?: TemplateVariable[];
-  is_default?: boolean;
 }
 
-export interface AppFeedCardTemplateCreate {
-  kind: 'app_feed_card';
+/** `POST`/`PATCH /card-templates` 的真实请求体；`name` 与 `kind` 是必填。 */
+export interface CardTemplateInput {
   name: string;
-  app_feed_spec: AppFeedCardSpec;
+  kind: CardTemplateKind;
+  card_message?: CardMessageInput | null;
+  app_feed_spec?: AppFeedCardSpec | null;
   is_default?: boolean;
 }
 
-export type CardTemplateCreate = CardMessageTemplateCreate | AppFeedCardTemplateCreate;
-export type CardTemplatePatch = Partial<CardTemplateCreate> & { name?: string };
+export type CardTemplateCreate = CardTemplateInput;
+/** PATCH 与创建共用同一请求体（`name`/`kind` 同样必填）。 */
+export type CardTemplatePatch = CardTemplateInput;
 
 /**
  * `docs/api.md` does not fix the shape of validation entries, so both the plain
@@ -393,9 +400,11 @@ export type ValidationItem =
     };
 
 export interface ValidateRequest {
+  name: string;
   kind: CardTemplateKind;
-  card_json?: CardJson | null;
+  card_message?: CardMessageInput | null;
   app_feed_spec?: AppFeedCardSpec | null;
+  is_default?: boolean;
 }
 
 export interface ValidateResponse {
@@ -407,7 +416,7 @@ export interface ValidateResponse {
 }
 
 export interface PreviewRequest extends ValidateRequest {
-  sample: 'firing' | 'resolved';
+  sample?: 'firing' | 'resolved';
   channel_id?: UUID;
 }
 
@@ -443,8 +452,10 @@ export interface AlertGroup {
   id: UUID;
   group_key: string;
   receiver: string;
-  channel: ChannelRef | null;
-  hook: ChannelRef | null;
+  /** 只有详情接口（`GET /alert-groups/:id`）返回，列表接口没有。 */
+  channel?: ChannelRef | null;
+  /** 只有详情接口返回，列表接口没有。 */
+  hook?: ChannelRef | null;
   status: GroupStatus;
   alertname: string | null;
   severity: string | null;
@@ -525,8 +536,8 @@ export interface RecentEvent {
   at: ISODateTime;
   action: string;
   target: string | null;
-  /** `docs/domain-model.md` §10: Ok | Skipped{reason} | Failed{error}. */
-  outcome: string;
+  /** 带 tag 的对象：`{"type":"ok"}` / `{"type":"skipped","reason":...}` / `{"type":"failed","error":...}`。 */
+  outcome: AuditOutcome;
 }
 
 export interface Overview {
@@ -537,8 +548,11 @@ export interface Overview {
   recent_events: RecentEvent[];
 }
 
-/** Serialization of `AuditActor` (Admin{user}|AlertManager{hook}|System{job}) is unspecified. */
+/** `AuditActor` 是带 tag 的对象：`{"type":"admin","username":...}` / `{"type":"alert_manager","hook_id":...}` / `{"type":"system","job":...}`。 */
 export type AuditActor = string | Record<string, unknown>;
+
+/** `Outcome` 是带 tag 的对象：`{"type":"ok"}` / `{"type":"skipped","reason":...}` / `{"type":"failed","error":...}`。 */
+export type AuditOutcome = string | Record<string, unknown>;
 
 export interface AuditLog {
   id: number;
@@ -546,8 +560,7 @@ export interface AuditLog {
   actor: AuditActor;
   action: string;
   target: string | null;
-  /** serialization of `Outcome` is unspecified beyond the `outcome=` filter being scalar. */
-  outcome: string;
+  outcome: AuditOutcome;
   detail: unknown;
 }
 

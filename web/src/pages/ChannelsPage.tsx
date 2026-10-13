@@ -66,7 +66,6 @@ export default function ChannelsPage(): JSX.Element {
   const [syncing, setSyncing] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Channel | null>(null);
-  const [forceDelete, setForceDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [oneTime, setOneTime] = useState<OneTimeCredential | null>(null);
 
@@ -154,8 +153,8 @@ export default function ChannelsPage(): JSX.Element {
       }
       reload();
     } catch (cause) {
-      if (cause instanceof ApiError && cause.code === 'duplicate_receive_id') {
-        setFormError(new Error('该 (receive_id_type, receive_id) 已存在（duplicate_receive_id）。'));
+      if (cause instanceof ApiError && cause.status === 409) {
+        setFormError(new Error(`创建失败（409 conflict）：${cause.message}`));
       } else {
         setFormError(cause);
       }
@@ -168,19 +167,13 @@ export default function ChannelsPage(): JSX.Element {
     if (!deleteTarget) return;
     setDeleting(true);
     try {
-      await deleteChannel(deleteTarget.id, forceDelete);
-      toast.success(forceDelete ? `渠道「${deleteTarget.name}」已强制删除` : `渠道「${deleteTarget.name}」已删除`);
+      await deleteChannel(deleteTarget.id);
+      toast.success(`渠道「${deleteTarget.name}」已删除`);
       setDeleteTarget(null);
-      setForceDelete(false);
       reload();
     } catch (cause) {
-      if (cause instanceof ApiError && cause.code === 'channel_has_deliveries' && !forceDelete) {
-        setForceDelete(true);
-      } else {
-        toast.error(errorMessage(cause));
-        setDeleteTarget(null);
-        setForceDelete(false);
-      }
+      toast.error(errorMessage(cause));
+      setDeleteTarget(null);
     } finally {
       setDeleting(false);
     }
@@ -342,10 +335,7 @@ export default function ChannelsPage(): JSX.Element {
                             <Button
                               size="sm"
                               variant="danger"
-                              onClick={() => {
-                                setDeleteTarget(channel);
-                                setForceDelete(false);
-                              }}
+                              onClick={() => setDeleteTarget(channel)}
                             >
                               删除
                             </Button>
@@ -433,26 +423,17 @@ export default function ChannelsPage(): JSX.Element {
 
       <ConfirmModal
         open={deleteTarget !== null}
-        title={forceDelete ? '强制删除渠道' : '删除渠道'}
+        title="删除渠道"
         tone="danger"
-        confirmLabel={forceDelete ? '仍要删除（force=true）' : '删除'}
+        confirmLabel="删除"
         busy={deleting}
-        onCancel={() => {
-          setDeleteTarget(null);
-          setForceDelete(false);
-        }}
+        onCancel={() => setDeleteTarget(null)}
         onConfirm={() => void confirmDelete()}
         message={
-          forceDelete ? (
-            <>
-              渠道「{deleteTarget?.name}」已有投递记录，普通删除只会把它软删为 <code>enabled=false</code>（HTTP 409
-              channel_has_deliveries）。使用 <code>?force=true</code> 将级联删除 hooks / policies。
-            </>
-          ) : (
-            <>
-              将删除渠道「{deleteTarget?.name}」及其 hooks 与通知策略。若已存在投递记录，服务端会返回 409 并改为软删。
-            </>
-          )
+          <>
+            将删除渠道「{deleteTarget?.name}」及其 hooks 与通知策略。若服务端因已存在投递记录等原因拒绝，会返回 409
+            conflict 并保持数据不变（当前后台未提供「强制删除」入口）。
+          </>
         }
       />
     </>

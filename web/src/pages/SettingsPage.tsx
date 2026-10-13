@@ -354,7 +354,7 @@ export default function SettingsPage(): JSX.Element {
             <div className="mt-16">
               {checkResult.ok ? (
                 <Banner tone="success">
-                  凭据可用 · 机器人：{checkResult.bot_name ?? '未知'} · 可触达群 {checkResult.chat_count ?? 0} 个
+                  凭据可用 · 可触达群 {checkResult.chat_count ?? 0} 个
                 </Banner>
               ) : (
                 <Banner tone="error">

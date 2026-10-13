@@ -29,6 +29,7 @@ import {
   Switch,
   Textarea,
 } from '../components/ui';
+import ErrorBoundary from '../components/ErrorBoundary';
 import { useAsync } from '../hooks';
 import { CARD_SOURCE_LABEL } from '../labels';
 import { enumOptions, useMeta } from '../meta';
@@ -37,10 +38,12 @@ import type {
   AppFeedCardSpec,
   BizIdSource,
   CardJson,
+  Delivery,
   FeedButtonType,
   CardSource,
   CardTemplate,
   CardTemplateCreate,
+  CardMessageInput,
   CardTemplateKind,
   EnumOption,
   PreviewResponse,
@@ -98,6 +101,17 @@ function extractCardJson(text: string): CardJson {
 
 function charLength(value: string): number {
   return Array.from(value).length;
+}
+
+/** 校验响应即使缺少某个数组字段也不能让页面抛异常。 */
+function normalizeValidation(report: ValidateResponse): ValidateResponse {
+  return {
+    valid: report.valid ?? false,
+    errors: Array.isArray(report.errors) ? report.errors : [],
+    warnings: Array.isArray(report.warnings) ? report.warnings : [],
+    detected_variables: Array.isArray(report.detected_variables) ? report.detected_variables : [],
+    unknown_variables: Array.isArray(report.unknown_variables) ? report.unknown_variables : [],
+  };
 }
 
 /**
@@ -172,7 +186,18 @@ function validateSpec(spec: AppFeedCardSpec): SpecIssue[] {
 
 /* ------------------------------------------------------------------- page */
 
+/**
+ * 页面外壳：任何渲染期异常都由 ErrorBoundary 兜底，避免整页白屏。
+ */
 export default function CardTemplateEditorPage(): JSX.Element {
+  return (
+    <ErrorBoundary>
+      <CardTemplateForm />
+    </ErrorBoundary>
+  );
+}
+
+function CardTemplateForm(): JSX.Element {
   const { id } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
@@ -206,7 +231,7 @@ export default function CardTemplateEditorPage(): JSX.Element {
   const [spec, setSpec] = useState<AppFeedCardSpec>(() => normalizeSpec(null));
   const [specIssues, setSpecIssues] = useState<SpecIssue[]>([]);
   const [focusKey, setFocusKey] = useState<FocusKey>('title');
-  const [declaredVariables, setDeclaredVariables] = useState<Array<{ name: string; type: string }>>([]);
+  const [declaredVariables, setDeclaredVariables] = useState<Array<{ name: string; ty: string }>>([]);
 
   const [sample, setSample] = useState<'firing' | 'resolved'>('firing');
   const [previewChannelId, setPreviewChannelId] = useState('');
@@ -218,7 +243,7 @@ export default function CardTemplateEditorPage(): JSX.Element {
   const [saveError, setSaveError] = useState<unknown>(null);
   const [testChannelId, setTestChannelId] = useState('');
   const [sendingTest, setSendingTest] = useState(false);
-  const [testResult, setTestResult] = useState<Record<string, unknown> | null>(null);
+  const [testResult, setTestResult] = useState<Delivery | null>(null);
 
   // hydrate the form from the loaded template
   useEffect(() => {
@@ -229,13 +254,16 @@ export default function CardTemplateEditorPage(): JSX.Element {
     setValidation(null);
     setPreview(null);
     if (loaded.kind === 'card_message') {
-      setSource(loaded.source);
-      setCardJson(loaded.card_json);
-      setCardText(loaded.card_json ? prettyJson(loaded.card_json) : '');
+      // 真实线格式把卡片内容嵌在 `card_message` 下；字段缺失时全部按空值处理。
+      const cardSpec = loaded.card_message ?? null;
+      setSource(cardSpec?.source ?? 'builder_json');
+      setCardJson(cardSpec?.card_json ?? null);
+      setCardText(cardSpec?.card_json ? prettyJson(cardSpec.card_json) : '');
       setCardTextError(null);
-      setTemplateId(loaded.template_id ?? '');
-      setTemplateVersion(loaded.template_version_name ?? '');
-      setDeclaredVariables(loaded.variables.map((variable) => ({ name: variable.name, type: variable.type })));
+      setTemplateId(cardSpec?.template_id ?? '');
+      setTemplateVersion(cardSpec?.template_version_name ?? '');
+      const variables = Array.isArray(cardSpec?.variables) ? cardSpec.variables : [];
+      setDeclaredVariables(variables.map((variable) => ({ name: variable.name, ty: variable.ty })));
     } else {
       setSpec(normalizeSpec(loaded.app_feed_spec));
       setDeclaredVariables([]);
@@ -243,7 +271,10 @@ export default function CardTemplateEditorPage(): JSX.Element {
   }, [loaded]);
 
   const cardTemplateVariables = useMemo(
-    () => (loaded && loaded.kind === 'card_message' ? loaded.variables : []),
+    () =>
+      loaded && loaded.kind === 'card_message' && Array.isArray(loaded.card_message?.variables)
+        ? loaded.card_message.variables
+        : [],
     [loaded],
   );
 
@@ -274,20 +305,47 @@ export default function CardTemplateEditorPage(): JSX.Element {
     }
   };
 
-  const buildValidateBody = () =>
+  const buildCardMessageInput = (): CardMessageInput => ({
+    source,
+    card_json: source === 'builder_json' ? cardJson : null,
+    template_id: source === 'builder_template' ? templateId.trim() || null : null,
+    template_version_name: source === 'builder_template' ? templateVersion.trim() || null : null,
+    ...(cardTemplateVariables.length > 0 ? { variables: cardTemplateVariables } : {}),
+  });
+
+  /**
+   * validate / preview / create / patch 共用同一请求体形状：
+   * `name` 必填，卡片内容必须嵌在 `card_message` 里（顶层扁平字段会被后端忽略并回退默认卡片）。
+   */
+  const buildTemplateInput = (): CardTemplateCreate =>
     kind === 'card_message'
-      ? { kind, card_json: cardJson }
-      : { kind, app_feed_spec: spec };
+      ? { name: name.trim(), kind: 'card_message', card_message: buildCardMessageInput(), is_default: isDefault }
+      : { name: name.trim(), kind: 'app_feed_card', app_feed_spec: spec, is_default: isDefault };
+
+  const ensureRunnable = (): boolean => {
+    if (!name.trim()) {
+      toast.error('模板名称（name）为必填');
+      return false;
+    }
+    if (kind === 'card_message') {
+      if (source === 'builder_json' && !cardJson) {
+        toast.error('builder_json 来源必须提供合法的卡片 JSON');
+        return false;
+      }
+      if (source === 'builder_template' && !templateId.trim()) {
+        toast.error('builder_template 来源必须填写 template_id');
+        return false;
+      }
+    }
+    return true;
+  };
 
   const runValidate = async () => {
-    if (kind === 'card_message' && !cardJson) {
-      toast.error('请先提供合法的卡片 JSON');
-      return;
-    }
+    if (!ensureRunnable()) return;
     setValidating(true);
     setPreview(null);
     try {
-      const result = await validateCardTemplate(buildValidateBody());
+      const result = normalizeValidation(await validateCardTemplate(buildTemplateInput()));
       setValidation(result);
       toast.success(result.valid ? '校验通过' : `校验未通过（${result.errors.length} 个错误）`);
     } catch (cause) {
@@ -298,14 +356,11 @@ export default function CardTemplateEditorPage(): JSX.Element {
   };
 
   const runPreview = async () => {
-    if (kind === 'card_message' && !cardJson) {
-      toast.error('请先提供合法的卡片 JSON');
-      return;
-    }
+    if (!ensureRunnable()) return;
     setPreviewing(true);
     try {
       const result = await previewCardTemplate({
-        ...buildValidateBody(),
+        ...buildTemplateInput(),
         sample,
         ...(previewChannelId ? { channel_id: previewChannelId } : {}),
       });
@@ -367,19 +422,7 @@ export default function CardTemplateEditorPage(): JSX.Element {
       }
     }
 
-    const body: CardTemplateCreate =
-      kind === 'card_message'
-        ? {
-            kind: 'card_message',
-            name: name.trim(),
-            source,
-            card_json: source === 'builder_json' ? cardJson : null,
-            template_id: source === 'builder_template' ? templateId.trim() || null : null,
-            template_version_name: source === 'builder_template' ? templateVersion.trim() || null : null,
-            is_default: isDefault,
-            ...(cardTemplateVariables.length > 0 ? { variables: cardTemplateVariables } : {}),
-          }
-        : { kind: 'app_feed_card', name: name.trim(), app_feed_spec: spec, is_default: isDefault };
+    const body = buildTemplateInput();
 
     setSaving(true);
     try {
@@ -530,9 +573,10 @@ export default function CardTemplateEditorPage(): JSX.Element {
             )}
             {source === 'builder_template' ? (
               <div className="callout info">
-                契约说明：<code>/card-templates/validate</code> 与 <code>/card-templates/preview</code> 的请求体只接受{' '}
-                <code>card_json</code>（docs/api.md §5），没有 template_id 字段。因此选择 builder_template 时，如需校验 /
-                预览，请把本地导出的同一份 JSON 粘贴到下面的导入区（保存时仍按 builder_template 提交）。
+                契约说明：<code>/card-templates/validate</code> 与 <code>/card-templates/preview</code> 接收与保存相同的请求体
+                （<code>{'{name, kind, card_message}'}</code>），因此 template_id 会随 <code>card_message</code> 一起提交、可正常校验。
+                但 <code>builder_template</code> 本地没有卡片 JSON 可渲染，如需看到渲染结果，请把搭建工具导出的同一份 JSON
+                粘贴到下面的导入区（保存时仍按 builder_template 提交）。
               </div>
             ) : null}
           </Card>
@@ -752,7 +796,7 @@ export default function CardTemplateEditorPage(): JSX.Element {
 
         <h3 className="mb-8">内置变量（GET /api/v1/meta）</h3>
         <div className="row tight mb-16">
-          {meta.variables.map((variable) => (
+          {(meta.variables ?? []).map((variable) => (
             <button
               key={`${variable.group}:${variable.name}`}
               type="button"
@@ -802,7 +846,7 @@ export default function CardTemplateEditorPage(): JSX.Element {
                     {declaredVariables.map((variable) => (
                       <tr key={variable.name}>
                         <td className="mono">{variable.name}</td>
-                        <td>{variable.type}</td>
+                        <td>{variable.ty}</td>
                         <td className="actions">
                           <CopyButton value={`\${${variable.name}}`} small label="复制 ${}" />
                         </td>
@@ -885,7 +929,7 @@ export default function CardTemplateEditorPage(): JSX.Element {
             {preview.rendered_app_feed_spec ? <JsonBlock value={preview.rendered_app_feed_spec} maxHeight={420} /> : null}
             <h3 className="mb-8 mt-16">渲染上下文变量</h3>
             <DescriptionList
-              items={Object.entries(preview.variables).map(([key, value]) => ({
+              items={Object.entries(preview.variables ?? {}).map(([key, value]) => ({
                 label: key,
                 value: <span className="mono break-all">{typeof value === 'string' ? value : prettyJson(value)}</span>,
               }))}
@@ -932,7 +976,7 @@ export default function CardTemplateEditorPage(): JSX.Element {
                   setTestResult(null);
                   try {
                     const result = await sendTestCardTemplate(id, { channel_id: testChannelId, sample });
-                    setTestResult(result as unknown as Record<string, unknown>);
+                    setTestResult(result);
                     toast.success('测试消息已提交发送');
                   } catch (cause) {
                     toast.error(errorMessage(cause));
@@ -947,8 +991,12 @@ export default function CardTemplateEditorPage(): JSX.Element {
           </div>
           {testResult ? (
             <div className="mt-16">
-              <Banner tone={testResult.ok === false ? 'warn' : 'success'}>
-                {testResult.ok === false ? '服务端返回 ok=false' : `已发送${testResult.message_id ? ` · message_id ${String(testResult.message_id)}` : ''}`}
+              <Banner tone={testResult.state === 'failed' ? 'error' : 'success'}>
+                {testResult.state === 'failed'
+                  ? `发送失败${testResult.last_error ? `：${testResult.last_error}` : ''}`
+                  : `已提交发送（state=${testResult.state}）${
+                      testResult.lark_message_id ? ` · message_id ${testResult.lark_message_id}` : ''
+                    }`}
               </Banner>
               <JsonBlock value={testResult} maxHeight={240} />
             </div>

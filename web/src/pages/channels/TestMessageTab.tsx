@@ -1,11 +1,11 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { errorMessage, listCardTemplates, sendTestMessage } from '../../api';
-import { Banner, Button, Card, Field, JsonBlock, Options, RadioGroup, Select } from '../../components/ui';
+import { Banner, Button, Card, Field, JsonBlock, Options, RadioGroup, Select, StatusBadge } from '../../components/ui';
 import { useAsync } from '../../hooks';
 import { MESSAGE_TYPE_LABEL } from '../../labels';
 import { useToast } from '../../toast';
-import type { Channel, MessageType, TestMessageResponse } from '../../types';
+import type { Channel, Delivery, MessageType } from '../../types';
 
 interface Props {
   channel: Channel;
@@ -17,14 +17,14 @@ export default function TestMessageTab({ channel }: Props): JSX.Element {
   const [messageType, setMessageType] = useState<'' | MessageType>('');
   const [templateId, setTemplateId] = useState('');
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<TestMessageResponse | null>(null);
+  const [result, setResult] = useState<Delivery | null>(null);
   const [error, setError] = useState<unknown>(null);
 
   const { data: templates } = useAsync((signal) => listCardTemplates({}, signal), []);
 
   const effectiveType: MessageType = messageType || channel.policy?.message_type || 'card_message';
   const templateOptions = useMemo(
-    () => (templates?.items ?? []).filter((template) => template.kind === effectiveType),
+    () => (templates ?? []).filter((template) => template.kind === effectiveType),
     [templates, effectiveType],
   );
 
@@ -34,7 +34,7 @@ export default function TestMessageTab({ channel }: Props): JSX.Element {
     setResult(null);
     try {
       const response = await sendTestMessage(channel.id, {
-        kind,
+        sample: kind,
         ...(messageType ? { message_type: messageType } : {}),
         ...(templateId ? { card_template_id: templateId } : {}),
       });
@@ -55,7 +55,7 @@ export default function TestMessageTab({ channel }: Props): JSX.Element {
         subtitle="POST /channels/:id/test-message —— 用真实凭据向该渠道发送一条测试消息"
       >
         <div className="form-grid">
-          <Field label="样例类型（kind）" required>
+          <Field label="样例类型（sample）" required>
             <RadioGroup<'firing' | 'resolved'>
               value={kind}
               options={[
@@ -108,16 +108,24 @@ export default function TestMessageTab({ channel }: Props): JSX.Element {
 
       {result ? (
         <Card title="发送结果">
-          <Banner tone={result.ok ? 'success' : 'warn'}>
-            {result.ok ? '测试消息已发送' : '服务端返回 ok=false，请查看下方原始响应'}
+          <Banner tone={result.state === 'failed' ? 'error' : 'success'}>
+            {result.state === 'failed'
+              ? `发送失败${result.last_error ? `：${result.last_error}` : ''}`
+              : `测试消息已提交（state=${result.state}，kind=${result.kind}）`}
           </Banner>
           <div className="kv-grid mb-16">
             <dt>delivery_id</dt>
             <dd className="mono break-all">
-              {result.delivery_id ? <Link to="/deliveries">{result.delivery_id}</Link> : '—'}
+              <Link to="/deliveries">{result.id}</Link>
             </dd>
             <dt>message_id</dt>
-            <dd className="mono break-all">{result.message_id ?? '—'}</dd>
+            <dd className="mono break-all">{result.lark_message_id ?? '—'}</dd>
+            <dt>state</dt>
+            <dd>
+              <StatusBadge kind="delivery" value={result.state} />
+            </dd>
+            <dt>last_error</dt>
+            <dd className="mono break-all">{result.last_error ?? '—'}</dd>
           </div>
           <Field label="原始响应">
             <JsonBlock value={result} maxHeight={260} />

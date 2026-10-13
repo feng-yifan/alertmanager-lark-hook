@@ -1,8 +1,9 @@
 # web — alertmanager-lark-hook 管理后台
 
 Rust 服务（`crates/alkh-server`）内嵌的 TypeScript 管理后台 SPA：把 Prometheus AlertManager
-的告警投递到飞书 / Lark。实现严格对齐 `docs/api.md`（REST 契约）、`docs/business-rules.md`
-（投递决策表 R1–R14）与 `docs/domain-model.md`（实体与枚举）。
+的告警投递到飞书 / Lark。数据类型以**后端真实线格式**为准（`crates/alkh-server/tests/e2e.rs`
+已把真实形状 pin 住），当 `docs/api.md` 与实际响应不一致时以前端已实测的后端行为为准；
+业务规则参考 `docs/business-rules.md`（R1–R14）与 `docs/domain-model.md`（实体与枚举）。
 
 ## 技术栈
 
@@ -34,10 +35,12 @@ pnpm preview          # 预览构建产物
 - 鉴权使用 HttpOnly Cookie `alkh_session`（`credentials: 'same-origin'`）。契约允许
   `Authorization: Bearer`，但浏览器端不注入 token。
 - 任何业务接口返回 `401` 时，`api.ts` 会通知会话层清空登录态，路由守卫随即跳转 `/login`
-  （`/auth/login`、`/auth/session` 例外，以便登录表单显示 `invalid_credentials`）。
-- 错误信封 `{"error":{"code","message"}}`（含可选 `details`）统一解析为 `ApiError`；
-  `ApiError.code` 用于 409（`channel_has_deliveries` / `template_in_use` / `duplicate_receive_id`）
-  等分支处理。
+  （`/auth/login`、`/auth/session` 例外：登录表单的 401 按 `unauthenticated` 显示为用户名/密码错误，
+  而不是「会话已失效」）。
+- 错误信封 `{"error":{"code","message"}}`（含可选 `details`）统一解析为 `ApiError`。
+  后端 409 只有统一的 `conflict` code（`channel_has_deliveries` / `template_in_use` /
+  `duplicate_receive_id` 等细分 code 后端从不产生），因此前端统一按通用冲突提示处理，
+  不提供依赖细分 code 的「强制删除」分支。
 
 ## 页面清单
 
@@ -47,7 +50,7 @@ pnpm preview          # 预览构建产物
 | `/` | `pages/OverviewPage.tsx` | `GET /overview` 统计卡（渠道 / Hook / firing·resolved 分组 / 近 24h sent·failed·suppressed）+ 最近事件 |
 | `/channels` | `pages/ChannelsPage.tsx` | 列表、启用开关、搜索、从飞书同步、手动创建（含一次性 `hook_token` 展示） |
 | `/channels/:id` | `pages/ChannelDetailPage.tsx` + `pages/channels/*` | 三个 Tab：发送规则（完整 NotificationPolicy 表单 + 决策表 + R4/R5/R6/R7/R8/R11 说明）、接收 Hook（创建 / 轮换 / 重命名 / 启停 / 删除 + 一次性 token）、发送测试 |
-| `/card-templates` | `pages/CardTemplatesPage.tsx` | 模板列表、按 kind 过滤、设为默认、删除（409 `template_in_use` 提示） |
+| `/card-templates` | `pages/CardTemplatesPage.tsx` | 模板列表（裸数组）、按 kind 过滤、设为默认（回传整份模板，避免后端整份替换时丢内容）、删除（409 通用冲突提示） |
 | `/card-templates/new`、`/card-templates/:id` | `pages/CardTemplateEditorPage.tsx` | card_message：JSON 编辑器（失焦校验）+ 搭建工具导入 + source 切换 + 变量面板 + 校验 / 预览；app_feed_card：强类型表单 + 长度实时提示 + 变量插入按钮；已存在的模板可发送测试（`/card-templates/:id/send-test`） |
 | `/alert-groups` | `pages/AlertGroupsPage.tsx` | status / channel / severity / 搜索过滤，分页，删除记录 |
 | `/alert-groups/:id` | `pages/AlertGroupDetailPage.tsx` | 分组元数据、告警表格（labels / annotations / generator_url）、labels 面板、投递时间线（重试 / 撤回） |
@@ -99,28 +102,32 @@ web/
    `source` 的 `builder_json` / `builder_template`、`DeliveryKind` 的 `firing_created` /
    `repeated` / `updated` / `resolved` / `test`、`DeliveryState` 的 `pending` / `active` /
    `superseded` / `recalled` / `resolved` / `failed`。
-3. **`POST /channels` 的一次性 `hook_token`**：契约只说「响应附带 `hook_token` 明文一次」。
-   类型里把它设为可选，并额外容忍可选的 `hook_url`；若后端只回 `hook_token`，页面用当前
-   origin 拼接占位 URL 提示。创建/轮换的展示逻辑不依赖该字段的存在。
-4. **`validate` 的 `errors`/`warnings` 元素结构未定义**：`types.ts` 用
+3. **一次性明文 `hook_token`**：`POST /channels`、`POST /hooks` 的一次性字段名都是 `hook_token`
+   （不是 `token`），并同时返回完整 `hook_url`；`POST /hooks/:id/rotate` 的响应字段仍是 `token`。
+   页面只在一次性面板中展示，关闭后不可再查看。
+4. **`validate` 的 `errors`/`warnings` 元素结构**：后端实际返回字符串数组；`types.ts` 保留
    `ValidationItem = string | { code?, message?, path?, field? }`，渲染统一走
    `utils.validationText()`，两种形态都能显示。
-5. **`AuditLog.actor` / `outcome` 的序列化未定义**：`docs/domain-model.md` §10 是 Rust 枚举
-   （`Admin{user}` / `Skipped{reason}` 等）。前端用 `actorText()` / `outcomeLabel()` 两种形态
-   （字符串或对象）都能渲染；`outcome=` 过滤按契约是标量，只提供 ok / skipped / failed。
-6. **`must_change_password` 只来自登录响应**：`GET /auth/session` 仅返回
-   `{authenticated, username}`，因此该标记只保存在当前标签页内存中，并在「设置」页显著提示。
-7. **`validate` / `preview` 只接受 `card_json`**：契约请求体没有 `template_id`，所以
-   `source = builder_template` 时，页面明确提示：如需校验/预览，请把同一份导出 JSON 粘到导入区，
-   保存时仍按 `builder_template` 提交。
+5. **`AuditLog.actor` / `outcome` 是 serde 的 internally-tagged 对象**：
+   `actor = {"type":"admin","username":...} | {"type":"alert_manager","hook_id":...} | {"type":"system","job":...}`，
+   `outcome = {"type":"ok"} | {"type":"skipped","reason":...} | {"type":"failed","error":...}`。
+   `utils.actorText()` / `outcomeText()` 按 tag 解析并显示 username / hook id，同时兼容旧的字符串形态；
+   `outcome=` 过滤只提供 ok / skipped / failed 三个标量。
+6. **`must_change_password` 同时来自会话与登录响应**：`GET /auth/session` 返回
+   `{authenticated, username, must_change_password}`，因此刷新页面后仍会显示「需修改密码」并强制跳转 `/settings`。
+7. **卡片模板请求体是嵌套的 `card_message`**：`POST`/`PATCH /card-templates`、
+   `/card-templates/validate`、`/card-templates/preview` 都要求 `{name, kind, card_message?}`，
+   其中 `card_message = {source, card_json, template_id, template_version_name, variables}`，
+   变量类型字段名是 `ty`（不是 `type`）。把 `card_json` 放在顶层会被后端静默忽略并回退成内置默认卡片
+   （HTTP 201 但内容丢失）；PATCH 是整份替换，`setDefault` 也必须回传完整模板内容。
 8. **`GET /channels/:id/policy` 可能 404**：契约说创建渠道会自动生成默认策略，但未规定 404 语义。
    页面把 404 当作「尚无策略」，用契约示例中的默认值填充表单并提示保存后会创建策略。
-9. **`GET /card-templates` 无分页参数**：契约只列 `?kind=`，所以模板列表不做 offset 分页
-   （仍兼容分页信封的字段）。
+9. **`GET /card-templates` 与 `GET /hooks` 返回裸数组**：模板列表不做 offset 分页；
+   `api.normalizeList()` 同时容忍 `T[]` 与旧的 `{items:T[]}` 形态。
 10. **`Delivery` 的 `channel_id` / `rendered_digest`**：只出现在 `docs/domain-model.md` §7，
     `docs/api.md` 的示例里没有，故在类型中是可选的，界面不依赖它们。
-11. **跨渠道 `GET /hooks` 未使用**：契约存在该端点，但 Hook 列表直接取渠道详情里的 `hooks`
-    （避免为跨渠道列表臆造 channel 名称映射）。
+11. **跨渠道 `GET /hooks` 未使用**：契约存在该端点（返回裸数组），但 Hook 列表直接取渠道详情里的
+    `hooks`（避免为跨渠道列表臆造 channel 名称映射）。
 12. **`AppSettings.default_app_feed_link`**：`docs/domain-model.md` §8 有该字段，但
     `docs/api.md` 的 `GET /settings` 示例与本次 UI 需求都没有它，故未在界面暴露。
 13. **`RecallFailed`**：`docs/business-rules.md` R2 提到该状态，但 §7 的 `DeliveryState`
@@ -129,3 +136,9 @@ web/
     在本地校验时放行；只有既不含 `${` 又不是 `https://` 开头的值才判为错误。
 15. **pnpm 11 的 `pnpm-workspace.yaml`**：本环境预置了 `allowBuilds: {esbuild: ...}` 占位，
     已改为 `true` 以允许 esbuild 的 postinstall（否则 `vite build` 无法运行）。
+16. **发送测试的请求/响应**：`POST /channels/:id/test-message` 与
+    `POST /card-templates/:id/send-test` 的请求字段是 `sample`（firing / resolved，不是 `kind`），
+    响应是完整的 `Delivery`（没有 `{ok, delivery_id, message_id}` 信封），页面按 `state` 判断结果。
+17. **`POST /settings/check` 不返回 `bot_name`**：响应只有 `{ok, chat_count, error_code, message}`，
+    页面不再显示「机器人：未知」。
+18. **`AlertGroup` 列表不返回 `channel` / `hook`**：只有详情接口有；列表页在缺字段时显示「—」。

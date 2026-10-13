@@ -6,8 +6,8 @@
  *  - a non-2xx response is parsed from the `{"error":{"code","message"}}` envelope
  *    and thrown as `ApiError`;
  *  - `401` on an authenticated endpoint notifies the session layer, which sends the
- *    user to `/login` (the login/session probes are exempt so the login form can
- *    surface `invalid_credentials`).
+ *    user to `/login`; the login/session probes are exempt so a failed login keeps its
+ *    `unauthenticated` semantics instead of being reported as an expired session.
  */
 import type {
   AlertGroup,
@@ -45,7 +45,6 @@ import type {
   SessionResponse,
   SettingsCheckResponse,
   TestMessageRequest,
-  TestMessageResponse,
   ValidateRequest,
   ValidateResponse,
 } from './types';
@@ -57,13 +56,19 @@ export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
   readonly details?: unknown;
+  /**
+   * True when the 401 came from an endpoint whose 401 is an expected probe
+   * (`/auth/login` / `/auth/session`) rather than a lost session.
+   */
+  readonly authProbe: boolean;
 
-  constructor(status: number, code: string, message: string, details?: unknown) {
+  constructor(status: number, code: string, message: string, details?: unknown, authProbe = false) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
     this.details = details;
+    this.authProbe = authProbe;
   }
 }
 
@@ -106,6 +111,19 @@ function isErrorEnvelope(value: unknown): value is { error: { code?: string; mes
   return typeof candidate === 'object' && candidate !== null;
 }
 
+/**
+ * `/hooks` 与 `/card-templates` 返回裸数组（不是分页信封）；这里同时容忍
+ * 旧的 `{items:[...]}` 形态，避免线格式再次漂移时整个列表直接消失。
+ */
+export function normalizeList<T>(payload: unknown): T[] {
+  if (Array.isArray(payload)) return payload as T[];
+  if (payload && typeof payload === 'object') {
+    const items = (payload as { items?: unknown }).items;
+    if (Array.isArray(items)) return items as T[];
+  }
+  return [];
+}
+
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { method = 'GET', query, body, signal } = options;
   const headers: Record<string, string> = { Accept: 'application/json' };
@@ -146,10 +164,11 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     } else if (text.length > 0 && text.length < 500) {
       message = text;
     }
-    if (response.status === 401 && !UNAUTHENTICATED_EXEMPT.has(path)) {
+    const authProbe = response.status === 401 && UNAUTHENTICATED_EXEMPT.has(path);
+    if (response.status === 401 && !authProbe) {
       unauthorizedHandler?.();
     }
-    throw new ApiError(response.status, code, message, details);
+    throw new ApiError(response.status, code, message, details, authProbe);
   }
 
   if (payload === null && text.length > 0) {
@@ -241,16 +260,17 @@ export function putChannelPolicy(id: string, body: NotificationPolicyInput): Pro
   return request<NotificationPolicy>(`/channels/${id}/policy`, { method: 'PUT', body });
 }
 
-export function sendTestMessage(id: string, body: TestMessageRequest): Promise<TestMessageResponse> {
-  return request<TestMessageResponse>(`/channels/${id}/test-message`, { method: 'POST', body });
+export function sendTestMessage(id: string, body: TestMessageRequest): Promise<Delivery> {
+  return request<Delivery>(`/channels/${id}/test-message`, { method: 'POST', body });
 }
 
 /* ------------------------------------------------------------------ */
 /* 4. hooks                                                            */
 /* ------------------------------------------------------------------ */
 
-export function listHooks(signal?: AbortSignal): Promise<Paginated<Hook>> {
-  return request<Paginated<Hook>>('/hooks', { signal });
+export async function listHooks(signal?: AbortSignal): Promise<Hook[]> {
+  const payload = await request<unknown>('/hooks', { signal });
+  return normalizeList<Hook>(payload);
 }
 
 export function createHook(body: { channel_id: string; name: string }): Promise<HookCreated> {
@@ -273,14 +293,15 @@ export function deleteHook(id: string): Promise<void> {
 /* 5. card templates                                                   */
 /* ------------------------------------------------------------------ */
 
-export function listCardTemplates(
+export async function listCardTemplates(
   params: { kind?: CardTemplateKind | '' } = {},
   signal?: AbortSignal,
-): Promise<Paginated<CardTemplate>> {
-  return request<Paginated<CardTemplate>>('/card-templates', {
+): Promise<CardTemplate[]> {
+  const payload = await request<unknown>('/card-templates', {
     query: { kind: params.kind ? params.kind : undefined },
     signal,
   });
+  return normalizeList<CardTemplate>(payload);
 }
 
 export function createCardTemplate(body: CardTemplateCreate): Promise<CardTemplate> {
@@ -307,8 +328,8 @@ export function previewCardTemplate(body: PreviewRequest): Promise<PreviewRespon
   return request<PreviewResponse>('/card-templates/preview', { method: 'POST', body });
 }
 
-export function sendTestCardTemplate(id: string, body: CardTemplateSendTestRequest): Promise<TestMessageResponse> {
-  return request<TestMessageResponse>(`/card-templates/${id}/send-test`, { method: 'POST', body });
+export function sendTestCardTemplate(id: string, body: CardTemplateSendTestRequest): Promise<Delivery> {
+  return request<Delivery>(`/card-templates/${id}/send-test`, { method: 'POST', body });
 }
 
 /* ------------------------------------------------------------------ */
@@ -366,7 +387,13 @@ export function listAuditLogs(
 
 export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
-    if (error.status === 401) return '登录状态已失效，请重新登录。';
+    if (error.status === 401) {
+      // `/auth/login`（以及 `/auth/session`）的 401 是登录失败/会话探针，不是「会话过期」。
+      if (error.authProbe) {
+        return error.code === 'unauthenticated' ? '用户名或密码错误。' : error.message || error.code;
+      }
+      return '登录状态已失效，请重新登录。';
+    }
     return error.message || error.code;
   }
   if (error instanceof Error) return error.message;
