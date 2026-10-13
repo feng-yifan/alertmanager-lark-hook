@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "alkh-app"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "alkh-domain",
  "async-trait",
@@ -68,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "alkh-domain"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "alkh-infra"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes-gcm",
  "alkh-domain",
@@ -110,7 +110,7 @@ dependencies = [
 
 [[package]]
 name = "alkh-server"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "alkh-app",
  "alkh-domain",
