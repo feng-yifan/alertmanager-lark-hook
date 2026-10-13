@@ -903,6 +903,54 @@ async fn failed_intake_stays_retryable_instead_of_being_deduped() {
     );
 }
 
+/// 安全回归：告警的 `generatorURL` / `externalURL` 由发送方完全控制，
+/// 非 http(s) 的值（尤其 `javascript:`）必须在入库前被丢弃。
+///
+/// 原样入库时前端会把它放进 `<a href>`，而 React 18 不拦 `javascript:`，
+/// 于是「持有 hook token 发一条告警」就升级成「管理员点一下 = 后台被接管」。
+#[tokio::test]
+async fn javascript_urls_are_stripped_before_persisting() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+
+    let mut payload = firing_payload(1);
+    payload["alerts"][0]["generatorURL"] = json!("javascript:alert(document.domain)");
+    payload["externalURL"] = json!("javascript:alert(2)");
+
+    let (status, body) = h.push(payload).await;
+    assert_eq!(status, 200);
+    let group_id = body["alert_group_id"].as_str().unwrap().to_string();
+
+    let (status, group) = h.get(&format!("/api/v1/alert-groups/{group_id}")).await;
+    assert_eq!(status, 200);
+
+    let alert = &group["alerts"][0];
+    assert_eq!(
+        alert["generator_url"],
+        Value::Null,
+        "javascript: 的 generatorURL 不应入库: {alert}"
+    );
+    assert_eq!(
+        group["external_url"],
+        Value::Null,
+        "javascript: 的 externalURL 不应入库: {group}"
+    );
+
+    // 正常的 http(s) 链接必须保留，别把功能一起砍掉。
+    let mut ok_payload = firing_payload(1);
+    ok_payload["alerts"][0]["generatorURL"] = json!("http://prom:9090/graph");
+    ok_payload["externalURL"] = json!("http://alertmanager:9093");
+    ok_payload["groupKey"] = json!("{}:{alertname=\"Other\"}");
+    let (_, body) = h.push(ok_payload).await;
+    let gid = body["alert_group_id"].as_str().unwrap().to_string();
+    let (_, group) = h.get(&format!("/api/v1/alert-groups/{gid}")).await;
+    assert_eq!(
+        group["alerts"][0]["generator_url"], "http://prom:9090/graph",
+        "合法 http(s) 链接必须保留"
+    );
+    assert_eq!(group["external_url"], "http://alertmanager:9093");
+}
+
 /// 回归（P0-5）：重试成功后必须把分组的活跃消息指针回写到这条投递。
 ///
 /// `group.active_delivery_id` 是唯一的活跃消息指针（`find_active` 在生产从未被调用）。

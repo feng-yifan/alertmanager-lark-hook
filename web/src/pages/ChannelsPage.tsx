@@ -23,7 +23,11 @@ import { useAsync, useDebounced } from '../hooks';
 import { CHANNEL_KIND_LABEL, CHANNEL_KIND_VALUES, RECEIVE_ID_TYPE_LABEL, RECEIVE_ID_TYPE_VALUES } from '../labels';
 import { useToast } from '../toast';
 import type { Channel, ChannelKind, ReceiveIdType } from '../types';
-import { formatDateTime, formatRelative } from '../utils';
+import {
+  formatDateTime,
+  formatRelative,
+  safeHttpUrl,
+} from '../utils';
 
 const LIMIT = 50;
 
@@ -289,7 +293,7 @@ export default function ChannelsPage(): JSX.Element {
                           <div className="row tight">
                             {channel.avatar_url ? (
                               <img
-                                src={channel.avatar_url}
+                                src={safeHttpUrl(channel.avatar_url) ?? undefined}
                                 alt=""
                                 width={20}
                                 height={20}

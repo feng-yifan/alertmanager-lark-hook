@@ -26,7 +26,14 @@ import {
 import { useAsync } from '../hooks';
 import { useToast } from '../toast';
 import type { Delivery } from '../types';
-import { cx, formatDateTime, prettyJson, sortedEntries, truncate } from '../utils';
+import {
+  cx,
+  formatDateTime,
+  prettyJson,
+  safeHttpUrl,
+  sortedEntries,
+  truncate,
+} from '../utils';
 
 type DeliveryAction = { type: 'retry' | 'revoke'; delivery: Delivery } | null;
 
@@ -237,13 +244,18 @@ export default function AlertGroupDetailPage(): JSX.Element {
                     <td className="nowrap">{formatDateTime(alert.starts_at)}</td>
                     <td className="nowrap">{alert.ends_at ? formatDateTime(alert.ends_at) : '未恢复'}</td>
                     <td>
-                      {alert.generator_url ? (
-                        <a href={alert.generator_url} target="_blank" rel="noreferrer">
-                          Prometheus ↗
-                        </a>
-                      ) : (
-                        <span className="faint">—</span>
-                      )}
+                      {(() => {
+                        // 只放行 http(s)：告警的 generatorURL 由发送方控制，
+                        // 直接当 href 会让 `javascript:` 在后台同源执行。
+                        const generatorUrl = safeHttpUrl(alert.generator_url);
+                        return generatorUrl ? (
+                          <a href={generatorUrl} target="_blank" rel="noreferrer noopener">
+                            Prometheus ↗
+                          </a>
+                        ) : (
+                          <span className="faint">—</span>
+                        );
+                      })()}
                     </td>
                   </tr>
                 ))

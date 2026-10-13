@@ -168,3 +168,20 @@ export function sortedEntries(map: Record<string, string> | null | undefined): A
 export function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
+
+/**
+ * 只放行 `http(s)://` 的绝对 URL，其余返回 `null`。
+ *
+ * 告警的 `generator_url` 完全由发送方控制（任何持有 hook token 的人都能构造）。
+ * React 18 **不会**拦截 `javascript:` 这类协议，直接放进 `<a href>` 会让脚本在
+ * 管理后台同源执行 ⇒ 一次点击等于交出后台。后端已在归一化阶段丢弃非法值，
+ * 这里是第二道防线（也覆盖升级前就入库的历史数据）。
+ *
+ * 调用方用返回值是否存在来决定「渲染链接 / 渲染占位符」。
+ */
+export function safeHttpUrl(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  const lower = trimmed.toLowerCase();
+  return lower.startsWith('http://') || lower.startsWith('https://') ? trimmed : null;
+}

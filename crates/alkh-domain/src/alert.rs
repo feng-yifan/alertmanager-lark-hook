@@ -185,7 +185,7 @@ impl NormalizedEvent {
                 annotations: a.annotations.clone(),
                 starts_at: parse_am_time(a.starts_at.as_deref()),
                 ends_at: parse_am_time(a.ends_at.as_deref()),
-                generator_url: a.generator_url.clone(),
+                generator_url: sanitize_http_url(a.generator_url.as_deref()),
             });
         }
 
@@ -227,7 +227,7 @@ impl NormalizedEvent {
             truncated_alerts: payload.truncated_alerts,
             declared_status,
             status,
-            external_url: payload.external_url.clone(),
+            external_url: sanitize_http_url(payload.external_url.as_deref()),
             group_labels: payload.group_labels.clone(),
             common_labels: payload.common_labels.clone(),
             common_annotations: payload.common_annotations.clone(),
@@ -346,6 +346,27 @@ fn derive_group_key(
     let mut fps: Vec<&str> = alerts.iter().map(|a| a.fingerprint.as_str()).collect();
     fps.sort_unstable();
     format!("{{fingerprint=~\"{}\"}}", fps.join("|"))
+}
+
+/// 只接受 `http://` / `https://` 的绝对 URL，其余一律丢弃。
+///
+/// 告警的 `generatorURL` / `externalURL` 完全由发送方控制（任何持有 hook token 的人
+/// 都能构造）。如果原样入库，前端把它放进 `<a href>` 时 `javascript:` 会在管理后台
+/// 同源执行脚本 —— 即「发一条告警」升级成「接管后台」。Feishu 卡片里的链接同理，
+/// 所以这里在**归一化边界**就丢掉非法值，而不是等到渲染时再补救。
+pub fn sanitize_http_url(raw: Option<&str>) -> Option<String> {
+    let value = raw?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let lower = value.to_ascii_lowercase();
+    // 不接受 `java\tscript:` 这类夹带控制字符的变体：只做前缀判断，
+    // 且要求协议后面紧跟 `//`。
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        Some(value.to_string())
+    } else {
+        None
+    }
 }
 
 /// 解析 AlertManager 时间：非法或零值（year <= 1）返回 `None`。
@@ -813,6 +834,36 @@ mod tests {
                 "fingerprint": "fp1"
             }]
         }))
+    }
+
+    /// 安全回归：任何持有 hook token 的人都能构造 generatorURL / externalURL，
+    /// 因此只允许 http(s)，其余（尤其是 `javascript:`）必须在归一化阶段丢弃，
+    /// 否则前端把它放进 `<a href>` 会在管理后台同源执行脚本。
+    #[test]
+    fn only_http_urls_survive_sanitization() {
+        assert_eq!(
+            sanitize_http_url(Some("http://prom:9090/graph")),
+            Some("http://prom:9090/graph".to_string())
+        );
+        assert_eq!(
+            sanitize_http_url(Some("HTTPS://example.com/x")),
+            Some("HTTPS://example.com/x".to_string())
+        );
+        for bad in [
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            " java\tscript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "vbscript:msgbox(1)",
+            "//evil.example.com",
+            "/relative/path",
+            "file:///etc/passwd",
+            "",
+            "   ",
+        ] {
+            assert_eq!(sanitize_http_url(Some(bad)), None, "不应接受 {bad:?}");
+        }
+        assert_eq!(sanitize_http_url(None), None);
     }
 
     #[test]
