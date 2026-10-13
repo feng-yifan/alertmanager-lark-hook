@@ -15,6 +15,8 @@ pub struct Metrics {
     pub deliveries_sent_total: AtomicU64,
     pub deliveries_updated_total: AtomicU64,
     pub deliveries_recalled_total: AtomicU64,
+    pub messages_pinned_total: AtomicU64,
+    pub messages_unpinned_total: AtomicU64,
     pub deliveries_failed_total: AtomicU64,
     pub deliveries_suppressed_total: AtomicU64,
     pub delivery_retries_total: AtomicU64,
@@ -32,6 +34,8 @@ impl alkh_domain::ports::MetricsSink for Metrics {
             Counter::RenderFailure => &self.render_failures_total,
             Counter::LarkApiError => &self.lark_api_errors_total,
             Counter::DeliveryRecalled => &self.deliveries_recalled_total,
+            Counter::MessagePinned => &self.messages_pinned_total,
+            Counter::MessageUnpinned => &self.messages_unpinned_total,
         };
         Self::add(target, by);
     }
@@ -124,6 +128,18 @@ impl Metrics {
         );
         gauge(
             &mut out,
+            "alkh_messages_pinned_total",
+            "Alert cards pinned while unresolved",
+            Self::get(&self.messages_pinned_total),
+        );
+        gauge(
+            &mut out,
+            "alkh_messages_unpinned_total",
+            "Alert cards unpinned after resolution / policy change",
+            Self::get(&self.messages_unpinned_total),
+        );
+        gauge(
+            &mut out,
             "alkh_deliveries_failed_total",
             "Deliveries failed after retries",
             Self::get(&self.deliveries_failed_total),
@@ -200,6 +216,8 @@ mod tests {
             "alkh_deliveries_sent_total",
             "alkh_deliveries_updated_total",
             "alkh_deliveries_recalled_total",
+            "alkh_messages_pinned_total",
+            "alkh_messages_unpinned_total",
             "alkh_deliveries_failed_total",
             "alkh_deliveries_suppressed_total",
             "alkh_delivery_retries_total",

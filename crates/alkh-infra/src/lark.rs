@@ -11,6 +11,8 @@
 //! | 发送消息 | `POST /open-apis/im/v1/messages?receive_id_type=` |
 //! | 更新已发卡片消息 | `PATCH /open-apis/im/v1/messages/:message_id` |
 //! | 撤回消息 | `DELETE /open-apis/im/v1/messages/:message_id` |
+//! | 置顶消息 | `POST /open-apis/im/v1/pins` |
+//! | 取消置顶 | `DELETE /open-apis/im/v1/pins/:message_id` |
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -456,6 +458,19 @@ impl LarkGateway for LarkClient {
 
     async fn recall_message(&self, message_id: &str) -> PortResult<()> {
         let path = format!("/open-apis/im/v1/messages/{message_id}");
+        self.call(reqwest::Method::DELETE, &path, None).await?;
+        Ok(())
+    }
+
+    async fn pin_message(&self, message_id: &str) -> PortResult<()> {
+        let body = json!({ "message_id": message_id });
+        self.call(reqwest::Method::POST, "/open-apis/im/v1/pins", Some(&body))
+            .await?;
+        Ok(())
+    }
+
+    async fn unpin_message(&self, message_id: &str) -> PortResult<()> {
+        let path = format!("/open-apis/im/v1/pins/{message_id}");
         self.call(reqwest::Method::DELETE, &path, None).await?;
         Ok(())
     }

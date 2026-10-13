@@ -127,6 +127,12 @@ impl LabelMatcher {
 pub struct NotificationPolicy {
     pub channel_id: ChannelId,
     pub card_template_id: Option<CardTemplateId>,
+    /// 「未解决告警置顶」（R4，默认关闭）：分组仍有 firing 告警时，把当前活跃卡片
+    /// 置顶（`POST /open-apis/im/v1/pins`）；全部恢复后取消置顶。
+    ///
+    /// 置顶失败（如群设置只允许群主/管理员 Pin、机器人权限不足）不阻塞投递，
+    /// 只记日志与指标，下一次事件会重试。
+    pub pin_unresolved: bool,
     pub repeat_policy: RepeatPolicy,
     pub resolved_policy: ResolvedPolicy,
     pub group_update_policy: GroupUpdatePolicy,
@@ -151,6 +157,7 @@ impl NotificationPolicy {
         Self {
             channel_id,
             card_template_id: None,
+            pin_unresolved: false,
             repeat_policy: RepeatPolicy::Suppress,
             resolved_policy: ResolvedPolicy::Send,
             group_update_policy: GroupUpdatePolicy::UpdatePrevious,

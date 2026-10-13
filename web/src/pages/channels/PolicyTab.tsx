@@ -20,6 +20,7 @@ import {
   Options,
   RadioGroup,
   Select,
+  Switch,
 } from '../../components/ui';
 import { useAsync } from '../../hooks';
 import {
@@ -27,6 +28,7 @@ import {
   FILTER_NOTE,
   MATCH_OP_LABEL,
   MUTE_NOTE,
+  PIN_NOTE,
 } from '../../labels';
 import { enumOptions, useMeta } from '../../meta';
 import { useToast } from '../../toast';
@@ -52,6 +54,7 @@ interface Props {
 
 interface Draft {
   card_template_id: string;
+  pin_unresolved: boolean;
   repeat_policy: RepeatPolicy;
   resolved_policy: ResolvedPolicy;
   group_update_policy: GroupUpdatePolicy;
@@ -65,6 +68,7 @@ interface Draft {
 /** Defaults mirror the example policy in `docs/api.md` §3. */
 const DEFAULT_DRAFT: Draft = {
   card_template_id: '',
+  pin_unresolved: false,
   repeat_policy: 'suppress',
   resolved_policy: 'send',
   group_update_policy: 'update_previous',
@@ -189,6 +193,7 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
     }
     const payload: NotificationPolicyInput = {
       card_template_id: draft.card_template_id || null,
+      pin_unresolved: draft.pin_unresolved,
       repeat_policy: draft.repeat_policy,
       resolved_policy: draft.resolved_policy,
       group_update_policy: draft.group_update_policy,
@@ -324,6 +329,19 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
             </tbody>
           </table>
         </div>
+      </Card>
+
+      <Card
+        title="未解决告警置顶"
+        subtitle="有未解决告警时把卡片置顶到会话顶部，全部恢复后自动取消（默认关闭）"
+      >
+        <div className="callout info mb-16">{PIN_NOTE}</div>
+        <Switch
+          checked={draft.pin_unresolved}
+          onChange={(next) => setDraft((current) => ({ ...current, pin_unresolved: next }))}
+          label="有未解决告警时置顶当前卡片"
+          hint="关闭开关后，该分组的下一个事件就会取消已有置顶，不必等告警恢复。"
+        />
       </Card>
 
       <Card title="标签过滤">
@@ -473,6 +491,7 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
 function draftFromPolicy(policy: NotificationPolicy): Draft {
   return {
     card_template_id: policy.card_template_id ?? '',
+    pin_unresolved: policy.pin_unresolved,
     repeat_policy: policy.repeat_policy,
     resolved_policy: policy.resolved_policy,
     group_update_policy: policy.group_update_policy,

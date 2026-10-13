@@ -97,9 +97,20 @@ POST /api/v1/hooks/alertmanager/{token}
   Delivery 标记 `Recalled`→`RecallFailed` 交由审计，主流程仍返回 200。
 - **R3 内容未变化则不重复更新**：`UpdateInPlace` 前比较 `rendered_digest`，
   相同则跳过更新调用（幂等，避免飞书限频与无意义的 `update_time` 变化）。
-- **R4 废弃（原「置顶 pin」）**：卡片消息（`im/v1/messages`）**没有**官方的置顶 /
-  即时提醒字段，因此本项目不提供该开关。（原实现靠应用消息流卡片的
-  `time_sensitive` 实现，该消息形态已整体移除）。
+- **R4 未解决告警置顶**（策略开关 `pin_unresolved`，默认关闭）：分组仍处于 firing 时，
+  把**当前活跃卡片**置顶（`POST /open-apis/im/v1/pins`）；分组内全部告警恢复后，
+  对同一条消息调用 `DELETE /open-apis/im/v1/pins/:message_id` 取消置顶。
+  - 目标是「当前活跃卡片」而不是固定某条：卡片被新消息取代（重复通知发送新消息、
+    R1 降级、发送重试补发）时，先取消旧消息的置顶，再置顶新消息。
+  - 幂等：消息已被置顶 / 未置顶 / 已被撤回时，飞书都返回成功；`AlertGroup.pinned_message_id`
+    记录当前置顶的消息，避免每次事件都重复调用，也保证关闭开关或恢复时能精确取消。
+  - 失败不阻塞（与 R2 同款语义）：群设置只允许群主 / 群管理员 Pin、机器人权限不足（`230046` / `230027`）、
+    单条消息 Pin/Unpin 超过 5 QPS（`230047`）等只记日志与指标，投递照常返回 200，
+    状态保持不变，下一次事件会重试；取消置顶失败时不会继续置顶新消息。
+  - 开关关闭后，该分组的下一个事件会取消已有置顶（不依赖告警真正恢复）。
+  - 关闭的渠道（R13）与静默期（R5）不发消息，但仍然会对齐置顶状态。
+  - 该能力不需要额外权限：发送卡片用的 `im:message:send_as_bot` 与
+    `im:message`、`im:message.pins:write_only` 三者任一即可调用 Pin / Unpin。
 - **R5 静默期**：`mute_until` 未过期时抑制所有发送类动作，但事件分类与分组状态照常推进
   （即解除静默后不会补发历史消息，只反映最新状态）。
 - **R6 聚合窗口**：`aggregation_window_secs > 0` 时，同一 `(hook, group_key)` 在窗口内的事件

@@ -17,6 +17,8 @@ use crate::error::{AppError, AppResult};
 #[serde(default)]
 pub struct PolicyInput {
     pub card_template_id: Option<CardTemplateId>,
+    /// R4：未解决告警时置顶当前卡片，全部恢复后取消置顶（默认关闭）。
+    pub pin_unresolved: bool,
     pub repeat_policy: RepeatPolicy,
     pub resolved_policy: ResolvedPolicy,
     pub group_update_policy: GroupUpdatePolicy,
@@ -32,6 +34,7 @@ impl Default for PolicyInput {
         let d = NotificationPolicy::default_for(ChannelId::default());
         Self {
             card_template_id: d.card_template_id,
+            pin_unresolved: d.pin_unresolved,
             repeat_policy: d.repeat_policy,
             resolved_policy: d.resolved_policy,
             group_update_policy: d.group_update_policy,
@@ -49,6 +52,7 @@ impl PolicyInput {
         NotificationPolicy {
             channel_id,
             card_template_id: self.card_template_id,
+            pin_unresolved: self.pin_unresolved,
             repeat_policy: self.repeat_policy,
             resolved_policy: self.resolved_policy,
             group_update_policy: self.group_update_policy,
@@ -117,6 +121,7 @@ impl PolicyService {
             .target(channel.id.to_string())
             .detail(json!({
                 "card_template_id": policy.card_template_id.as_ref().map(|t| t.to_string()),
+                "pin_unresolved": policy.pin_unresolved,
                 "repeat_policy": format!("{:?}", policy.repeat_policy),
                 "resolved_policy": format!("{:?}", policy.resolved_policy),
                 "group_update_policy": format!("{:?}", policy.group_update_policy),

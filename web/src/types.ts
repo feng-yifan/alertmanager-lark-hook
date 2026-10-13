@@ -156,6 +156,8 @@ export interface LabelMatcher {
 
 export interface NotificationPolicy {
   card_template_id: UUID | null;
+  /** 未解决告警置顶：firing 期间置顶当前卡片，全部恢复后取消置顶。 */
+  pin_unresolved: boolean;
   repeat_policy: RepeatPolicy;
   resolved_policy: ResolvedPolicy;
   group_update_policy: GroupUpdatePolicy;
@@ -495,6 +497,8 @@ export interface AlertGroup {
   last_notified_at: ISODateTime | null;
   resolved_at: ISODateTime | null;
   active_delivery_id: UUID | null;
+  /** 当前被置顶的卡片消息（R4）；`null` = 该分组没有置顶卡片。 */
+  pinned_message_id: string | null;
   /** `GET /alert-groups/:id` embeds the group's deliveries. */
   deliveries?: Delivery[];
 }

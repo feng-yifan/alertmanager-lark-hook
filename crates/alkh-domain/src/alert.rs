@@ -410,6 +410,11 @@ pub struct AlertGroup {
     pub last_notified_at: Option<Timestamp>,
     pub resolved_at: Option<Timestamp>,
     pub active_delivery_id: Option<DeliveryId>,
+    /// 当前被置顶的卡片消息（`om_…`）；`None` = 该分组没有置顶卡片。
+    ///
+    /// 只在策略开启「未解决告警置顶」且分组仍处于 firing 时指向当前活跃消息；
+    /// 全部恢复、开关关闭或消息被替换时会取消置顶并清空（R4）。
+    pub pinned_message_id: Option<String>,
 }
 
 impl AlertGroup {
@@ -443,6 +448,7 @@ impl AlertGroup {
             last_notified_at: None,
             resolved_at: None,
             active_delivery_id: None,
+            pinned_message_id: None,
         };
         g.normalize_status(now);
         g

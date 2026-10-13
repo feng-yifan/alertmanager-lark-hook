@@ -115,6 +115,7 @@ pub struct CardMessageSpec {
 pub struct NotificationPolicy {
     pub channel_id: ChannelId,
     pub card_template_id: Option<CardTemplateId>,     // 空时回退内置默认卡片（R12）
+    pub pin_unresolved: bool,                          // 未解决告警置顶当前卡片（R4，默认关闭）
     pub repeat_policy: RepeatPolicy,                   // 重复告警
     pub resolved_policy: ResolvedPolicy,               // 解决告警
     pub group_update_policy: GroupUpdatePolicy,        // 分组内容变化（新增/部分恢复）
@@ -181,6 +182,7 @@ pub struct AlertGroup {
     pub last_notified_at: Option<Timestamp>,
     pub resolved_at: Option<Timestamp>,
     pub active_delivery_id: Option<DeliveryId>, // 当前"活"的消息，供更新/撤回定位
+    pub pinned_message_id: Option<String>,      // 当前被置顶的卡片消息（R4）
 }
 
 pub struct AlertInstance {
@@ -211,6 +213,8 @@ pub struct AlertInstance {
 - `status == Resolved` ⇔ `firing_count == 0` 且 `alerts` 中每条都是 `Resolved`。
 - `resolved_at` 非空 ⇔ `status == Resolved`。
 - `active_delivery_id` 必须指向本分组自己的 Delivery。
+- `pinned_message_id` 非空 ⇔ 该分组当前有一条被置顶的卡片，且它由本服务在
+  `pin_unresolved` 开启时置顶；分组恢复或开关关闭后必须清空（R4）。
 
 ### 6.2 事件分类（领域服务 `EventClassifier`）
 
@@ -333,7 +337,7 @@ hooks(id PK, channel_id FK, name, token_hash UNIQUE, token_prefix,
 card_templates(id PK, name, card_message JSON, is_default,
                created_at, updated_at)
 
-notification_policies(channel_id PK FK, card_template_id,
+notification_policies(channel_id PK FK, card_template_id, pin_unresolved,
                       repeat_policy, resolved_policy,
                       group_update_policy, label_matchers,
                       aggregation_window_secs, min_send_interval_secs,
@@ -344,7 +348,7 @@ alert_groups(id PK, hook_id FK, channel_id FK, group_key, receiver, status,
              common_annotations, alerts, firing_count, resolved_count,
              truncated_alerts, event_count, last_event_hash,
              first_seen_at, last_seen_at, last_notified_at, resolved_at,
-             active_delivery_id, UNIQUE(hook_id, group_key))
+             active_delivery_id, pinned_message_id, UNIQUE(hook_id, group_key))
   + INDEX(status), INDEX(channel_id, last_seen_at)
 
 deliveries(id PK, alert_group_id FK, channel_id FK, kind, state,

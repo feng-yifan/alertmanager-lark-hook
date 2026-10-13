@@ -1,13 +1,14 @@
 //! 通知投递器：把「投递决策」翻译成飞书 API 调用，并维护 `Delivery` 生命周期。
 //!
 //! 覆盖 `docs/business-rules.md` 的 R1（更新降级）、R2（撤回失败不阻塞）、
-//! R3（内容未变不重复更新）、R4（即时提醒）、R12（模板缺失兜底）、R14（重试）。
+//! R3（内容未变不重复更新）、R4（未解决告警置顶）、R12（模板缺失兜底）、R14（重试）。
 
-use alkh_domain::alert::{Delivery, DeliveryAction, DeliveryKind, DeliveryState};
+use alkh_domain::alert::{Delivery, DeliveryAction, DeliveryKind, DeliveryState, GroupStatus};
 use alkh_domain::channel::Channel;
 use alkh_domain::error::LarkError;
 use alkh_domain::ids::CardTemplateId;
 use alkh_domain::policy::NotificationPolicy;
+use alkh_domain::ports::Counter;
 use alkh_domain::template::{CardMessageSpec, CardSource, CardTemplate};
 
 use crate::deps::Deps;
@@ -298,6 +299,19 @@ impl NotificationSender {
                         "重试成功但回写分组活跃投递指针失败：下一次更新可能重复发卡片"
                     );
                 }
+                // R4：重试成功后这条消息才是群里真正的活跃卡片，置顶状态也要跟着补上。
+                //
+                // ⚠️ `group` 是重试**之前**读到的快照，必须同步活跃指针再 upsert，
+                // 否则这次 upsert 会把上面刚写好的 `active_delivery_id` 覆盖回旧值，
+                // 下一个 `Updated` 事件就会以为没有旧消息可更新而重复发卡片（P0-5 回归）。
+                let mut group = group.clone();
+                group.active_delivery_id = Some(d.id.clone());
+                group.last_notified_at = Some(now);
+                self.reconcile_pin(&mut group, &policy, d.lark_message_id.as_deref())
+                    .await;
+                if let Err(e) = self.deps.groups.upsert(&group).await {
+                    tracing::warn!(group_id = %group.id, error = %e, "置顶状态落库失败");
+                }
             }
             Err(err) => self.register_failure(&mut d, err),
         }
@@ -416,6 +430,72 @@ impl NotificationSender {
         }
     }
 
+    /// R4：让「分组是否仍有未解决告警」与「群里是否有一条被置顶的卡片」保持一致。
+    ///
+    /// - 开关开启且分组为 firing：目标 = 当前活跃消息。`current_message_id` 为空
+    ///   （本轮被 suppress，或发送失败还没有消息）时保留现有置顶，不做无谓的 Pin 调用。
+    /// - 其余情况（分组已恢复 / 开关被关闭 / 消息被新消息替换）：目标 = 无 ⇒ 取消现有置顶。
+    ///
+    /// 飞书侧失败（群设置只允许群主置顶、机器人权限不足、限频等）只记日志与指标，
+    /// **不阻塞投递**（与 R2 同款语义），状态保持不变，下一次事件会再试一次；
+    /// 取消置顶失败时不再继续置顶新消息，避免群里同时留下两条置顶。
+    pub async fn reconcile_pin(
+        &self,
+        group: &mut alkh_domain::alert::AlertGroup,
+        policy: &NotificationPolicy,
+        current_message_id: Option<&str>,
+    ) {
+        let desired: Option<String> =
+            if policy.pin_unresolved && group.status == GroupStatus::Firing {
+                current_message_id
+                    .map(str::to_string)
+                    .or_else(|| group.pinned_message_id.clone())
+            } else {
+                None
+            };
+
+        if desired == group.pinned_message_id {
+            return;
+        }
+
+        if let Some(old) = group.pinned_message_id.clone() {
+            match self.deps.lark.unpin_message(&old).await {
+                Ok(()) => {
+                    self.deps.metrics.incr(Counter::MessageUnpinned, 1);
+                    group.pinned_message_id = None;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        group_id = %group.id,
+                        message_id = %old,
+                        error = %err,
+                        "取消置顶失败（R4：不阻塞投递，下一轮重试）"
+                    );
+                    self.deps.metrics.incr(Counter::LarkApiError, 1);
+                    return;
+                }
+            }
+        }
+
+        if let Some(new) = desired {
+            match self.deps.lark.pin_message(&new).await {
+                Ok(()) => {
+                    self.deps.metrics.incr(Counter::MessagePinned, 1);
+                    group.pinned_message_id = Some(new);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        group_id = %group.id,
+                        message_id = %new,
+                        error = %err,
+                        "置顶失败（R4：不阻塞投递，下一轮重试）"
+                    );
+                    self.deps.metrics.incr(Counter::LarkApiError, 1);
+                }
+            }
+        }
+    }
+
     /// 把上一条投递标记为「被取代」。
     async fn supersede(&self, previous: Option<&Delivery>) -> Option<Delivery> {
         let prev = previous?;
@@ -476,6 +556,22 @@ impl NotificationSender {
                 -1,
                 d.last_error.clone().unwrap_or_else(|| "撤回失败".into()),
             )));
+        }
+        // R4：被撤回的正是分组当前置顶的那条消息时，Pin 随消息一起消失，清掉记录，
+        // 避免下一次对一条已不存在的消息调用取消置顶。
+        if let Some(pinned) = group.pinned_message_id.clone() {
+            if Some(pinned.as_str()) == d.lark_message_id.as_deref() {
+                let mut g = group.clone();
+                g.pinned_message_id = None;
+                // 这条消息同时是分组活跃指针时，连同指针一起清掉后一次写回，
+                // 避免「先写回旧指针、再单独清指针」的中间态。
+                if pointer_is_this {
+                    g.active_delivery_id = None;
+                }
+                if let Err(e) = self.deps.groups.upsert(&g).await {
+                    tracing::warn!(group_id = %g.id, error = %e, "清空分组置顶记录失败");
+                }
+            }
         }
         // 消息已经被撤掉了，分组不应再指向它；否则下一个事件会拿一条已撤回的投递
         // 去尝试原地更新，失败后再降级发新消息，表现为重复卡片。

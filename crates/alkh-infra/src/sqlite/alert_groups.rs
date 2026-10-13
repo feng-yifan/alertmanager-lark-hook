@@ -72,6 +72,7 @@ fn row_to_group(row: &SqliteRow) -> PortResult<AlertGroup> {
         active_delivery_id: row
             .opt_str_col("active_delivery_id")?
             .map(DeliveryId::from_string),
+        pinned_message_id: row.opt_str_col("pinned_message_id")?,
     })
 }
 
@@ -114,8 +115,9 @@ impl AlertGroupRepository for SqliteAlertGroupRepository {
              (id, hook_id, channel_id, group_key, receiver, status, alertname, severity, \
               group_labels, common_labels, common_annotations, alerts, firing_count, \
               resolved_count, truncated_alerts, event_count, last_event_hash, external_url, \
-              first_seen_at, last_seen_at, last_notified_at, resolved_at, active_delivery_id) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+              first_seen_at, last_seen_at, last_notified_at, resolved_at, active_delivery_id, \
+              pinned_message_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(id) DO UPDATE SET \
               hook_id = excluded.hook_id, channel_id = excluded.channel_id, \
               group_key = excluded.group_key, receiver = excluded.receiver, \
@@ -128,7 +130,8 @@ impl AlertGroupRepository for SqliteAlertGroupRepository {
               last_event_hash = excluded.last_event_hash, external_url = excluded.external_url, \
               first_seen_at = excluded.first_seen_at, last_seen_at = excluded.last_seen_at, \
               last_notified_at = excluded.last_notified_at, resolved_at = excluded.resolved_at, \
-              active_delivery_id = excluded.active_delivery_id",
+              active_delivery_id = excluded.active_delivery_id, \
+              pinned_message_id = excluded.pinned_message_id",
         )
         .bind(group.id.as_str())
         .bind(group.hook_id.as_str())
@@ -153,6 +156,7 @@ impl AlertGroupRepository for SqliteAlertGroupRepository {
         .bind(ts_opt(group.last_notified_at))
         .bind(ts_opt(group.resolved_at))
         .bind(group.active_delivery_id.as_ref().map(|d| d.as_str()))
+        .bind(group.pinned_message_id.as_deref())
         .execute(&self.pool)
         .await
         .map_err(common::map_sql)?;
@@ -298,16 +302,21 @@ mod tests {
         let repo = SqliteAlertGroupRepository::new(pool().await);
         let hook = HookId::new();
         let channel = ChannelId::new();
-        let g = sample_group(
-            hook.clone(),
-            channel.clone(),
-            "HighCPU",
-            "{alertname=\"HighCPU\"}",
-        );
+        let g = {
+            let mut g = sample_group(
+                hook.clone(),
+                channel.clone(),
+                "HighCPU",
+                "{alertname=\"HighCPU\"}",
+            );
+            g.pinned_message_id = Some("om_pinned".into());
+            g
+        };
         repo.upsert(&g).await.unwrap();
 
         let got = repo.get(&g.id).await.unwrap().unwrap();
         assert_eq!(got.group_key, g.group_key);
+        assert_eq!(got.pinned_message_id.as_deref(), Some("om_pinned"));
         assert_eq!(got.status, GroupStatus::Firing);
         assert_eq!(got.alertname.as_deref(), Some("HighCPU"));
         assert_eq!(got.severity.as_deref(), Some("critical"));

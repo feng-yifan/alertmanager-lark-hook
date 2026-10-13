@@ -488,6 +488,9 @@ impl IntakeService {
         };
 
         if policy.is_muted(now) {
+            // R4：静默期不发消息，但置顶状态仍要与开关/分组状态对齐
+            //（否则关闭开关后旧置顶会一直留在群里）。
+            self.sender.reconcile_pin(&mut group, policy, None).await;
             self.deps.groups.upsert(&group).await?;
             self.audit(skip_reason::MUTED, &hook.id, Some(&channel.id), now)
                 .await;
@@ -499,6 +502,9 @@ impl IntakeService {
         }
 
         if action == DeliveryAction::Suppress {
+            // 本轮不发送（重复通知被抑制 / 内容变化被抑制）：现有置顶保持不变，
+            // 但开关被关闭时要取消置顶（R4）。
+            self.sender.reconcile_pin(&mut group, policy, None).await;
             self.deps.groups.upsert(&group).await?;
             self.audit(
                 skip_reason::POLICY_SUPPRESS,
@@ -540,6 +546,12 @@ impl IntakeService {
             }
             _ => {}
         }
+        // R4：置顶跟随「分组是否仍有未解决告警」——firing 时置顶当前活跃卡片，
+        // 全部恢复 / 开关关闭 / 卡片被新消息替换时取消置顶。
+        let current_message_id = result.current.lark_message_id.clone();
+        self.sender
+            .reconcile_pin(&mut group, policy, current_message_id.as_deref())
+            .await;
         self.deps.groups.upsert(&group).await?;
         self.limiter.record(&channel.id);
 

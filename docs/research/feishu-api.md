@@ -384,6 +384,59 @@ Message has expired when recall message (发出时间过长); `230013` bot has n
 
 ---
 
+## 4.1 Pin / unpin message (置顶消息) — VERIFIED
+
+Sources:
+<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/pin/create.md?lang=zh-CN> ·
+<https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/reference/im-v1/pin/delete.md?lang=zh-CN>
+
+这就是本项目 R4「未解决告警置顶」用的官方能力：普通卡片消息（`im/v1/messages`）
+没有 `time_sensitive` 之类的字段，但可以作为一个**消息**被置顶到会话顶部。
+
+### Pin — `POST /open-apis/im/v1/pins`
+
+| | |
+|---|---|
+| HTTP URL | `https://open.feishu.cn/open-apis/im/v1/pins` |
+| HTTP Method | `POST` |
+| 频率限制 | 1000 次/分钟、50 次/秒；**对同一条消息**的 Pin 操作不超过 5 QPS |
+| 支持的应用类型 | 自建应用 / 商店应用 |
+| 权限要求 (开启任一即可) | 获取与发送单聊、群组消息(`im:message`); 添加、取消 Pin 消息(`im:message.pins:write_only`); 以应用的身份发消息(`im:message:send_as_bot`) |
+
+前提条件：应用需开启机器人能力；**Pin 时机器人必须在消息所属的会话内**。
+限制：当前操作者不可见的消息无法 Pin。
+注意：如果消息已经被 Pin，接口返回该 Pin 的操作信息（等同于成功，可重复调用）。
+
+Body: `message_id` (required) — e.g. `om_dc13264520392913993dd051dba21dcf`.
+
+Response `data.pin`: `{message_id, chat_id, operator_id, operator_id_type (open_id|app_id), create_time}`.
+
+错误码（400）：`230001` 参数错误; `230002` 机器人不在群组中; `230006` 未开启机器人能力;
+`230011` 消息已被撤回; `230013` 机器人对该用户不可用; `230027` 权限不足;
+`230045` 群聊不存在; `230046` **该群仅群主和群管理员可以 Pin 消息**;
+`230047` 对同一条消息 Pin 触发限流; `230050` 消息对操作者不可见;
+`230054` 该消息类型不支持本操作; `232009` 群组已解散。
+
+### Unpin — `DELETE /open-apis/im/v1/pins/:message_id`
+
+| | |
+|---|---|
+| HTTP URL | `https://open.feishu.cn/open-apis/im/v1/pins/:message_id` |
+| HTTP Method | `DELETE` |
+| 权限要求 | 与 Pin 相同（任一即可） |
+
+前提与限制同 Pin。注意：**如果消息未被 Pin 或已被撤回，该接口返回成功**
+（`{"code":0,"msg":"success","data":{}}`），因此「取消置顶」天然幂等。
+
+对本项目的含义：
+
+- 不需要为新能力单独申请权限 —— 发送卡片已经在用的 `im:message:send_as_bot` 就够；
+- `230046` 是生产里最容易踩的错：群设置只允许群主/管理员置顶，而机器人通常只是普通成员。
+  因此 R4 的失败必须是**非阻塞**的（只记日志与指标，告警照常投递）；
+- 应答里的 `operator_id_type = app_id` 说明这条 Pin 是机器人自己做的，可用于排查。
+
+---
+
 ## 5. Bot / channel discovery
 
 ### 5.1 List groups the bot/app is in — VERIFIED

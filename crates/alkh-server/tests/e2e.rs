@@ -35,6 +35,8 @@ struct FakeState {
     updated_card_entities: Vec<(String, Value, i64)>,
     updated_messages: Vec<(String, Value)>,
     recalled: Vec<String>,
+    pinned: Vec<String>,
+    unpinned: Vec<String>,
     seq: u64,
     /// 注入故障：接下来 `fail_send_times` 次「发送」直接返回 `fail_send_code`。
     /// 用于覆盖发送失败路径（默认 0 = 不注入）。
@@ -208,6 +210,16 @@ impl LarkGateway for FakeLark {
 
     async fn recall_message(&self, message_id: &str) -> alkh_domain::PortResult<()> {
         self.snapshot().recalled.push(message_id.to_string());
+        Ok(())
+    }
+
+    async fn pin_message(&self, message_id: &str) -> alkh_domain::PortResult<()> {
+        self.snapshot().pinned.push(message_id.to_string());
+        Ok(())
+    }
+
+    async fn unpin_message(&self, message_id: &str) -> alkh_domain::PortResult<()> {
+        self.snapshot().unpinned.push(message_id.to_string());
         Ok(())
     }
 }
@@ -901,6 +913,127 @@ async fn repeat_policy_send_and_revoke_previous_recalls_old_message() {
     let s = h.fake.snapshot();
     assert_eq!(s.messages.len(), 2, "应发送恢复消息");
     assert_eq!(s.recalled.len(), 1, "应撤回/删除旧消息");
+}
+
+/// 读取某个分组的置顶消息记录（R4）。
+async fn group_pinned_message(h: &Harness) -> Option<String> {
+    sqlx::query_scalar("SELECT pinned_message_id FROM alert_groups LIMIT 1")
+        .fetch_one(&h.pool)
+        .await
+        .expect("读取 alert_groups 失败")
+}
+
+/// 把渠道策略里的某个开关改成指定值并保存。
+async fn put_policy_flag(h: &Harness, channel_id: &str, key: &str, value: Value) {
+    let (status, mut policy) = h
+        .get(&format!("/api/v1/channels/{channel_id}/policy"))
+        .await;
+    assert_eq!(status, 200, "读取策略失败: {policy}");
+    policy[key] = value;
+    let resp = h
+        .http
+        .put(h.url(&format!("/api/v1/channels/{channel_id}/policy")))
+        .bearer_auth(&h.token)
+        .json(&policy)
+        .send()
+        .await
+        .expect("保存策略失败");
+    assert_eq!(resp.status(), 200, "保存策略应成功");
+}
+
+/// R4：开启「未解决告警置顶」后，firing 期间卡片被置顶，全部恢复后取消置顶。
+#[tokio::test]
+async fn pin_unresolved_pins_firing_message_and_unpins_on_resolve() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+    let channel_id = h.channel_id.clone().unwrap();
+
+    // 默认关闭：firing 也不置顶（opt-in，避免存量渠道行为突变）。
+    let (_, body) = h.push(firing_payload(1)).await;
+    assert_eq!(body["action"], "send_new");
+    assert!(
+        h.fake.snapshot().pinned.is_empty(),
+        "开关默认关闭时不应调用置顶接口"
+    );
+
+    put_policy_flag(&h, &channel_id, "pin_unresolved", json!(true)).await;
+
+    // 分组内容变化 → 原地更新同一条卡片；此时才第一次置顶。
+    let (_, body) = h.push(firing_payload(2)).await;
+    assert_eq!(body["event"], "updated");
+    let pinned = {
+        let s = h.fake.snapshot();
+        assert_eq!(s.pinned.len(), 1, "未解决时应置顶当前活跃卡片");
+        s.pinned[0].clone()
+    };
+    assert_eq!(
+        group_pinned_message(&h).await.as_deref(),
+        Some(pinned.as_str()),
+        "置顶消息必须落库，恢复时才能精确取消"
+    );
+    assert!(
+        metric(&h, "alkh_messages_pinned_total").await >= 1,
+        "置顶成功应计入指标"
+    );
+    // HTTP 线格式也要暴露置顶状态，便于后台排查「到底有没有置顶成功」。
+    let group_id = body["alert_group_id"]
+        .as_str()
+        .expect("缺少 alert_group_id");
+    let (status, group) = h.get(&format!("/api/v1/alert-groups/{group_id}")).await;
+    assert_eq!(status, 200);
+    assert_eq!(group["pinned_message_id"].as_str(), Some(pinned.as_str()));
+
+    // 再次内容变化：卡片被原地更新，仍是同一条消息 ⇒ 不应重复调用置顶接口。
+    let (_, body) = h.push(firing_payload(3)).await;
+    assert_eq!(body["event"], "updated");
+    assert_eq!(
+        h.fake.snapshot().pinned.len(),
+        1,
+        "同一条消息不应重复置顶（Pin 接口幂等，但没必要每次都调）"
+    );
+
+    // 全部恢复 → 发恢复卡片 + 取消旧卡片的置顶。
+    let (_, body) = h.push(resolved_payload()).await;
+    assert_eq!(body["event"], "resolved");
+    {
+        let s = h.fake.snapshot();
+        assert_eq!(s.unpinned, vec![pinned.clone()], "恢复后必须取消置顶");
+    }
+    assert_eq!(
+        group_pinned_message(&h).await,
+        None,
+        "取消置顶后分组记录必须清空"
+    );
+    assert!(
+        metric(&h, "alkh_messages_unpinned_total").await >= 1,
+        "取消置顶成功应计入指标"
+    );
+}
+
+/// R4：firing 期间关闭开关，下一个事件就要把旧置顶取消掉（不能永久留一条置顶）。
+#[tokio::test]
+async fn disabling_pin_unresolved_unpins_on_next_event() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+    let channel_id = h.channel_id.clone().unwrap();
+    put_policy_flag(&h, &channel_id, "pin_unresolved", json!(true)).await;
+
+    let (_, body) = h.push(firing_payload(1)).await;
+    assert_eq!(body["action"], "send_new");
+    let pinned = {
+        let s = h.fake.snapshot();
+        assert_eq!(s.pinned.len(), 1, "开启后 firing 应置顶");
+        s.pinned[0].clone()
+    };
+
+    put_policy_flag(&h, &channel_id, "pin_unresolved", json!(false)).await;
+    let (_, body) = h.push(firing_payload(2)).await;
+    assert_eq!(body["event"], "updated");
+    {
+        let s = h.fake.snapshot();
+        assert_eq!(s.unpinned, vec![pinned], "关闭开关后下一个事件应取消置顶");
+    }
+    assert_eq!(group_pinned_message(&h).await, None);
 }
 
 /// 回归（P0-1）：处理失败后 AlertManager 的重试必须被**重新处理**，而不是被判为重复。
