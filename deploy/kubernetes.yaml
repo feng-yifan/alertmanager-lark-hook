@@ -8,6 +8,9 @@
 #   2. ConfigMap 里的 ALKH_PUBLIC_BASE_URL
 #   3. Deployment 里的 image（默认已指向 ghcr，按需改成固定版本或私有仓库）
 #
+# 用 Ingress 暴露时还有第 4 处：deploy/kubernetes-ingress.yaml 里引用的
+# TLS Secret（默认叫 alkh-tls）**不会**被任何清单自动创建，见该文件顶部说明。
+#
 # 访问入口：本文件只给 ClusterIP Service。三种暴露方式任选其一：
 #   - 先试跑：kubectl -n alertmanager-lark-hook port-forward svc/alkh 8080:80
 #   - 单机/内网：把 Service 改成 NodePort（文件末尾有注释掉的示例）
@@ -58,10 +61,14 @@ data:
   ALKH_LOG_JSON: "true"
   # ⚠️ 必须替换：生成 AlertManager 接收地址用的对外基址。
   #    不设置的话，界面上的接收地址只有路径，无法直接粘贴给 AlertManager。
+  # ⚠️ 语义：**只在数据库中该值为空时生效**（首次启动播种一次），之后以管理后台
+  #    「设置」页为准。改完这里重启却没生效，就是库里已经有值了 —— 启动日志里会有
+  #    一条 warn 说明。要改对外地址请直接去后台改。
   ALKH_PUBLIC_BASE_URL: "https://alkh.example.com"
   # Lark 国际版改为 https://open.larksuite.com
   ALKH_LARK_BASE_URL: "https://open.feishu.cn"
-  # 通过 HTTPS 访问时必须为 true，会话 Cookie 会带 Secure
+  # 走 HTTPS 时需要为 true。不填时也会按 ALKH_PUBLIC_BASE_URL 自动推断，
+  # 这里显式写出只是为了让人一眼看到。
   ALKH_COOKIE_SECURE: "true"
 
 ---
@@ -126,8 +133,11 @@ spec:
         - name: alkh
           # 官方镜像在 GitHub Container Registry，由 .github/workflows/publish.yml 推送。
           # 建议把 :latest 换成具体版本（如 :0.1.0）以便回滚与审计。
+          # ⚠️ 生产建议把 tag 固定到具体版本（如 :v1.2.3），并把下面的
+          #    imagePullPolicy 改成 IfNotPresent。用 :latest 时保持 Always，
+          #    否则 kubelet 会一直复用节点上缓存的旧镜像、重启也不升级。
           image: ghcr.io/fengyifan/alertmanager-lark-hook:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - name: http
               containerPort: 8080

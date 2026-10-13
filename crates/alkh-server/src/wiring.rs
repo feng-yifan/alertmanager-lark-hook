@@ -117,8 +117,28 @@ pub async fn apply_env_defaults(deps: &Deps, config: &Config) -> anyhow::Result<
             settings.public_base_url = Some(base);
             changed = true;
         }
+    } else if let Some(env_base) = config.public_base_url.as_deref() {
+        // 库中已有值时**环境变量不再生效**（之后以管理后台为准）。文档此前让人去改
+        // ALKH_PUBLIC_BASE_URL，改了没反应还找不到原因 —— 这里必须说出来。
+        let stored = settings.public_base_url.as_deref().unwrap_or_default();
+        if stored.trim_end_matches('/') != env_base.trim().trim_end_matches('/') {
+            tracing::warn!(
+                env = env_base,
+                stored,
+                "ALKH_PUBLIC_BASE_URL 与库中已保存的值不一致：环境变量只在库中为空时生效，                 之后以管理后台「设置」页为准。请到后台修改对外地址。"
+            );
+        }
     }
     if settings.lark_base_url != config.lark_base_url {
+        // lark_base_url 相反：环境变量**总是**覆盖库中值。也要说清楚，否则运维
+        // 在后台改了地址、重启后又变回去，会以为是 bug。
+        if !settings.lark_base_url.trim().is_empty() {
+            tracing::warn!(
+                env = %config.lark_base_url,
+                stored = %settings.lark_base_url,
+                "ALKH_LARK_BASE_URL 会覆盖管理后台里保存的值（环境变量优先级更高）"
+            );
+        }
         settings.lark_base_url = config.lark_base_url.clone();
         changed = true;
     }

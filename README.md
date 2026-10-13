@@ -154,7 +154,7 @@ kubectl apply -f deploy/kubernetes.yaml
 | `ALKH_ADMIN_PASSWORD` | 首次启动创建管理员用的密码 | **生产必填** | 空（此时随机生成一个，**只在启动日志里打印一次**） |
 | `ALKH_ADMIN_USERNAME` | 管理员用户名 | 建议设置 | `admin` |
 | `ALKH_LARK_BASE_URL` | 飞书开放平台基址 | 用 Lark 国际版时必填 | `https://open.feishu.cn`（国际版为 `https://open.larksuite.com`） |
-| `ALKH_COOKIE_SECURE` | 登录 Cookie 是否加 `Secure` | 走 HTTPS 时建议 `true` | `false` |
+| `ALKH_COOKIE_SECURE` | 登录 Cookie 是否加 `Secure` | 一般不用设：不填时会按 `ALKH_PUBLIC_BASE_URL` 是否为 `https://` 自动判断 | 自动推断（无对外基址时为 `false`） |
 | `ALKH_HTTP_ADDR` | 监听地址 | 否 | `0.0.0.0:8080` |
 | `ALKH_DATA_DIR` | 数据目录（SQLite、主密钥） | 否 | `/data` |
 | `ALKH_DATABASE_URL` | 直接指定数据库 URL，一般不用改 | 否 | `sqlite://{ALKH_DATA_DIR}/alkh.db` |
@@ -182,7 +182,7 @@ kubectl apply -f deploy/kubernetes.yaml
 ### 2.5 上线检查清单
 
 - [ ] 设置了 `ALKH_MASTER_KEY`、`ALKH_PUBLIC_BASE_URL`、`ALKH_ADMIN_PASSWORD`
-- [ ] 通过 HTTPS 暴露，并设置 `ALKH_COOKIE_SECURE=true`
+- [ ] 通过 HTTPS 暴露并正确填写 `ALKH_PUBLIC_BASE_URL`（`Secure` 会自动跟上）
 - [ ] 登录后**立刻修改初始密码**（设置页 → 修改密码）
 - [ ] `/data` 挂了持久化卷，并纳入备份
 - [ ] 确认 `/healthz` 返回 200（容器已内置健康检查）

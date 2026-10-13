@@ -9,7 +9,8 @@
 # 应用：
 #   kubectl apply -f deploy/kubernetes-ingress.yaml
 #
-# 应用后把 ALKH_PUBLIC_BASE_URL 设成这里 hosts 的 https 地址，并重启 Deployment：
+# 应用后把对外地址设成这里 hosts 的 https 地址。注意 ALKH_PUBLIC_BASE_URL 只在数据库
+# 该值为空时生效（首次播种），所以要改对外地址请到「管理后台 → 设置」页改：
 #   kubectl -n alertmanager-lark-hook rollout restart deploy/alkh
 
 ---
@@ -30,6 +31,15 @@ metadata:
 spec:
   # 改成你集群里实际的 IngressClass 名称
   ingressClassName: nginx
+  # ⚠️ 这个 Secret 不会被任何清单自动创建。**不做下面任一步，Ingress 会拿不到
+  #    证书**（nginx 会退回自签默认证书，浏览器报错，AlertManager 也不会信任）。
+  #    二选一：
+  #      a) 手工创建（自备证书）：
+  #         kubectl -n alertmanager-lark-hook create secret tls alkh-tls \
+  #           --cert=fullchain.pem --key=privkey.pem
+  #      b) 装 cert-manager，并在本文件加注解自动签发：
+  #         cert-manager.io/cluster-issuer: <你的 ClusterIssuer 名>
+  #    想先用 HTTP 试通，把下面整个 tls: 段删掉即可（并把 ALKH_COOKIE_SECURE 设为 false）。
   tls:
     - hosts:
         - alkh.example.com
