@@ -105,13 +105,21 @@ POST /api/v1/hooks/alertmanager/{token}
 - **R5 静默期**：`mute_until` 未过期时抑制所有发送类动作，但事件分类与分组状态照常推进
   （即解除静默后不会补发历史消息，只反映最新状态）。
 - **R6 聚合窗口**：`aggregation_window_secs > 0` 时，同一 `(hook, group_key)` 在窗口内的事件
-  合并为一次决策，取窗口内**最后一个**事件的状态与并集告警集。窗口内无新事件时冲刷。
+  合并为一次决策，采用窗口内**最后一个事件的整份快照**（last-wins，不做并集）。
+  刻意不取并集：AlertManager 通知成功后会从分组里删除已 resolved 的告警，
+  因此「最后一个快照」才是它眼中的权威状态，取并集反而会把已消失的告警带回来。
+  窗口内无新事件时冲刷。
+  已知限制：桶只在进程内存中，冲刷失败或进程重启会**丢失**该事件（此时 200 已返回、
+  幂等键也已写入）。
 - **R7 最小发送间隔**：`min_send_interval_secs > 0`，同一渠道两次发送的最小间隔；未满足时
   本次动作延迟到窗口末端合并执行（不丢弃）。
 - **R8 告警数量截断**：超过 `max_alerts_per_message` 的告警折叠为 `+N more`；
   同时透传 AlertManager 的 `truncatedAlerts`（`agent` 侧已截断时提示总数为下界）。
 - **R9 幂等**：`event_hash = sha256(hook_id | groupKey | status | sorted(fingerprint:status:startsAt))`。
-  同一 hash 在 `dedup_window`（默认 60s）内重复到达 → 跳过（`skipped:duplicate`）。
+  去重是**原子认领 + 失败归还**（`EventDedup::claim` / `release`）：认领发生在处理**之前**
+  （否则并发的相同请求会同时通过）；窗口固定 **60 秒**（`DEFAULT_DEDUP_WINDOW_SECS`，暂不可配）；
+  **处理失败（5xx）时必须归还认领** —— AlertManager 会在秒级退避重试，若不归还，
+  重试会被判成 `duplicate` 并收到 200，AM 认为投递成功，这条告警**永久丢失**。
   发送时附飞书 `uuid = "alkh:" + event_hash`，飞书侧 1 小时内至多成功一条，双保险。
 - **R10 重开（reopen）**：分组恢复后再次 firing，视为 `NewFiring`，发送全新消息；
   此前的恢复消息保持不动（`Superseded`）。

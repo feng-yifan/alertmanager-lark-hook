@@ -8,6 +8,11 @@
 - 时间：RFC 3339 UTC（`2026-10-13T00:00:00Z`）
 - ID：UUID v4 字符串
 
+> **本文档描述的是真实线格式。** 端到端测试 `crates/alkh-server/tests/e2e.rs` 会断言这些形状，
+> 因此**改后端形状必须同时改 e2e 与本文件**。历史上本文件与实现漂移过一次：
+> 卡片模板的字段实际嵌在 `card_message` 下、`variables` 的类型字段是 `ty`，
+> 而文档写成了顶层扁平字段与 `type`，导致前端照文档实现后模板编辑器白屏、保存静默丢数据。
+
 ## 0. 公共
 
 | 方法 | 路径 | 鉴权 | 说明 |
@@ -35,7 +40,7 @@
   "receive_id_types": [{"value":"chat_id","label":"群 chat_id"},{"value":"open_id","label":"用户 open_id"},{"value":"user_id","label":"用户 user_id"},{"value":"email","label":"用户邮箱"}],
   "variables": [
     {"name":"alertname","group":"alert","type":"string","description":"告警名称"},
-    {"name":"severity","group":"alert","type":"string","description":""},
+    {"name":"severity","group":"group","type":"string","description":"严重级别原始值"},
     {"name":"status_text","group":"group","type":"string","description":"未解决 / 已恢复"},
     {"name":"alerts_table","group":"block","type":"markdown","description":"预渲染告警表格"}
   ],
@@ -61,7 +66,7 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/auth/login` | body `{username,password}` → `200 {"username":"admin","must_change_password":false}` + `Set-Cookie`；失败 `401 invalid_credentials` |
+| POST | `/auth/login` | body `{username,password}` → `200 {"username":"admin","must_change_password":false,"token":"..."}` + `Set-Cookie`；失败 `401 unauthenticated`（与「会话过期」同码，前端靠 `authProbe` 区分文案） |
 | POST | `/auth/logout` | 清理会话 |
 | GET | `/auth/session` | `200 {"authenticated":true,"username":"admin"}` / `401` |
 | POST | `/auth/password` | body `{current_password,new_password}` |
@@ -72,7 +77,7 @@
 |---|---|---|
 | GET | `/settings` | 返回设置（`app_secret` 永不回显，仅 `app_secret_set: bool`） |
 | PUT | `/settings` | 更新；`app_secret` 为 write-only，传 `null` 表示不变，传 `""` 表示清除 |
-| POST | `/settings/check` | 用当前凭据换取 `tenant_access_token` 并拉一次群列表，返回 `{"ok":true,"bot_name":"...","chat_count":12}` 或 `{"ok":false,"error_code":...,"message":"..."}` |
+| POST | `/settings/check` | 用当前凭据换取 `tenant_access_token` 并拉一次群列表，返回 `{"ok":true,"chat_count":12}` 或 `{"ok":false,"error_code":...,"message":"..."}`（**没有 `bot_name`**） |
 
 ```json
 // GET /settings
@@ -118,11 +123,11 @@
 | POST | `/channels` | body `{name,receive_id,receive_id_type,kind?,enabled?}` → `201` 渠道（自动创建默认策略与 1 个默认 Hook，响应附带 `hook_token` 明文一次） |
 | GET | `/channels/:id` | 详情 |
 | PATCH | `/channels/:id` | body 任意子集 `{name,enabled}` |
-| DELETE | `/channels/:id` | 级联删除 hooks/policies；已有投递记录时改为软删（`enabled=false`）并返回 `409 channel_has_deliveries`，除非 `?force=true` |
+| DELETE | `/channels/:id` | 级联删除 hooks/policies；已有投递记录时改为软删（`enabled=false`）并返回 `409 conflict`（**没有细分 code**），除非 `?force=true` |
 | POST | `/channels/sync` | body `{create_missing:true,"import_names":true}` → `{"discovered":12,"created":3,"updated":9,"skipped":0}` |
 | GET | `/channels/:id/policy` | 返回 NotificationPolicy |
 | PUT | `/channels/:id/policy` | 全量替换策略（校验见 business-rules §6） |
-| POST | `/channels/:id/test-message` | body `{message_type?,card_template_id?,kind?:"firing"|"resolved"}` → 发送测试消息，返回 `{ok,delivery_id,message_id}` |
+| POST | `/channels/:id/test-message` | body `{message_type?,card_template_id?,sample?:"firing"|"resolved"}` → 发送测试消息，返回 **`Delivery`**（看 `state`，没有 `ok` 字段） |
 
 `NotificationPolicy` 表示：
 
@@ -148,8 +153,8 @@
 | 方法 | 路径 | 鉴权 | 说明 |
 |---|---|---|---|
 | POST | `/hooks/alertmanager/:token` | token 即凭证 | AlertManager webhook 接收 |
-| GET | `/hooks` | 会话 | 所有 hook 列表（跨渠道） |
-| POST | `/hooks` | 会话 | body `{channel_id,name}` → `201` + 明文 `token`/`hook_url`（仅此一次） |
+| GET | `/hooks` | 会话 | 所有 hook 列表（跨渠道），返回**裸数组**（不是分页信封） |
+| POST | `/hooks` | 会话 | body `{channel_id,name}` → `201` + 明文 **`hook_token`**/`hook_url`（仅此一次）。注意轮换用的是另一个字段名 `token` |
 | PATCH | `/hooks/:id` | 会话 | `{name?,enabled?}` |
 | POST | `/hooks/:id/rotate` | 会话 | 轮换 token → `{"token":"alkh_...","hook_url":"..."}` |
 | DELETE | `/hooks/:id` | 会话 | 删除 |
@@ -178,28 +183,38 @@
 
 ## 5. 卡片模板
 
+> ⚠️ **卡片内容嵌在 `card_message` 子对象里，不是顶层扁平字段**；声明变量的类型字段名是 `ty`（不是 `type`）。
+> 写成扁平字段时后端会因为 `card_message` 缺失而**静默回退成内置默认卡片**，用户的内容被丢弃。
+> 这些形状由 `crates/alkh-server/tests/e2e.rs` 钉住，改动必须同步 e2e 与本文件。
+
 ```json
 // kind = card_message
 {
   "id": "b1d2...",
   "kind": "card_message",
   "name": "告警卡片-默认",
-  "source": "builder_json",
-  "card_json": {"schema":"2.0","config":{},"header":{},"body":{"elements":[]}},
-  "template_id": null,
-  "template_version_name": null,
-  "variables": [{"name":"status_text","type":"string","default":"","builtin":true}],
-  "detected_variables": ["alertname","alerts_table"],
   "is_default": true,
+  "card_message": {
+    "source": "builder_json",
+    "card_json": {"schema":"2.0","config":{},"header":{},"body":{"elements":[]}},
+    "template_id": null,
+    "template_version_name": null,
+    "variables": [{"name":"status_text","ty":"string","default":"","builtin":true}]
+  },
+  "app_feed_spec": null,
+  "detected_variables": ["alertname","alerts_table"],
+  "unknown_variables": [],
   "created_at": "...",
   "updated_at": "..."
 }
 
-// kind = app_feed_card
+// kind = app_feed_card（app_feed_spec 在顶层，card_message 为 null）
 {
   "id": "c9f8...",
   "kind": "app_feed_card",
   "name": "应用消息流-默认",
+  "is_default": true,
+  "card_message": null,
   "app_feed_spec": {
     "title": "${alertname} ${status_text}",
     "preview": "${summary}",
@@ -210,7 +225,7 @@
     "biz_id_source": "alert_group"
   },
   "detected_variables": ["alertname","status_text","summary","severity_text","external_url"],
-  "is_default": true,
+  "unknown_variables": [],
   "created_at": "...",
   "updated_at": "..."
 }
@@ -218,19 +233,21 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/card-templates?kind=` | 列表 |
-| POST | `/card-templates` | 创建（`card_message` 或 `app_feed_card` 判别式 body） |
+| GET | `/card-templates?kind=` | 列表，返回**裸数组**（不是分页信封） |
+| POST | `/card-templates` | 创建。body `{name,kind,card_message?,app_feed_spec?,is_default?}`，`name` 与 `kind` 必填；`kind=card_message` 时必须给 `card_message` |
 | GET | `/card-templates/:id` | 详情 |
 | PATCH | `/card-templates/:id` | 更新 |
-| DELETE | `/card-templates/:id` | 被策略引用时 `409 template_in_use` |
-| POST | `/card-templates/validate` | body `{kind,card_json?,app_feed_spec?}` → `{valid,errors:[],warnings:[],detected_variables:[],unknown_variables:[]}` |
-| POST | `/card-templates/preview` | body `{kind,card_json?,app_feed_spec?,sample:"firing"|"resolved",channel_id?}` → `{rendered_card_json, rendered_app_feed_spec, variables:{...}}` |
-| POST | `/card-templates/:id/send-test` | body `{channel_id,sample?}` → 真实发送一次 |
+| DELETE | `/card-templates/:id` | 被策略引用时 `409 conflict`（**没有细分 code**） |
+| POST | `/card-templates/validate` | body `{name,kind,card_message?,app_feed_spec?,is_default?}`（**`name` 必填，缺了是 422**）→ `{valid,errors:[],warnings:[],detected_variables:[],unknown_variables:[]}` |
+| POST | `/card-templates/preview` | body `{name,kind,card_message?,app_feed_spec?,sample:"firing"|"resolved",channel_id?,is_default?}` → `{kind,rendered_card_json,rendered_app_feed_spec,card_content,variables:{...}}` |
+| POST | `/card-templates/:id/send-test` | body `{channel_id,sample?}` → 真实发送一次，返回 **`Delivery`** |
 
 ## 6. 告警分组与投递
 
+> ⚠️ `channel` / `hook` **只有 `GET /alert-groups/:id` 详情返回**；`GET /alert-groups` 列表没有这两个字段。
+
 ```json
-// AlertGroup
+// AlertGroup（详情；列表不含 channel / hook）
 {
   "id": "...", "group_key": "{}:{alertname=\"HighCPU\"}", "receiver": "lark-ops",
   "channel": {"id":"...","name":"运维告警群"},
@@ -278,7 +295,7 @@
   "hooks": {"total": 13, "enabled": 13},
   "alert_groups": {"firing": 4, "resolved": 31},
   "deliveries_24h": {"sent": 128, "failed": 2, "suppressed": 40},
-  "recent_events": [{"at":"...","action":"message.sent","target":"...","outcome":"ok"}]
+  "recent_events": [{"at":"...","action":"message.sent","target":"...","outcome":{"type":"ok"}}]
 }
 ```
 
@@ -287,9 +304,9 @@
 | HTTP | code | 场景 |
 |---|---|---|
 | 400 | `validation_failed` | 字段校验失败（`details` 给出字段级错误） |
-| 401 | `unauthenticated` / `invalid_credentials` | |
+| 401 | `unauthenticated`（登录失败与会话过期同码） | |
 | 403 | `forbidden` | |
 | 404 | `not_found` / `unknown_hook` | |
-| 409 | `template_in_use` / `channel_has_deliveries` / `duplicate_receive_id` | |
+| 409 | `conflict`（**只有这一个 code**，不区分模板引用 / 渠道有投递 / 重复 receive_id） | |
 | 502 | `lark_api_error` | 飞书返回非 0 code（`details` 含 `code`/`log_id`） |
 | 500 | `internal_error` | |
