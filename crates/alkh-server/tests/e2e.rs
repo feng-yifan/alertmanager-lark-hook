@@ -926,6 +926,56 @@ async fn failed_intake_stays_retryable_instead_of_being_deduped() {
     );
 }
 
+/// 安全回归：初始密码必须在**服务端**被强制改掉。
+///
+/// 初始密码会打印到启动日志（且可能被日志采集），此前「必须改密」只是前端提示，
+/// 用初始口令即可直接调用全部管理接口 —— 等于该提示形同虚设。
+#[tokio::test]
+async fn initial_password_must_be_changed_before_other_apis() {
+    let h = start().await;
+    // 模拟「用随机初始密码引导」后的状态（start() 用的是显式密码，故这里直接置位）
+    sqlx::query("UPDATE admin_users SET must_change_password = 1")
+        .execute(&h.pool)
+        .await
+        .unwrap();
+
+    // 其它管理接口被拒
+    let (status, body) = h.get("/api/v1/settings").await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::FORBIDDEN,
+        "初始密码未改前不应能调用管理接口: {body}"
+    );
+    assert_eq!(body["error"]["code"], "forbidden");
+    // 写操作同样被拒
+    let (status, _) = h
+        .post("/api/v1/channels/sync", json!({"create_missing": false}))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::FORBIDDEN);
+
+    // 但会话查询/登出/改密本身必须可用，否则永远出不来
+    let (status, _) = h.get("/api/v1/auth/session").await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+
+    let (status, body) = h
+        .post(
+            "/api/v1/auth/password",
+            json!({
+                "current_password": "test-password-123",
+                "new_password": "a-much-better-password"
+            }),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "改密本身必须可用: {body}");
+
+    // 置位被清除（改密会销毁全部会话，所以直接查库确认）
+    let left: i64 = sqlx::query_scalar("SELECT must_change_password FROM admin_users")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "改密后应清除 must_change_password");
+}
+
 /// 安全回归：登录失败达到阈值后必须被节流（429），否则公网入口可无限撞库；
 /// 且「用户名不存在」与「密码错误」的对外表现必须完全一致（不泄露账号是否存在）。
 #[tokio::test]
