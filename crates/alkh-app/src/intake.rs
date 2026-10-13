@@ -482,7 +482,10 @@ impl IntakeService {
             "action": action.as_str(),
             "alert_group_id": result.current.alert_group_id.to_string(),
             "delivery_id": d.id.to_string(),
-            "delivery_state": format!("{:?}", d.state),
+            // 用 serde 表示（snake_case）与 HTTP 响应的 delivery_state 保持一致；
+            // format!("{:?}") 会把 Rust 变体名（Pending/Active）写进审计。
+            "delivery_state": serde_json::to_value(d.state)
+                .unwrap_or(serde_json::Value::Null),
             "message_type": d.message_type.as_str(),
             "message_id": d.lark_message_id,
             "card_entity_id": d.card_entity_id,

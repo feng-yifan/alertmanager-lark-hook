@@ -130,14 +130,23 @@ async fn retention_loop(state: AppState) {
             .await;
         let sessions = state.deps.sessions.purge_expired(now).await;
 
-        let deleted =
-            |r: &Result<u64, alkh_domain::PortError>| r.as_ref().ok().copied().unwrap_or(0);
+        // 清理失败以前被静默计成 0（`ok().unwrap_or(0)`），于是「某张表无限增长」
+        // 这件事完全没有任何声音。现在逐个记录失败。
+        fn count(name: &str, r: &Result<u64, alkh_domain::PortError>) -> u64 {
+            match r {
+                Ok(n) => *n,
+                Err(e) => {
+                    tracing::error!(table = name, error = %e, "保留清理失败，本次跳过该表");
+                    0
+                }
+            }
+        }
         let (g, d, a, dd, ss) = (
-            deleted(&groups),
-            deleted(&deliveries),
-            deleted(&audits),
-            deleted(&dedup),
-            deleted(&sessions),
+            count("alert_groups", &groups),
+            count("deliveries", &deliveries),
+            count("audit_logs", &audits),
+            count("event_dedup", &dedup),
+            count("sessions", &sessions),
         );
         let total = g + d + a + dd + ss;
 

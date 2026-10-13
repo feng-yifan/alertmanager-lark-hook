@@ -322,8 +322,29 @@ impl NotificationSender {
         // 自动重试（后台任务）保留 attempt，避免无限重试。
         d.state = DeliveryState::Pending;
         let uuid = message_uuid(None);
+        let now = self.deps.now();
         match self.perform_send(&prepared, &mut d, &uuid).await {
-            Ok(()) => d.mark_active(self.deps.now()),
+            Ok(()) => {
+                d.mark_active(now);
+                // 记录**实际发出**的内容，否则投递里留的还是首次失败时的旧 digest，
+                // 会让后续同内容事件被误判为「内容已变」而多做一次更新。
+                d.rendered_digest = prepared.digest.clone();
+                // 重试成功后，这条消息就是该分组当前在群里的活跃消息，必须回写指针。
+                // 否则后续 `Updated` 事件会以为「没有旧消息可更新」而连发新卡片
+                // （`group.active_delivery_id` 是唯一的活跃消息指针，`find_active` 在生产未使用）。
+                if let Err(e) = self
+                    .deps
+                    .groups
+                    .set_active_delivery(&d.alert_group_id, Some(&d.id), Some(now))
+                    .await
+                {
+                    tracing::warn!(
+                        delivery_id = %d.id,
+                        error = %e,
+                        "重试成功但回写分组活跃投递指针失败：下一次更新可能重复发卡片"
+                    );
+                }
+            }
             Err(err) => self.register_failure(&mut d, err),
         }
         self.deps.deliveries.update(&d).await?;
@@ -534,6 +555,9 @@ impl NotificationSender {
             .get(&delivery.alert_group_id)
             .await?
             .ok_or_else(|| AppError::not_found("告警分组不存在"))?;
+        // 撤回前先记下分组当前指向谁：只有它指向的就是被撤回的这条时，
+        // 才应该把指针清掉（否则会误伤更新的活跃投递）。
+        let pointer_is_this = group.active_delivery_id.as_ref() == Some(&delivery.id);
         let prepared = PreparedSend {
             channel,
             group,
@@ -552,6 +576,22 @@ impl NotificationSender {
                 -1,
                 d.last_error.clone().unwrap_or_else(|| "撤回失败".into()),
             )));
+        }
+        // 消息已经被撤掉了，分组不应再指向它；否则下一个事件会拿一条已撤回的投递
+        // 去尝试原地更新，失败后再降级发新消息，表现为重复卡片。
+        if pointer_is_this {
+            if let Err(e) = self
+                .deps
+                .groups
+                .set_active_delivery(&d.alert_group_id, None, None)
+                .await
+            {
+                tracing::warn!(
+                    delivery_id = %d.id,
+                    error = %e,
+                    "撤回成功但清空分组活跃投递指针失败"
+                );
+            }
         }
         Ok(d)
     }

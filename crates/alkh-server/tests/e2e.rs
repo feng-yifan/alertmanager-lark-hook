@@ -903,6 +903,49 @@ async fn failed_intake_stays_retryable_instead_of_being_deduped() {
     );
 }
 
+/// 回归（P0-5）：重试成功后必须把分组的活跃消息指针回写到这条投递。
+///
+/// `group.active_delivery_id` 是唯一的活跃消息指针（`find_active` 在生产从未被调用）。
+/// 修复前 `retry` 只更新投递行，分组仍指向空的/旧的投递，于是下一次「内容变化」
+/// 会被判成「没有旧消息可更新」而改走 SendNew —— 同一条告警在群里出现两张卡片，
+/// 旧卡片也再无法被撤回。
+#[tokio::test]
+async fn successful_retry_repoints_group_active_delivery() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+
+    // 首次投递失败（限频）→ 投递停在 pending，分组没有活跃消息
+    h.fake.inject_send_failure(1, LarkError::CODE_RATE_LIMITED);
+    let (_, body) = h.push(firing_payload(1)).await;
+    assert_eq!(
+        body["delivery_state"], "pending",
+        "限频应停在 pending: {body}"
+    );
+
+    // 手动重试（此时飞书已恢复）
+    let (status, list) = h.get("/api/v1/deliveries?limit=20").await;
+    assert_eq!(status, 200);
+    let id = list["items"][0]["id"]
+        .as_str()
+        .expect("应有待重试的投递")
+        .to_string();
+    let (status, delivery) = h
+        .post(
+            &format!("/api/v1/deliveries/{id}/retry"),
+            serde_json::json!({}),
+        )
+        .await;
+    assert_eq!(status, 200, "重试应成功: {delivery}");
+    assert_eq!(delivery["state"], "active");
+
+    // 内容变化 → 必须原地更新；修复前会走 send_new（重复卡片）
+    let (_, body) = h.push(firing_payload(2)).await;
+    assert_eq!(
+        body["action"], "update_in_place",
+        "重试成功后分组仍被认为没有活跃消息，会重复发卡片（P0-5 回归）: {body}"
+    );
+}
+
 /// 回归（P0-2）：新消息发送失败时**不允许**撤回旧消息。
 ///
 /// `send_new` 在发送失败时仍返回 `Ok`（状态 Pending，交给后台重试），

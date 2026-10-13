@@ -219,11 +219,22 @@ impl DeliveryRepository for SqliteDeliveryRepository {
     }
 
     async fn delete_before(&self, before: Timestamp) -> PortResult<u64> {
-        let result = sqlx::query("DELETE FROM deliveries WHERE updated_at < ?")
-            .bind(ts(before))
-            .execute(&self.pool)
-            .await
-            .map_err(common::map_sql)?;
+        // ⚠️ 必须排除仍被 `alert_groups.active_delivery_id` 引用的行。
+        //
+        // 长期 firing 且内容不变的分组会命中 R3「内容未变化则跳过更新」提前返回，
+        // 因而不会刷新 deliveries.updated_at，投递行会先于分组被清理掉，
+        // `active_delivery_id` 就成了悬空指针 —— 之后告警恢复时 previous=None，
+        // `decide` 判成 Suppress，恢复通知静默不发，群里那张卡片永远停在「未解决」。
+        let result = sqlx::query(
+            "DELETE FROM deliveries WHERE updated_at < ? AND id NOT IN (\
+                 SELECT active_delivery_id FROM alert_groups \
+                 WHERE active_delivery_id IS NOT NULL\
+             )",
+        )
+        .bind(ts(before))
+        .execute(&self.pool)
+        .await
+        .map_err(common::map_sql)?;
         Ok(result.rows_affected())
     }
 }
@@ -442,5 +453,50 @@ mod tests {
         );
         assert!(repo.get(&retry.id).await.unwrap().is_none());
         assert!(repo.get(&active.id).await.unwrap().is_some());
+    }
+    /// 回归（P0-6）：保留清理不得删除仍被 `alert_groups.active_delivery_id` 引用的投递。
+    ///
+    /// 长期 firing 且内容不变的分组会命中 R3「内容未变化则跳过更新」提前返回，
+    /// 因而不会刷新 `deliveries.updated_at`：投递行会先于分组被清理掉，
+    /// `active_delivery_id` 变成悬空指针 → 告警恢复时 `previous = None` →
+    /// `decide` 判成 Suppress，恢复通知静默丢失、群里卡片永远停在「未解决」。
+    #[tokio::test]
+    async fn delete_before_keeps_deliveries_referenced_by_alert_groups() {
+        let repo = SqliteDeliveryRepository::new(pool().await);
+        let now = alkh_domain::now();
+        let old = now - chrono::Duration::days(60);
+        let group = AlertGroupId::new();
+        let channel = ChannelId::new();
+
+        // 一条被分组引用为活跃消息，一条无人引用
+        let referenced = sample(&group, &channel, old);
+        let orphan = sample(&AlertGroupId::new(), &channel, old);
+        repo.insert(&referenced).await.unwrap();
+        repo.insert(&orphan).await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO alert_groups (id, hook_id, channel_id, group_key, status, \
+             first_seen_at, last_seen_at, active_delivery_id) \
+             VALUES (?, 'h1', ?, 'g1', 'firing', ?, ?, ?)",
+        )
+        .bind(group.as_str())
+        .bind(channel.as_str())
+        .bind(ts(now))
+        .bind(ts(now))
+        .bind(referenced.id.as_str())
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+
+        let deleted = repo.delete_before(now).await.unwrap();
+        assert_eq!(deleted, 1, "只应删除没有被引用的那条");
+        assert!(
+            repo.get(&referenced.id).await.unwrap().is_some(),
+            "被 alert_groups.active_delivery_id 引用的投递必须保留，否则指针悬空、恢复通知会静默丢失"
+        );
+        assert!(
+            repo.get(&orphan.id).await.unwrap().is_none(),
+            "无人引用的旧投递应被清理"
+        );
     }
 }
