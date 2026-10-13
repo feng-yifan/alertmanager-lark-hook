@@ -129,7 +129,7 @@ export default function ChannelsPage(): JSX.Element {
       return;
     }
     if (form.name.trim().length > 64) {
-      setFormError(new Error('渠道名称长度不能超过 64 个字符（business-rules §6）'));
+      setFormError(new Error('渠道名称长度不能超过 64 个字符'));
       return;
     }
     if (!form.receive_id.trim()) {
@@ -250,7 +250,7 @@ export default function ChannelsPage(): JSX.Element {
               <option value="false">已停用</option>
             </Select>
             <Input
-              placeholder="搜索名称 / receive_id"
+              placeholder="搜索名称 / 接收方 ID"
               value={search}
               onChange={(event) => setSearch(event.target.value)}
               style={{ width: 220 }}
@@ -383,7 +383,7 @@ export default function ChannelsPage(): JSX.Element {
               onChange={(event) => setForm({ ...form, name: event.target.value })}
             />
           </Field>
-          <Field label="receive_id" required hint="群聊为 oc_ 开头的 chat_id；用户为 open_id">
+          <Field label="接收方 ID" required hint="群聊填 oc_ 开头的群 ID；用户填 open_id">
             <Input
               className="mono"
               value={form.receive_id}
@@ -392,7 +392,7 @@ export default function ChannelsPage(): JSX.Element {
             />
           </Field>
           <div className="form-grid">
-            <Field label="receive_id_type" required>
+            <Field label="接收方 ID 类型" required>
               <Select
                 value={form.receive_id_type}
                 onChange={(event) => setForm({ ...form, receive_id_type: event.target.value as ReceiveIdType })}
@@ -404,7 +404,7 @@ export default function ChannelsPage(): JSX.Element {
                 ))}
               </Select>
             </Field>
-            <Field label="类型" hint="chat_id ⇒ group（domain-model §2 不变量）">
+            <Field label="类型" hint="选「群聊」时接收方 ID 必须是群 ID">
               <Select value={form.kind} onChange={(event) => setForm({ ...form, kind: event.target.value as ChannelKind })}>
                 {CHANNEL_KIND_VALUES.map((value) => (
                   <option key={value} value={value}>

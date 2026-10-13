@@ -44,21 +44,21 @@ export default function TestMessageTab({ channel }: Props): JSX.Element {
     <>
       <Card
         title="发送测试消息"
-        subtitle="POST /channels/:id/test-message —— 用真实凭据向该渠道发送一条测试消息"
+        subtitle="用真实凭据向该渠道发送一条测试消息"
       >
         <div className="form-grid">
-          <Field label="样例类型（sample）" required>
+          <Field label="样例类型" required>
             <RadioGroup<'firing' | 'resolved'>
               value={kind}
               options={[
-                { value: 'firing', label: 'firing（未解决）' },
-                { value: 'resolved', label: 'resolved（已恢复）' },
+                { value: 'firing', label: '未解决' },
+                { value: 'resolved', label: '已恢复' },
               ]}
               onChange={setKind}
             />
           </Field>
           <Field
-            label="卡片模板（card_template_id）"
+            label="卡片模板"
             hint="留空使用渠道策略中的模板"
           >
             <Select value={templateId} onChange={(event) => setTemplateId(event.target.value)}>
@@ -87,20 +87,20 @@ export default function TestMessageTab({ channel }: Props): JSX.Element {
           <Banner tone={result.state === 'failed' ? 'error' : 'success'}>
             {result.state === 'failed'
               ? `发送失败${result.last_error ? `：${result.last_error}` : ''}`
-              : `测试消息已提交（state=${result.state}，kind=${result.kind}）`}
+              : '测试消息已提交发送。'}
           </Banner>
           <div className="kv-grid mb-16">
-            <dt>delivery_id</dt>
+            <dt>投递 ID</dt>
             <dd className="mono break-all">
               <Link to="/deliveries">{result.id}</Link>
             </dd>
-            <dt>message_id</dt>
+            <dt>飞书消息 ID</dt>
             <dd className="mono break-all">{result.lark_message_id ?? '—'}</dd>
-            <dt>state</dt>
+            <dt>状态</dt>
             <dd>
               <StatusBadge kind="delivery" value={result.state} />
             </dd>
-            <dt>last_error</dt>
+            <dt>最后错误</dt>
             <dd className="mono break-all">{result.last_error ?? '—'}</dd>
           </div>
           <Field label="原始响应">
@@ -111,11 +111,11 @@ export default function TestMessageTab({ channel }: Props): JSX.Element {
 
       <Card title="说明">
         <ul className="small muted" style={{ margin: 0, paddingLeft: 18 }}>
-          <li>测试消息会真实调用飞书 API，并在投递记录中生成一条 kind=test 的 Delivery。</li>
+          <li>测试消息会真实调用飞书 API，并在投递记录中生成一条测试类型的记录。</li>
           <li>
-            凭据未配置或飞书返回非 0 code 时返回 <code>502 lark_api_error</code>（details 含 code / log_id）。
+            凭据未配置或飞书返回非 0 错误码时返回 <code>502</code>，错误体里带飞书错误码与请求日志 ID。
           </li>
-          <li>渠道被禁用（enabled=false）时投递会被拒绝（R13），请先在详情页启用渠道。</li>
+          <li>渠道被停用时投递会被拒绝，请先在详情页启用渠道。</li>
         </ul>
       </Card>
     </>

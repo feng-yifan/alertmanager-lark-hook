@@ -70,7 +70,7 @@ export default function OverviewPage(): JSX.Element {
 
           <Card
             title="最近事件"
-            subtitle="最新 10 条审计事件（GET /api/v1/overview）"
+            subtitle="最新 10 条审计事件"
             tight
             actions={
               <>

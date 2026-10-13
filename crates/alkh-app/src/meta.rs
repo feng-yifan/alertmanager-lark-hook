@@ -85,7 +85,7 @@ pub fn match_ops() -> Vec<EnumOption> {
 pub fn card_sources() -> Vec<EnumOption> {
     opts![
         ("builder_json", "卡片搭建工具 JSON（JSON 2.0）"),
-        ("builder_template", "卡片搭建工具模板（template_id）"),
+        ("builder_template", "引用搭建工具模板（已停用）"),
     ]
 }
 
@@ -95,9 +95,9 @@ pub fn channel_kinds() -> Vec<EnumOption> {
 
 pub fn receive_id_types() -> Vec<EnumOption> {
     opts![
-        ("chat_id", "群 chat_id"),
-        ("open_id", "用户 open_id"),
-        ("user_id", "用户 user_id"),
+        ("chat_id", "群 ID（chat_id）"),
+        ("open_id", "用户 ID（open_id）"),
+        ("user_id", "用户 ID（user_id）"),
         ("email", "用户邮箱"),
     ]
 }

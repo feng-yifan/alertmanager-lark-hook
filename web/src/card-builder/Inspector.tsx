@@ -47,7 +47,7 @@ export function Inspector({ card, catalog, meta, path, onChange }: InspectorProp
       </div>
       {component?.description ? <p className="faint small">{component.description}</p> : null}
 
-      <Field label="element_id" hint="全局唯一；局部更新与交互回调依赖它">
+      <Field label="元素 ID" hint="全局唯一；局部更新与交互回调依赖它">
         <input
           className="input mono"
           value={typeof node.element_id === 'string' ? node.element_id : ''}
@@ -294,19 +294,19 @@ function CardSettings({
       </p>
 
       <VartextField
-        label="标题（header.title）"
+        label="标题"
         hint="支持 ${变量}，例如「【${status_text}】${alertname}」"
         value={read('header.title.content')}
         variables={meta.variables}
         onChange={(value) => set('header.title.content', value, '修改标题')}
       />
       <VartextField
-        label="副标题（header.subtitle）"
+        label="副标题"
         value={read('header.subtitle.content')}
         variables={meta.variables}
         onChange={(value) => set('header.subtitle.content', value, '修改副标题')}
       />
-      <Field label="标题颜色（header.template）" hint="按严重级别配色请选 ${severity_color}">
+      <Field label="标题颜色" hint="按严重级别配色请选 ${severity_color}">
         <select
           className="select"
           value={read('header.template')}
@@ -322,25 +322,25 @@ function CardSettings({
         </select>
       </Field>
       <VartextField
-        label="消息摘要（config.summary）"
+        label="消息摘要"
         hint="聊天列表里显示的预览文案"
         value={read('config.summary.content')}
         variables={meta.variables}
         onChange={(value) => set('config.summary.content', value, '修改摘要')}
       />
       <div className="grid-2">
-        <Field label="内容方向（body.direction）">
+        <Field label="内容方向">
           <select
             className="select"
             value={read('body.direction')}
             onChange={(event) => set('body.direction', event.target.value, '修改内容方向')}
           >
-            <option value="">vertical（默认）</option>
-            <option value="vertical">vertical</option>
-            <option value="horizontal">horizontal</option>
+            <option value="">垂直（默认）</option>
+            <option value="vertical">垂直</option>
+            <option value="horizontal">水平</option>
           </select>
         </Field>
-        <Field label="内边距（body.padding）">
+        <Field label="内边距">
           <input
             className="input"
             placeholder="12px"
@@ -350,8 +350,7 @@ function CardSettings({
         </Field>
       </div>
       <div className="callout info small">
-        <code>config.update_multi</code> 固定为 <code>true</code>：原地更新（更新旧告警）依赖它，
-        JSON 2.0 也只支持 <code>true</code>。
+        卡片配置里的「多端同步更新」固定为开启：原地更新旧卡片依赖它，JSON 2.0 也只支持开启。
       </div>
     </div>
   );

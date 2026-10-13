@@ -157,9 +157,8 @@ export default function HooksTab({ channel, onChanged }: Props): JSX.Element {
       >
         <div style={{ padding: '0 16px' }}>
           <div className="callout info mt-8 mb-8">
-            列表接口只返回 <code>hook_path</code> 的占位形式（<code>&lt;token&gt;</code>）与 <code>token_prefix</code>；
-            明文 token 与完整 hook_url <strong>仅在创建 / 轮换的响应中出现一次</strong>。轮换后旧 token 立即失效
-            （business-rules §6）。
+            列表只返回 Hook 路径的占位形式（<code>&lt;token&gt;</code>）与 token 前缀；
+            明文 token 与完整 Hook 地址 <strong>仅在创建 / 轮换的响应中出现一次</strong>。轮换后旧 token 立即失效。
           </div>
         </div>
         <div className="table-wrap">
@@ -167,8 +166,8 @@ export default function HooksTab({ channel, onChanged }: Props): JSX.Element {
             <thead>
               <tr>
                 <th>名称</th>
-                <th>token_prefix</th>
-                <th>hook_path</th>
+                <th>token 前缀</th>
+                <th>Hook 路径</th>
                 <th>启用</th>
                 <th className="num">调用次数</th>
                 <th>最近调用</th>
@@ -248,7 +247,7 @@ export default function HooksTab({ channel, onChanged }: Props): JSX.Element {
           <Input value={newName} autoFocus onChange={(event) => setNewName(event.target.value)} />
         </Field>
         <p className="faint small mb-0">
-          创建后立即返回明文 token 与 hook_url，只显示一次；请复制到 AlertManager 的{' '}
+          创建后立即返回明文 token 与完整 Hook 地址，只显示一次；请复制到 AlertManager 的{' '}
           <code>webhook_configs[].url</code>。
         </p>
       </Modal>
@@ -266,7 +265,7 @@ export default function HooksTab({ channel, onChanged }: Props): JSX.Element {
         {oneTime ? (
           <>
             <Banner tone="warn">
-              <strong>只显示一次</strong>：关闭本对话框后无法再次查看明文 token / hook_url（服务端只存 SHA-256
+              <strong>只显示一次</strong>：关闭本对话框后无法再次查看明文 token / Hook 地址（服务端只存 SHA-256
               哈希与 8 字符前缀）。请立即复制保存，并更新 AlertManager 配置。
             </Banner>
             <div className="small mb-8">{oneTime.title}</div>
@@ -277,7 +276,7 @@ export default function HooksTab({ channel, onChanged }: Props): JSX.Element {
               </div>
             </Field>
             {oneTime.hookUrl ? (
-              <Field label="hook_url">
+              <Field label="Hook 地址">
                 <div className="copy-row">
                   <span className="copy-value">{oneTime.hookUrl}</span>
                   <CopyButton value={oneTime.hookUrl} small />
@@ -339,7 +338,7 @@ export default function HooksTab({ channel, onChanged }: Props): JSX.Element {
       <div className="row">
         <StatusBadge kind="enabled" value={channel.enabled} />
         <span className="faint small">
-          渠道禁用时（channel.enabled=false）该渠道所有 Hook 的投递都会被拒绝，仅记录审计（R13）。
+          渠道停用时，该渠道所有 Hook 的投递都会被拒绝，仅记录审计。
         </span>
       </div>
     </>

@@ -69,7 +69,7 @@ export default function ChannelDetailPage(): JSX.Element {
     setToggling(true);
     try {
       await patchChannel(channel.id, { enabled: next });
-      toast.success(next ? '渠道已启用' : '渠道已停用（R13：不再发送，仅审计）');
+      toast.success(next ? '渠道已启用' : '渠道已停用（不再发送，仅记录审计）');
       reload();
     } catch (cause) {
       toast.error(errorMessage(cause));
@@ -147,21 +147,21 @@ export default function ChannelDetailPage(): JSX.Element {
       <div className="card">
         <div className="card-body">
           <div className="kv-grid">
-            <dt>receive_id</dt>
+            <dt>接收方 ID</dt>
             <dd>
               <span className="row tight">
                 <span className="mono break-all">{channel.receive_id}</span>
                 <CopyButton value={channel.receive_id} small />
               </span>
             </dd>
-            <dt>receive_id_type</dt>
+            <dt>接收方 ID 类型</dt>
             <dd>
               {RECEIVE_ID_TYPE_LABEL[channel.receive_id_type] ?? channel.receive_id_type}
               <span className="faint small">（{channel.kind === 'group' ? CHANNEL_KIND_LABEL.group : CHANNEL_KIND_LABEL.p2p_user}）</span>
             </dd>
-            <dt>external</dt>
+            <dt>外部群</dt>
             <dd>{channel.external ? '外部群' : '内部'}</dd>
-            <dt>source</dt>
+            <dt>来源</dt>
             <dd>{CHANNEL_SOURCE_LABEL[channel.source] ?? channel.source}</dd>
             <dt>启用状态</dt>
             <dd>

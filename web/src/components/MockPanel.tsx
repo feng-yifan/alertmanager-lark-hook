@@ -1,5 +1,5 @@
 /**
- * Mock 数据面板（P1）。
+ * 模拟数据面板（P1）。
  *
  * 三层语义：
  *  1. 基线 —— 内置样例（firing / resolved）或一条**历史告警分组**；
@@ -12,6 +12,7 @@ import { useMemo, useState } from 'react';
 import { getCardTemplateMock } from '../api';
 import { useAsync } from '../hooks';
 import type { AlertGroup, Channel, Meta, MetaVariable, MockBaseline, MockSpec } from '../types';
+import { GROUP_STATUS_LABEL, label } from '../labels';
 import { Badge, Banner, Button, Card, Field, Input, Select } from './ui';
 
 export interface MockPanelProps {
@@ -134,7 +135,7 @@ export function MockPanel({
                 : baselineVars[name]
           }
           onChange={(event) => setOverride(name, event.target.value)}
-          aria-label={`${name} 的 mock 值`}
+          aria-label={`${name} 的模拟值`}
         />
       </td>
       <td className="actions">
@@ -155,10 +156,10 @@ export function MockPanel({
   return (
     <Card
       className="mt-16"
-      title="Mock 数据"
+      title="模拟数据"
       subtitle={
         <>
-          基线来自 <code>GET /card-templates/mock</code>；覆盖项会写进渲染上下文，未知 key 也会生效。
+          基线数据来自服务端内置样例；覆盖项会写进渲染上下文，未知变量名也会生效。
           历史分组只作为数据源，不会被改写。
         </>
       }
@@ -188,8 +189,8 @@ export function MockPanel({
             value={sample}
             onChange={(event) => onSampleChange(event.target.value as 'firing' | 'resolved')}
           >
-            <option value="firing">firing（未解决）</option>
-            <option value="resolved">resolved（已恢复）</option>
+            <option value="firing">未解决</option>
+            <option value="resolved">已恢复</option>
           </Select>
         </Field>
         <Field label="历史告警分组" hint="用一条真实告警作为数据源（优先于样例）">
@@ -202,12 +203,12 @@ export function MockPanel({
             <option value="">（不使用 · 用内置样例）</option>
             {alertGroups.map((group) => (
               <option key={group.id} value={group.id}>
-                {group.alertname ?? group.group_key} · {group.status}
+                {group.alertname ?? group.group_key} · {label(GROUP_STATUS_LABEL, group.status)}
               </option>
             ))}
           </Select>
         </Field>
-        <Field label="基线渠道" hint="影响 channel_name / channel_id；留空用内置样例渠道">
+        <Field label="基线渠道" hint="影响消息里的渠道名与渠道 ID；留空用内置样例渠道">
           <Select value={channelId} onChange={(event) => onChannelIdChange(event.target.value)}>
             <option value="">（内置样例渠道）</option>
             {channels.map((channel) => (
@@ -233,7 +234,7 @@ export function MockPanel({
       ) : null}
 
       {baseline.loading && !baseline.data ? (
-        <p className="faint small">正在加载 mock 基线…</p>
+        <p className="faint small">正在加载模拟数据…</p>
       ) : null}
 
       {baseline.data ? (

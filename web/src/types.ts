@@ -497,9 +497,8 @@ export interface AlertGroup {
 export type DeliveryKind = 'firing_created' | 'repeated' | 'updated' | 'resolved' | 'test';
 
 /**
- * `docs/domain-model.md` §7 lists Pending|Active|Superseded|Recalled|Resolved|Failed.
- * R2 additionally mentions a `RecallFailed` bookkeeping state, kept here so the UI
- * renders it instead of falling through.
+ * 除了常见的投递状态，还有一个「撤回失败」的记账状态：它只在撤回调用失败时出现，
+ * 留在联合类型里以免界面回退成未知值。
  */
 export type DeliveryState =
   | 'pending'

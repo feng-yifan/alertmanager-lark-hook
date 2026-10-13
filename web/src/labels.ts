@@ -50,10 +50,10 @@ export const CHANNEL_KIND_LABEL: Record<string, string> = {
 };
 
 export const RECEIVE_ID_TYPE_LABEL: Record<string, string> = {
-  chat_id: 'chat_id（群）',
-  open_id: 'open_id（用户）',
-  user_id: 'user_id',
-  email: 'email',
+  chat_id: '群 ID（chat_id）',
+  open_id: '用户 ID（open_id）',
+  user_id: '用户 ID（user_id）',
+  email: '用户邮箱',
 };
 
 export const CHANNEL_SOURCE_LABEL: Record<string, string> = {
@@ -69,8 +69,8 @@ export const MATCH_OP_LABEL: Record<string, string> = {
 };
 
 export const CARD_SOURCE_LABEL: Record<string, string> = {
-  builder_json: '导入卡片 JSON（builder_json）',
-  builder_template: '引用搭建工具模板（builder_template）',
+  builder_json: '卡片搭建工具 JSON（JSON 2.0）',
+  builder_template: '引用搭建工具模板（已停用）',
 };
 
 export function label(map: Record<string, string>, value: string | null | undefined, fallback = '—'): string {
@@ -99,8 +99,8 @@ export const DELIVERY_KIND_VALUES: DeliveryKind[] = [
 ];
 
 /**
- * `docs/business-rules.md` §4 decision table, rendered read-only in the policy editor
- * so the operator can see exactly what each combination does.
+ * 投递决策表（只读）：把策略组合与它到底会发生什么列出来，
+ * 避免运维只能靠试。
  */
 export interface DecisionRow {
   event: string;
@@ -111,31 +111,21 @@ export interface DecisionRow {
 }
 
 export const DECISION_TABLE: DecisionRow[] = [
-  { event: 'NewFiring', field: '—', value: '—', valueLabel: '始终投递', action: 'SendNew：创建卡片实体 → 发送 → Delivery=Active' },
-  { event: 'Repeated', field: 'repeat_policy', value: 'send', valueLabel: '发送', action: 'SendNew，旧 Delivery → Superseded' },
-  { event: 'Repeated', field: 'repeat_policy', value: 'suppress', valueLabel: '不发送（默认）', action: 'Suppress：不发送，仅更新 last_seen_at' },
-  {
-    event: 'Repeated',
-    field: 'repeat_policy',
-    value: 'send_and_revoke_previous',
-    valueLabel: '发送并移除旧告警',
-    action: 'SendNewThenRevoke：发送新消息后撤回旧消息，旧 → Recalled',
-  },
-  { event: 'Updated', field: 'group_update_policy', value: 'update_previous', valueLabel: '更新旧告警（默认）', action: 'UpdateInPlace：原地更新当前 Active 卡片内容' },
-  { event: 'Updated', field: 'group_update_policy', value: 'send', valueLabel: '发送新消息', action: 'SendNew，旧 → Superseded' },
-  { event: 'Updated', field: 'group_update_policy', value: 'suppress', valueLabel: '不发送', action: 'Suppress' },
-  { event: 'Resolved', field: 'resolved_policy', value: 'send', valueLabel: '发送（默认）', action: 'SendNew（恢复卡片），旧 → Superseded' },
-  { event: 'Resolved', field: 'resolved_policy', value: 'send_and_delete_previous', valueLabel: '发送并删除旧告警', action: 'SendNewThenRevoke，旧 → Recalled' },
-  { event: 'Resolved', field: 'resolved_policy', value: 'update_previous', valueLabel: '更新旧告警', action: 'UpdateInPlace：把旧卡片原地更新为已恢复，旧 → Resolved' },
+  { event: '首次告警', field: '—', value: '—', valueLabel: '始终投递', action: '发送新消息：创建卡片实体 → 发送 → 投递变为「已发送」' },
+  { event: '重复通知', field: '重复告警策略', value: 'send', valueLabel: '发送', action: '发送新消息，旧投递变为「已被取代」' },
+  { event: '重复通知', field: '重复告警策略', value: 'suppress', valueLabel: '不发送（默认）', action: '不发送，只更新「最近出现时间」' },
+  { event: '重复通知', field: '重复告警策略', value: 'send_and_revoke_previous', valueLabel: '发送并移除旧告警', action: '发送新消息后撤回旧消息，旧投递变为「已撤回」' },
+  { event: '内容变化', field: '内容变化策略', value: 'update_previous', valueLabel: '更新旧告警（默认）', action: '原地更新当前「已发送」的那张卡片' },
+  { event: '内容变化', field: '内容变化策略', value: 'send', valueLabel: '发送新消息', action: '发送新消息，旧投递变为「已被取代」' },
+  { event: '内容变化', field: '内容变化策略', value: 'suppress', valueLabel: '不发送', action: '不发送' },
+  { event: '全部恢复', field: '恢复策略', value: 'send', valueLabel: '发送（默认）', action: '发送恢复卡片，旧投递变为「已被取代」' },
+  { event: '全部恢复', field: '恢复策略', value: 'send_and_delete_previous', valueLabel: '发送并删除旧告警', action: '发送新消息后撤回旧消息，旧投递变为「已撤回」' },
+  { event: '全部恢复', field: '恢复策略', value: 'update_previous', valueLabel: '更新旧告警', action: '把旧卡片原地更新为已恢复，旧投递变为「已更新为已恢复」' },
 ];
 
-/** R4：卡片消息（`im/v1/messages`）没有官方的置顶/即时提醒字段。 */
-export const R4_CARD_MESSAGE_CAVEAT =
-  'R4：卡片消息（im/v1/messages）没有官方的置顶/即时提醒字段，因此本项目不提供「即时提醒」开关。';
+export const MUTE_NOTE =
+  '静默未结束前会抑制所有发送类动作，但事件分类与分组状态照常推进——解除静默后不会补发历史消息，只反映最新状态。';
 
-export const R5_MUTE_NOTE =
-  'R5：mute_until 未过期时抑制所有发送类动作，但事件分类与分组状态照常推进——解除静默后不会补发历史消息，只反映最新状态。';
-
-export const R11_FILTER_NOTE =
-  'R11：多个 matcher 为 AND 关系；匹配对象是每条告警的 labels ∪ commonLabels（告警自身 label 优先）。' +
-  '分组内至少一条告警命中即投递，未命中的告警会从消息中剔除；过滤后为空则 skipped:filtered。matcher 为空表示全部通过。';
+export const FILTER_NOTE =
+  '多个匹配条件之间是「与」关系；匹配对象是每条告警的标签与分组公共标签的并集（告警自身标签优先）。' +
+  '分组内至少一条告警命中即投递，未命中的告警会从消息中剔除；过滤后为空则不发送。未配置匹配条件表示全部通过。';

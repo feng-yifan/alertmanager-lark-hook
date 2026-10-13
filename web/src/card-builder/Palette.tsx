@@ -22,7 +22,7 @@ export function Palette({ catalog, presets, onAdd }: PaletteProps): JSX.Element 
     <div className="cb-palette">
       <div className="cb-panel-title">告警积木</div>
       <p className="faint small mb-8">
-        与 AlertManager 契约对齐的高频块，拖进画布即用；变量来自 <code>GET /meta</code>。
+        与 AlertManager 契约对齐的高频块，拖进画布即用；变量来自服务端下发的变量清单。
       </p>
       {presets.map((preset) => {
         const build = () => presetNodes(preset);
@@ -42,7 +42,7 @@ export function Palette({ catalog, presets, onAdd }: PaletteProps): JSX.Element 
         );
       })}
       {presets.length === 0 ? (
-        <div className="faint small">（未从 /meta 取到积木清单）</div>
+        <div className="faint small">（没有取到积木清单）</div>
       ) : null}
 
       <div className="cb-panel-title mt-16">飞书组件</div>

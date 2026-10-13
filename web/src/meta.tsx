@@ -40,16 +40,16 @@ export const FALLBACK_META: Meta = {
   ],
   card_sources: [
     { value: 'builder_json', label: '卡片搭建工具 JSON（JSON 2.0）' },
-    { value: 'builder_template', label: '卡片搭建工具模板（template_id）' },
+    { value: 'builder_template', label: '引用搭建工具模板（已停用）' },
   ],
   channel_kinds: [
     { value: 'group', label: '群聊' },
     { value: 'p2p_user', label: '单聊用户' },
   ],
   receive_id_types: [
-    { value: 'chat_id', label: '群 chat_id' },
-    { value: 'open_id', label: '用户 open_id' },
-    { value: 'user_id', label: '用户 user_id' },
+    { value: 'chat_id', label: '群 ID（chat_id）' },
+    { value: 'open_id', label: '用户 ID（open_id）' },
+    { value: 'user_id', label: '用户 ID（user_id）' },
     { value: 'email', label: '用户邮箱' },
   ],
   token_prefix: 'alkh_',

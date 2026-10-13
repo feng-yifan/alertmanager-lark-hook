@@ -77,10 +77,10 @@ export default function AlertGroupDetailPage(): JSX.Element {
     try {
       if (type === 'retry') {
         await retryDelivery(delivery.id);
-        toast.success('已提交重试（Delivery 回到 Pending，由后台重试队列发送）');
+        toast.success('已提交重试，由后台队列重新发送');
       } else {
         await revokeDelivery(delivery.id);
-        toast.success('已提交撤回；若超出撤回时限或权限不足，Delivery 会标记 Recalled→RecallFailed（R2）');
+        toast.success('已提交撤回；若超出撤回时限或权限不足，会标记为「撤回失败」');
       }
       setAction(null);
       reload();
@@ -157,31 +157,31 @@ export default function AlertGroupDetailPage(): JSX.Element {
           <div className="stat-value">{group.event_count}</div>
         </div>
         <div className="stat-card">
-          <div className="stat-label">truncated_alerts</div>
+          <div className="stat-label">被截断的告警数</div>
           <div className="stat-value">{group.truncated_alerts}</div>
-          <div className="stat-sub">AlertManager 侧已截断时为总数下界（R8）</div>
+          <div className="stat-sub">AlertManager 侧已截断时，这是总数的下界</div>
         </div>
       </div>
 
       <Card title="分组元数据">
         <DescriptionList
           items={[
-            { label: 'receiver', value: <span className="mono">{group.receiver}</span> },
+            { label: '接收器', value: <span className="mono">{group.receiver}</span> },
             {
-              label: 'channel',
+              label: '渠道',
               value: group.channel ? <Link to={`/channels/${group.channel.id}`}>{group.channel.name}</Link> : '—',
             },
-            { label: 'hook', value: group.hook?.name ?? '—' },
+            { label: 'Hook', value: group.hook?.name ?? '—' },
             {
-              label: 'severity',
+              label: '严重级别',
               value: group.severity ? <Badge tone="muted">{group.severity}</Badge> : '—',
             },
-            { label: 'first_seen_at', value: formatDateTime(group.first_seen_at) },
-            { label: 'last_seen_at', value: formatDateTime(group.last_seen_at) },
-            { label: 'last_notified_at', value: group.last_notified_at ? formatDateTime(group.last_notified_at) : '尚未通知' },
-            { label: 'resolved_at', value: group.resolved_at ? formatDateTime(group.resolved_at) : '未恢复' },
+            { label: '首次出现', value: formatDateTime(group.first_seen_at) },
+            { label: '最近出现', value: formatDateTime(group.last_seen_at) },
+            { label: '最近通知', value: group.last_notified_at ? formatDateTime(group.last_notified_at) : '尚未通知' },
+            { label: '恢复时间', value: group.resolved_at ? formatDateTime(group.resolved_at) : '未恢复' },
             {
-              label: 'active_delivery_id',
+              label: '当前活跃投递',
               value: group.active_delivery_id ? <span className="mono break-all">{group.active_delivery_id}</span> : '—',
             },
           ]}
@@ -193,13 +193,13 @@ export default function AlertGroupDetailPage(): JSX.Element {
           <table className="data">
             <thead>
               <tr>
-                <th>fingerprint</th>
+                <th>指纹</th>
                 <th>状态</th>
                 <th>标签</th>
                 <th>注解</th>
-                <th>starts_at</th>
-                <th>ends_at</th>
-                <th>generator_url</th>
+                <th>开始时间</th>
+                <th>结束时间</th>
+                <th>来源地址</th>
               </tr>
             </thead>
             <tbody>
@@ -266,21 +266,21 @@ export default function AlertGroupDetailPage(): JSX.Element {
       </Card>
 
       <div className="grid-2">
-        <Card title="group_labels">
+        <Card title="分组标签">
           <LabelTable labels={group.group_labels} />
         </Card>
-        <Card title="common_labels">
+        <Card title="公共标签">
           <LabelTable labels={group.common_labels} />
         </Card>
       </div>
 
-      <Card title="common_annotations">
+      <Card title="公共注解">
         <LabelTable labels={group.common_annotations} />
       </Card>
 
       <Card
         title="投递时间线"
-        subtitle="按创建时间倒序；重试把 Failed 重新入队（R14），撤回失败不阻塞主流程（R2）"
+        subtitle="按创建时间倒序；失败的投递可重试，撤回失败不阻塞主流程"
         actions={
           <Button size="sm" onClick={reload}>
             刷新
@@ -289,7 +289,7 @@ export default function AlertGroupDetailPage(): JSX.Element {
       >
         {deliveriesPending ? <Loading label="正在加载投递记录…" /> : null}
         {!deliveriesPending && deliveries.length === 0 ? (
-          <EmptyState title="暂无投递记录" description="该分组还没有产生 Delivery（可能被策略抑制或尚未发送）。" />
+          <EmptyState title="暂无投递记录" description="该分组还没有产生投递记录（可能被策略抑制或尚未发送）。" />
         ) : null}
         {deliveries.length > 0 ? (
           <ul className="timeline">
@@ -320,15 +320,15 @@ export default function AlertGroupDetailPage(): JSX.Element {
                     </Button>
                   </div>
                   <div className="small muted">
-                    delivery <span className="mono">{delivery.id}</span>
+                    投递 <span className="mono">{delivery.id}</span>
                     {delivery.lark_message_id ? (
                       <>
-                        {' · '}message_id <span className="mono">{delivery.lark_message_id}</span>
+                        {' · '}飞书消息 ID <span className="mono">{delivery.lark_message_id}</span>
                       </>
                     ) : null}
                     {delivery.card_entity_id ? (
                       <>
-                        {' · '}card_entity_id <span className="mono">{delivery.card_entity_id}</span>
+                        {' · '}卡片实体 ID <span className="mono">{delivery.card_entity_id}</span>
                       </>
                     ) : null}
                     {' · '}更新于 {formatDateTime(delivery.updated_at)}
@@ -358,7 +358,7 @@ export default function AlertGroupDetailPage(): JSX.Element {
           ) : (
             <>
               将撤回投递 <span className="mono">{action?.delivery.id}</span> 对应的飞书消息。
-              若超出撤回时限、消息已被删除或权限不足，撤回会失败：Delivery 标记 Recalled→RecallFailed 并写入审计，主流程仍视为成功（R2）。
+              若超出撤回时限、消息已被删除或权限不足，撤回会失败：该投递会标记为「撤回失败」并写入审计，主流程仍视为成功。
             </>
           )
         }

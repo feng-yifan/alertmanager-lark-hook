@@ -79,10 +79,10 @@ export default function DeliveriesPage(): JSX.Element {
     try {
       if (type === 'retry') {
         await retryDelivery(delivery.id);
-        toast.success('已提交重试（Failed → Pending）');
+        toast.success('已提交重试，等待后台队列重新发送');
       } else {
         await revokeDelivery(delivery.id);
-        toast.success('已提交撤回；失败时会标记 Recalled→RecallFailed（R2）');
+        toast.success('已提交撤回；失败时会标记为「撤回失败」');
       }
       setAction(null);
       reload();
@@ -98,7 +98,7 @@ export default function DeliveriesPage(): JSX.Element {
     <>
       <PageHeader
         title="投递记录"
-        subtitle="Delivery 生命周期：Pending → Active → Superseded / Recalled / Resolved / Failed"
+        subtitle="每次发送、更新、撤回都会留一条记录，状态从「待发送」开始推进"
         actions={
           <Button onClick={reload} loading={refreshing}>
             刷新
@@ -111,7 +111,7 @@ export default function DeliveriesPage(): JSX.Element {
           <Field label="告警分组 ID">
             <Input
               className="mono"
-              placeholder="alert_group_id"
+              placeholder="告警分组 ID"
               value={groupInput}
               onChange={(event) => {
                 setGroupInput(event.target.value);
@@ -266,11 +266,11 @@ export default function DeliveriesPage(): JSX.Element {
         message={
           action?.type === 'retry' ? (
             <>
-              仅失败的投递可以重试：将 <span className="mono">{action?.delivery.id}</span> 重新入队（Failed → Pending，R14）。
+              仅失败的投递可以重试：将 <span className="mono">{action?.delivery.id}</span> 重新加入发送队列。
             </>
           ) : (
             <>
-              将撤回投递 <span className="mono">{action?.delivery.id}</span> 对应的飞书消息；撤回失败不阻塞主流程（R2）。
+              将撤回投递 <span className="mono">{action?.delivery.id}</span> 对应的飞书消息；撤回失败不阻塞主流程。
             </>
           )
         }

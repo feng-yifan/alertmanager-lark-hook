@@ -138,7 +138,7 @@ export function CardBuilder({ card, meta, starter, onChange }: BuilderProps): JS
 
       {catalogEmpty ? (
         <div className="banner banner-warn">
-          组件目录为空（<code>GET /meta</code> 未返回 <code>card_components</code>）：
+          组件目录为空（服务端没有下发组件目录）：
           请升级后端后刷新页面。
         </div>
       ) : null}

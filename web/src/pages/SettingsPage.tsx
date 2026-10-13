@@ -220,7 +220,7 @@ export default function SettingsPage(): JSX.Element {
 
       {session.user?.must_change_password ? (
         <div className="callout danger mb-16">
-          当前账号需要修改初始密码（<code>must_change_password = true</code>）。请在下方「修改密码」中设置新密码。
+          当前账号使用的是初始密码，必须先修改。请在下方「修改密码」中设置新密码。
         </div>
       ) : null}
 
@@ -230,7 +230,7 @@ export default function SettingsPage(): JSX.Element {
       {settings ? (
         <Card
           title="飞书应用设置"
-          subtitle="GET /api/v1/settings 永不回显 app_secret，只返回 app_secret_set"
+          subtitle="服务端永不回显应用密钥，只返回是否已配置"
           actions={
             <>
               <Button onClick={() => void runCheck()} loading={checking}>
@@ -244,7 +244,7 @@ export default function SettingsPage(): JSX.Element {
         >
           <form onSubmit={(event) => void saveSettings(event)}>
             <div className="form-grid">
-              <Field label="lark_app_id" hint="形如 cli_*（仅提示，不强制，business-rules §6）">
+              <Field label="飞书应用 ID">
                 <Input
                   className="mono"
                   value={form.lark_app_id}
@@ -253,7 +253,7 @@ export default function SettingsPage(): JSX.Element {
                 />
               </Field>
               <Field
-                label="lark_app_secret（write-only）"
+                label="飞书应用密钥"
                 hint="留空表示不修改；填入新值表示覆盖；点击「清除密钥」提交空串以清除"
               >
                 <div className="row tight">
@@ -267,7 +267,7 @@ export default function SettingsPage(): JSX.Element {
                         ? '保存后将清除'
                         : settings.app_secret_set
                           ? '已配置 · 留空则不修改'
-                          : '未配置 · 请输入 app_secret'
+                          : '未配置 · 请输入应用密钥'
                     }
                     onChange={(event) => {
                       setSecretValue(event.target.value);
@@ -297,14 +297,14 @@ export default function SettingsPage(): JSX.Element {
             </div>
 
             <div className="form-grid">
-              <Field label="lark_base_url" hint="飞书开放平台基址，默认 https://open.feishu.cn">
+              <Field label="飞书开放平台地址" hint="默认 https://open.feishu.cn">
                 <Input
                   className="mono"
                   value={form.lark_base_url}
                   onChange={(event) => setForm({ ...form, lark_base_url: event.target.value })}
                 />
               </Field>
-              <Field label="public_base_url" hint="用于生成 Hook 绝对地址：{public_base_url}/api/v1/hooks/alertmanager/{token}">
+              <Field label="对外访问地址" hint="用于生成 Hook 的绝对地址：该地址 + /api/v1/hooks/alertmanager/{token}">
                 <Input
                   className="mono"
                   value={form.public_base_url}
@@ -314,9 +314,9 @@ export default function SettingsPage(): JSX.Element {
               </Field>
             </div>
 
-            <h3 className="mb-8 mt-8">数据保留（retention，单位：天）</h3>
+            <h3 className="mb-8 mt-8">数据保留（单位：天）</h3>
             <div className="grid-3">
-              <Field label="alert_group_days">
+              <Field label="告警分组保留天数">
                 <Input
                   type="number"
                   min={1}
@@ -324,7 +324,7 @@ export default function SettingsPage(): JSX.Element {
                   onChange={(event) => setForm({ ...form, alert_group_days: event.target.value })}
                 />
               </Field>
-              <Field label="delivery_days">
+              <Field label="投递记录保留天数">
                 <Input
                   type="number"
                   min={1}
@@ -332,7 +332,7 @@ export default function SettingsPage(): JSX.Element {
                   onChange={(event) => setForm({ ...form, delivery_days: event.target.value })}
                 />
               </Field>
-              <Field label="audit_days">
+              <Field label="审计日志保留天数">
                 <Input
                   type="number"
                   min={1}
@@ -346,7 +346,7 @@ export default function SettingsPage(): JSX.Element {
               <Button variant="primary" type="submit" loading={saving}>
                 保存设置
               </Button>
-              <span className="faint small">app_secret 传 null = 不变，传 "" = 清除（docs/api.md §2）</span>
+              <span className="faint small">应用密钥留空 = 不修改，填空串 = 清除</span>
             </div>
           </form>
 
@@ -367,7 +367,7 @@ export default function SettingsPage(): JSX.Element {
         </Card>
       ) : null}
 
-      <Card title="修改密码" subtitle="POST /api/v1/auth/password">
+      <Card title="修改密码" subtitle="修改当前登录账号的密码">
         <form onSubmit={(event) => void submitPassword(event)} style={{ maxWidth: 420 }}>
           <Field label="当前密码" required>
             <Input
@@ -410,7 +410,7 @@ export default function SettingsPage(): JSX.Element {
         }
       >
         <div className="toolbar">
-          <Field label="action">
+          <Field label="动作">
             <Input
               className="mono"
               placeholder="如 message.sent"
@@ -419,12 +419,12 @@ export default function SettingsPage(): JSX.Element {
               style={{ width: 200 }}
             />
           </Field>
-          <Field label="outcome">
+          <Field label="结果">
             <Select value={outcomeFilter} onChange={(event) => setOutcomeFilter(event.target.value)}>
               <option value="">全部</option>
-              <option value="ok">ok</option>
-              <option value="skipped">skipped</option>
-              <option value="failed">failed</option>
+              <option value="ok">成功</option>
+              <option value="skipped">已跳过</option>
+              <option value="failed">失败</option>
             </Select>
           </Field>
           <Button
@@ -499,7 +499,7 @@ export default function SettingsPage(): JSX.Element {
 
       <ConfirmModal
         open={clearConfirm}
-        title="清除飞书 app_secret"
+        title="清除飞书应用密钥"
         tone="danger"
         confirmLabel="清除"
         onCancel={() => setClearConfirm(false)}
@@ -509,7 +509,7 @@ export default function SettingsPage(): JSX.Element {
           setClearConfirm(false);
           toast.warn('已标记为清除，点击「保存设置」后生效');
         }}
-        message={<>保存后服务端将删除已加密存储的 app_secret（提交空串）。在重新配置前，消息发送会失败。</>}
+        message={<>保存后服务端将删除已加密存储的应用密钥。在重新配置前，消息发送会失败。</>}
       />
 
       <Modal open={auditDetail !== null} title={`审计详情 · ${auditDetail?.action ?? ''}`} onClose={() => setAuditDetail(null)} wide>

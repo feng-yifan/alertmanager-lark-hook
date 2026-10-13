@@ -434,8 +434,8 @@ function CardTemplateForm(): JSX.Element {
         <Switch
           checked={isDefault}
           onChange={setIsDefault}
-          label="is_default · 设为默认模板"
-          hint="全局至多一个 is_default = true（domain-model §4）"
+          label="设为默认模板"
+          hint="全局至多一个默认模板"
         />
       </Card>
 
@@ -465,8 +465,8 @@ function CardTemplateForm(): JSX.Element {
         >
           {source === 'builder_template' ? (
             <Banner tone="warn">
-              该模板使用的是<strong>已停用</strong>的来源 <code>builder_template</code>
-              （引用飞书搭建工具模板）。本地没有卡片 JSON 就无法可视化编辑、也无法预览；
+              该模板使用的是<strong>已停用</strong>的来源「引用飞书搭建工具模板」。
+              本地没有卡片 JSON 就无法可视化编辑、也无法预览；
               请点「转换为本地卡片」——本地 JSON 卡片同样支持变量、原地更新与撤回。
               <div className="row mt-8">
                 <Button variant="primary" onClick={convertLegacyCard} disabled={!defaults}>
@@ -499,8 +499,8 @@ function CardTemplateForm(): JSX.Element {
           {source === 'builder_json' && view === 'json' ? (
             <>
               <Field
-                label="card_json（CardKit JSON 2.0）"
-                hint={'失焦时校验 JSON 语法；schema 必须为 "2.0"，组件数 ≤ 200，体积 ≤ 30KB（business-rules §6）'}
+                label="卡片 JSON（CardKit JSON 2.0）"
+                hint={'失焦时校验 JSON 语法；schema 必须为 "2.0"，组件数 ≤ 200，体积 ≤ 30KB'}
                 error={cardTextError}
               >
                 <Textarea
@@ -522,7 +522,7 @@ function CardTemplateForm(): JSX.Element {
 
               <Field
                 label="粘贴卡片 JSON"
-                hint="支持原始卡片 JSON，或包含 card_json / cardJson / card 字段的包装对象，也容忍 ```json 代码块（兼容搭建工具导出的卡）"
+                hint="支持原始卡片 JSON，也支持搭建工具导出的完整 JSON（会自动取其中的卡片部分）"
                 error={importError}
               >
                 <Textarea
@@ -554,10 +554,10 @@ function CardTemplateForm(): JSX.Element {
       <Card title="变量" subtitle="点击变量会把 ${name} 插入到最后一次聚焦的文本字段">
         <div className="callout info mb-16">
           支持 <code>{'${a.b.c}'}</code> 点号取值与 <code>{'${label:foo}'}</code> /{' '}
-          <code>{'${annotation:bar}'}</code> 显式取值；未知变量渲染为空串并在 validate 的 warnings 中返回（business-rules §5）。
+          <code>{'${annotation:bar}'}</code> 显式取值；未知变量渲染为空串，并在校验结果的警告里列出。
         </div>
 
-        <h3 className="mb-8">内置变量（GET /api/v1/meta）</h3>
+        <h3 className="mb-8">内置变量</h3>
         <div className="row tight mb-16">
           {(meta.variables ?? []).map((variable) => (
             <button
@@ -633,17 +633,17 @@ function CardTemplateForm(): JSX.Element {
 
       <Card title="校验与预览">
         <div className="form-inline mb-16">
-          <Field label="样例（sample）">
+          <Field label="样例">
             <RadioGroup<'firing' | 'resolved'>
               value={sample}
               options={[
-                { value: 'firing', label: 'firing（未解决）' },
-                { value: 'resolved', label: 'resolved（已恢复）' },
+                { value: 'firing', label: '未解决' },
+                { value: 'resolved', label: '已恢复' },
               ]}
               onChange={setSample}
             />
           </Field>
-          <Field label="预览用渠道（channel_id，可选）">
+          <Field label="预览用渠道（可选）">
             <Select value={previewChannelId} onChange={(event) => setPreviewChannelId(event.target.value)} style={{ width: 240 }}>
               <option value="">（不指定）</option>
               {channels.map((channel) => (
@@ -705,17 +705,17 @@ function CardTemplateForm(): JSX.Element {
           </>
         ) : (
           <p className="faint small mb-0">
-            预览会调用 POST /card-templates/preview，用 mock 基线 + 覆盖项渲染模板。
+            预览会拿模拟数据（含覆盖项）渲染模板。
           </p>
         )}
       </Card>
 
       <Card
         title="发送测试"
-        subtitle="草稿测试走 POST /card-templates/send-test（不落库）；已保存模板走 POST /card-templates/:id/send-test。两者都会产生投递记录。"
+        subtitle="草稿测试不落库；已保存的模板则用存储的内容发送。两者都会产生投递记录。"
       >
         <div className="form-inline">
-          <Field label="渠道（channel_id）" required>
+          <Field label="渠道" required>
             <Select value={testChannelId} onChange={(event) => setTestChannelId(event.target.value)} style={{ width: 260 }}>
               <option value="">（请选择渠道）</option>
               {channels.map((channel) => (
@@ -725,12 +725,12 @@ function CardTemplateForm(): JSX.Element {
               ))}
             </Select>
           </Field>
-          <Field label="样例（sample）" hint="选择历史分组时由该分组状态决定">
+          <Field label="样例" hint="选择历史分组时由该分组状态决定">
             <RadioGroup<'firing' | 'resolved'>
               value={sample}
               options={[
-                { value: 'firing', label: 'firing' },
-                { value: 'resolved', label: 'resolved' },
+                { value: 'firing', label: '未解决' },
+                { value: 'resolved', label: '已恢复' },
               ]}
               onChange={setSample}
             />
@@ -772,7 +772,7 @@ function CardTemplateForm(): JSX.Element {
           ) : null}
         </div>
         <p className="faint small mt-8 mb-0">
-          草稿测试使用当前编辑器里的内容（含 mock 覆盖），无需先保存；投递记录里 <code>kind=test</code>。
+          草稿测试使用当前编辑器里的内容（含模拟值覆盖），无需先保存；投递记录里会标记为测试消息。
         </p>
         {testResult ? (
           <div className="mt-16">

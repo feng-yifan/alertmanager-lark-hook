@@ -24,10 +24,9 @@ import {
 import { useAsync } from '../../hooks';
 import {
   DECISION_TABLE,
+  FILTER_NOTE,
   MATCH_OP_LABEL,
-  R11_FILTER_NOTE,
-  R4_CARD_MESSAGE_CAVEAT,
-  R5_MUTE_NOTE,
+  MUTE_NOTE,
 } from '../../labels';
 import { enumOptions, useMeta } from '../../meta';
 import { useToast } from '../../toast';
@@ -145,15 +144,15 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
 
     const aggregation = Number(value.aggregation_window_secs);
     if (!Number.isInteger(aggregation) || aggregation < 0 || aggregation > 3600) {
-      result.aggregation = '聚合窗口需为 0–3600 的整数秒（business-rules §6）';
+      result.aggregation = '聚合窗口需为 0–3600 的整数秒';
     }
     const minInterval = Number(value.min_send_interval_secs);
     if (!Number.isInteger(minInterval) || minInterval < 0 || minInterval > 3600) {
-      result.minInterval = '最小发送间隔需为 0–3600 的整数秒（business-rules §6）';
+      result.minInterval = '最小发送间隔需为 0–3600 的整数秒';
     }
     const maxAlerts = Number(value.max_alerts_per_message);
     if (!Number.isInteger(maxAlerts) || maxAlerts < 1 || maxAlerts > 200) {
-      result.maxAlerts = '告警上限需为 1–200 的整数（business-rules §6）';
+      result.maxAlerts = '告警上限需为 1–200 的整数';
     }
     value.label_matchers.forEach((matcher, index) => {
       if (!matcher.name.trim()) {
@@ -250,18 +249,18 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
       ) : null}
 
       <Card
-        title="消息类型与卡片模板"
+        title="卡片模板"
         actions={policy ? <span className="faint small">策略更新于 {formatDateTime(policy.updated_at)}</span> : null}
       >
         <Field
-          label="card_template_id"
-          hint="留空时运行时使用内置默认模板（R12 fallback=default_template）；保存时会校验引用的模板存在"
+          label="卡片模板"
+          hint="留空时使用内置默认卡片模板；保存时会校验引用的模板存在"
         >
           <Select
             value={draft.card_template_id}
             onChange={(event) => setDraft((current) => ({ ...current, card_template_id: event.target.value }))}
           >
-            <option value="">（无 · 使用内置默认模板）</option>
+            <option value="">（无 · 使用内置默认卡片模板）</option>
             {templateOptions.map((option) => (
               <option key={option.value} value={option.value}>
                 {option.label}
@@ -272,31 +271,29 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
 
         {selectedTemplateMissing ? (
           <Banner tone="warn">
-            策略引用的模板 {shortId(draft.card_template_id)} 不在当前模板列表中（可能已被删除，R12 禁止保存失效引用）。
-            运行时若模板失效会回退到内置默认模板；请重新选择一个模板后再保存。
+            策略引用的模板 {shortId(draft.card_template_id)} 不在当前模板列表中（可能已被删除）。
+            保存前请重新选择；运行时若模板失效会回退到内置默认卡片。
           </Banner>
         ) : null}
-
-        <div className="callout mt-8">{R4_CARD_MESSAGE_CAVEAT}</div>
       </Card>
 
-      <Card title="投递策略" subtitle="对应 docs/business-rules.md §4 决策表">
+      <Card title="投递策略" subtitle="这三项决定什么情况下发新消息、原地更新旧卡片或撤回旧消息">
         <div className="grid-3">
-          <Field label="repeat_policy" hint="Repeated（重复通知）事件">
+          <Field label="重复告警" hint="同一分组再次收到重复通知时">
             <RadioGroup<RepeatPolicy>
               value={draft.repeat_policy}
               options={toRadio<RepeatPolicy>(meta.repeat_policies)}
               onChange={(next) => setDraft((current) => ({ ...current, repeat_policy: next }))}
             />
           </Field>
-          <Field label="resolved_policy" hint="Resolved（全部恢复）事件">
+          <Field label="恢复通知" hint="分组内全部告警恢复时">
             <RadioGroup<ResolvedPolicy>
               value={draft.resolved_policy}
               options={toRadio<ResolvedPolicy>(meta.resolved_policies)}
               onChange={(next) => setDraft((current) => ({ ...current, resolved_policy: next }))}
             />
           </Field>
-          <Field label="group_update_policy" hint="Updated（分组内容变化）事件">
+          <Field label="内容变化" hint="分组内新增告警或部分恢复时">
             <RadioGroup<GroupUpdatePolicy>
               value={draft.group_update_policy}
               options={toRadio<GroupUpdatePolicy>(meta.group_update_policies)}
@@ -319,11 +316,8 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
               {DECISION_TABLE.map((row, index) => (
                 <tr key={`${row.event}-${row.value}-${index}`}>
                   <td className="nowrap">{row.event}</td>
-                  <td className="mono">{row.field}</td>
-                  <td className="nowrap">
-                    {row.valueLabel}
-                    {row.field !== '—' ? <span className="faint small mono"> {row.value}</span> : null}
-                  </td>
+                  <td className="nowrap">{row.field}</td>
+                  <td className="nowrap">{row.valueLabel}</td>
                   <td>{row.action}</td>
                 </tr>
               ))}
@@ -332,8 +326,8 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
         </div>
       </Card>
 
-      <Card title="标签过滤（label_matchers）">
-        <div className="callout info mb-16">{R11_FILTER_NOTE}</div>
+      <Card title="标签过滤">
+        <div className="callout info mb-16">{FILTER_NOTE}</div>
         {draft.label_matchers.length === 0 ? (
           <p className="faint small">未配置匹配条件 —— 全部告警通过。</p>
         ) : (
@@ -404,8 +398,8 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
       <Card title="聚合、限流与静默">
         <div className="form-grid">
           <Field
-            label="aggregation_window_secs"
-            hint="R6：>0 时同一 (hook, group_key) 在窗口内的事件合并为一次决策，取最后一个事件的状态与并集告警集；窗口内无新事件时冲刷。0 = 关闭"
+            label="聚合窗口（秒）"
+            hint="大于 0 时，同一 Hook 与分组的多次事件在窗口内合并为一次决策，取最后一个事件的状态与告警并集；窗口内无新事件时发送。0 = 关闭"
             error={errors.aggregation}
           >
             <Input
@@ -417,8 +411,8 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
             />
           </Field>
           <Field
-            label="min_send_interval_secs"
-            hint="R7：同一渠道两次发送的最小间隔；未满足时动作延迟到窗口末端合并执行（不丢弃）。0 = 关闭"
+            label="最小发送间隔（秒）"
+            hint="同一渠道两次发送的最小间隔；未满足时动作延迟到窗口末端合并执行（不丢弃）。0 = 关闭"
             error={errors.minInterval}
           >
             <Input
@@ -429,7 +423,7 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
               onChange={(event) => setDraft((current) => ({ ...current, min_send_interval_secs: event.target.value }))}
             />
           </Field>
-          <Field label="max_alerts_per_message" hint="R8：超出的告警折叠为「+N more」；AlertManager 侧已截断时提示总数为下界" error={errors.maxAlerts}>
+          <Field label="单条消息告警上限" hint="超出的告警折叠为「+N more」；AlertManager 侧已截断时提示总数为下界" error={errors.maxAlerts}>
             <Input
               type="number"
               min={1}
@@ -438,7 +432,7 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
               onChange={(event) => setDraft((current) => ({ ...current, max_alerts_per_message: event.target.value }))}
             />
           </Field>
-          <Field label="mute_until" hint={R5_MUTE_NOTE}>
+          <Field label="静默至" hint={MUTE_NOTE}>
             <div className="row tight">
               <Input
                 type="datetime-local"
@@ -452,7 +446,7 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
             </div>
             <div className="hint">
               {draft.mute_until
-                ? `静默至本地时间 ${draft.mute_until.replace('T', ' ')}（提交为 RFC 3339 UTC）`
+                ? `静默至本地时间 ${draft.mute_until.replace('T', ' ')}（按 UTC 提交）`
                 : '当前无静默'}
             </div>
           </Field>

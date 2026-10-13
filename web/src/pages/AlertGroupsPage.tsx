@@ -85,7 +85,7 @@ export default function AlertGroupsPage(): JSX.Element {
     <>
       <PageHeader
         title="告警分组"
-        subtitle="AlertGroup 以 (hook_id, group_key) 唯一，按 last_seen_at 倒序"
+        subtitle="按 Hook 与分组键唯一，最近出现时间倒序"
         actions={
           <Button onClick={reload} loading={refreshing}>
             刷新
@@ -112,7 +112,7 @@ export default function AlertGroupsPage(): JSX.Element {
               ))}
             </Select>
           </Field>
-          <Field label="severity">
+          <Field label="严重级别">
             <Input
               placeholder="如 critical"
               value={severityInput}
@@ -233,7 +233,7 @@ export default function AlertGroupsPage(): JSX.Element {
         message={
           <>
             将删除分组「{deleteTarget?.alertname ?? deleteTarget?.group_key}」及其投递记录。
-            <strong>不会影响已经发出的飞书消息</strong>（docs/api.md §6）。
+            <strong>不会影响已经发出的飞书消息</strong>。
           </>
         }
       />
