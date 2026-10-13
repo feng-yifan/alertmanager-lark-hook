@@ -1,4 +1,4 @@
-name: CI
+name: QA
 
 on:
   push:
@@ -7,15 +7,19 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: qa-${{ github.ref }}
   cancel-in-progress: true
+
+env:
+  # 与 release.yml 共用同一份 buildx 缓存，tag 发布时的镜像构建可以直接命中 PR / main 的层
+  CACHE_SCOPE: alkh
 
 jobs:
   rust:
     name: Rust（fmt / clippy / test）
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
@@ -40,7 +44,7 @@ jobs:
     name: MSRV（Cargo.toml 声明的下限）
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 用 Cargo.toml 声明的 rust-version 构建一次。
       # 目的：`deploy/Dockerfile` 的基础镜像版本与锁定依赖要求的 MSRV 一旦脱节，
@@ -70,15 +74,15 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 安装 pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11
 
       - name: 安装 Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -92,3 +96,26 @@ jobs:
 
       - name: 构建
         run: pnpm build
+
+  # 只构建、不推送。真正推送镜像只发生在 tag 上（release.yml），但 Dockerfile /
+  # 桩代码预热这类「只有构建时才暴露」的问题必须在 PR 阶段就拦下来。
+  # 2026-10-13 那次 Publish image 失败就是这个缺口导致的：此前没有任何 job
+  # 真正执行过 deploy/Dockerfile。
+  docker:
+    name: 镜像可构建性（构建不推送）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 准备 Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 构建镜像（不推送）
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=${{ env.CACHE_SCOPE }}
+          cache-to: type=gha,mode=max,scope=${{ env.CACHE_SCOPE }}

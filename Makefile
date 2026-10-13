@@ -1,11 +1,13 @@
 SHELL := /bin/bash
 CARGO ?= cargo
 PNPM  ?= pnpm
-IMAGE ?= ghcr.io/fengyifan/alertmanager-lark-hook:latest
+# 本地构建产物用的镜像标签。正式镜像由 tag 触发的发布流水线推到 ghcr、并在 Release
+# 里给出可离线加载的归档，和这里无关。要换名字：make docker IMAGE=foo:bar
+IMAGE ?= alertmanager-lark-hook:dev
 WEB_DIST := crates/alkh-server/web-dist
 
 .DEFAULT_GOAL := help
-.PHONY: help icons web build release test lint fmt run dev docker compose up down clean check
+.PHONY: help icons web build release test lint fmt run dev docker clean check
 
 help: ## 显示可用目标
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -46,14 +48,8 @@ run: ## 本地运行（使用 web/dist 作为静态目录，免重新编译）
 dev: ## 只启动后端 API（前端用 pnpm dev，通过 Vite 代理访问）
 	ALKH_DATA_DIR=./data $(CARGO) run --bin alkh
 
-docker: ## 构建容器镜像
+docker: ## 构建容器镜像（本地标签，默认 alertmanager-lark-hook:dev）
 	docker build -f deploy/Dockerfile -t $(IMAGE) .
-
-up: ## docker compose 启动
-	docker compose up -d --build
-
-down: ## docker compose 停止
-	docker compose down
 
 clean: ## 清理构建产物
 	$(CARGO) clean

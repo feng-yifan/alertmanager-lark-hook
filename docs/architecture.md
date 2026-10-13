@@ -88,7 +88,6 @@
 ```
 deploy/
   Dockerfile            # 多阶段：node 构建前端 → rust 构建后端 → distroless/debian-slim 运行
-  docker-compose.yml    # alkh + 可选 alertmanager 演示 + 数据卷
 ```
 
 - 单容器暴露 `8080`；`/` 为管理后台，`/api/v1/**` 为 REST，`/api/v1/hooks/alertmanager/**` 为接收端点。

@@ -12,6 +12,7 @@
 - [前端](#前端)
 - [图标生成](#图标生成)
 - [容器构建](#容器构建)
+- [QA 与发布](#qa-与发布)
 - [契约维护（重要）](#契约维护重要)
 - [架构约束](#架构约束)
 
@@ -74,8 +75,7 @@ cd web && pnpm dev
 | `make test` | 全部 Rust 测试 |
 | `make lint` | Clippy（`-D warnings`） |
 | `make fmt` | rustfmt |
-| `make docker` | 构建容器镜像 |
-| `make up` / `make down` | docker compose 启停 |
+| `make docker` | 构建容器镜像（本地标签 `alertmanager-lark-hook:dev`） |
 
 ## 构建
 
@@ -140,56 +140,95 @@ make icons      # = python3 scripts/make-icons.py
 ## 容器构建
 
 ```bash
-make docker                                   # 等价于 docker build -f deploy/Dockerfile -t alertmanager-lark-hook .
-docker compose up -d --build
+make docker            # = docker build -f deploy/Dockerfile -t alertmanager-lark-hook:dev .
+cp .env.example .env   # 至少填 ALKH_MASTER_KEY / ALKH_PUBLIC_BASE_URL / ALKH_ADMIN_PASSWORD
+docker run --rm -p 8080:8080 -v alkh-data:/data --env-file .env alertmanager-lark-hook:dev
 ```
 
 `deploy/Dockerfile` 是三阶段构建：
 
 1. `node:22-alpine` 构建前端；
-2. `rust:1.85-bookworm` 用桩代码预热依赖缓存，再复制真实源码构建（依赖层可命中缓存）；
+2. `rust:1.89-bookworm` 用桩代码预热依赖缓存，再复制真实源码构建（依赖层可命中缓存）；
 3. `debian:bookworm-slim` 运行，非 root 用户、`/data` 卷、内置 `--healthcheck`。
 
-## 发布与 CI
+⚠️ 第 2 阶段的桩代码必须**为每个 crate 建出清单里声明的全部 target**：`alkh-server`
+同时声明了 `[[bin]]` 和 `[lib]`，只建 `main.rs` 会让 `cargo build --bin alkh` 因为
+连带的 lib target 找不到 `src/lib.rs` 而直接失败。**新增 crate 或新增 target 时记得同步
+`deploy/Dockerfile` 的 `RUN mkdir …` 那一段**——`qa.yml` 的 `docker` job 会在 PR 阶段发现这类问题。
 
-### 持续集成
+## QA 与发布
 
-`.github/workflows/ci.yml` 在所有 push 到 main 与 PR 上运行两个 job：
+### QA（提交阶段的检查）
+
+`.github/workflows/qa.yml` 在 push 到 main 与 PR 上运行四个 job：
 
 | job | 内容 |
 |---|---|
 | `rust` | `cargo fmt --check` → `cargo clippy -D warnings` → `cargo test --workspace` |
+| `msrv` | 用 `Cargo.toml` 声明的 `rust-version` 再跑一次 `cargo check`，避免 Dockerfile 基础镜像与依赖 MSRV 漂移 |
 | `web` | `pnpm install --frozen-lockfile` → `tsc --noEmit` → `pnpm build` |
+| `docker` | 用 `deploy/Dockerfile` **构建镜像但不推送** |
 
-端到端测试自带 Fake 飞书网关，**不需要任何真实凭据或外部服务**，因此在 CI 里可以直接跑通。
+`docker` job 只构建、不推送（推送镜像只发生在 tag 上），存在的意义是把「只有真正执行
+Dockerfile 才会暴露」的问题拦在 PR 阶段。它与发布流水线共用 buildx 缓存
+（两边都是 `CACHE_SCOPE=alkh`），所以 tag 发布时能直接命中这里编译好的依赖层。
 
-### 发布镜像
+端到端测试自带 Fake 飞书网关，**不需要任何真实凭据或外部服务**，因此在 `qa.yml` 里可以直接跑通。
 
-`.github/workflows/publish.yml` 把镜像推到 GitHub Container Registry：
+### 发布（只由 tag 触发）
+
+`.github/workflows/release.yml` **只在推送 tag 时运行**，一条流水线跑完
+「发布前校验 → 构建并推送镜像 → 生成 changelog → 创建 GitHub Release」：
 
 ```bash
-git tag v0.1.0
+git tag -a v0.1.0 -m "v0.1.0"
 git push origin v0.1.0
 ```
 
-产出 `ghcr.io/fengyifan/alertmanager-lark-hook` 的以下标签：
+推 main 不再产出镜像，日常提交交给上面的 `qa.yml`（其中 `docker` job 保证镜像仍然可构建）。
 
-| 标签 | 触发 |
+一次发布产出：
+
+| 产出 | 说明 |
 |---|---|
-| `0.1.0` / `0.1` / `0` | 推送 `v0.1.0` tag |
-| `main` / `latest` | 推送 main 分支 |
-| `sha-xxxxxxx` | 每次构建 |
+| ghcr 镜像 | `ghcr.io/fengyifan/alertmanager-lark-hook`，标签为 `0.1.0` / `0.1` / `0` / `sha-xxxxxxx`，非预发布版本额外带 `latest` |
+| Release 正文 | 自动生成的 changelog + 镜像拉取命令 / digest / 平台 / 附件校验和 |
+| 离线镜像包 | `alertmanager-lark-hook-0.1.0-linux-amd64.docker.tar.gz`，`docker load -i` 后即可 `docker run`，供内网 / 离线环境使用 |
+| 校验和 | `sha256sums.txt` |
 
-用内置的 `GITHUB_TOKEN` 推送（`permissions: packages: write`），不需要额外配置 secret。
+镜像的 provenance 与 SBOM 会随镜像一起推到 registry（`provenance: true` / `sbom: true`），
+可用 `gh attestation verify` 或 cosign 校验。
 
-默认只构建 `linux/amd64`。需要 `linux/arm64`（树莓派 / Apple Silicon 节点）时，
-在 workflow 里加上 `docker/setup-qemu-action` 并把 `platforms` 改成 `linux/amd64,linux/arm64`
-—— 注意 Dockerfile 内的 Rust 编译在 QEMU 模拟下会慢约一个数量级。
+Release 正文由 `scripts/release-notes.sh` 生成，它只读 git 历史与传入的文件、不访问网络，
+可以在本地原样试跑（需要 bash 4+，用到了关联数组）：
+
+```bash
+scripts/release-notes.sh --tag v0.1.0 --repo fengyifan/alertmanager-lark-hook \
+  --image ghcr.io/fengyifan/alertmanager-lark-hook --digest sha256:deadbeef \
+  --platforms linux/amd64 --asset dist/demo.tar.gz
+```
+
+changelog 按 **Conventional Commits** 分组（`feat` / `fix` / `perf` / `refactor` / `docs` /
+`test` / `build` / `ci`），带 `!` 或在正文里写 `BREAKING CHANGE` 的提交单独列进「破坏性变更」。
+**因此提交信息请保持 `type(scope): 描述` 的格式**，否则只会落进「其他改动」这一栏。
+
+其他约定：
+
+- **失败重跑**：`Release` workflow 支持 `workflow_dispatch`（填一个已存在的 tag），
+  会重新构建并覆盖同名附件，不需要删 tag 重打。
+- **发布前校验**：`verify` job（`cargo fmt --check` + `cargo test --workspace`）先跑，
+  通过后才构建，避免把没测过的提交发出去。
+- **镜像可见性**：ghcr 包首次推送后需在 `Packages → alertmanager-lark-hook → Package settings`
+  里把可见性改成 Public，未登录的 `docker pull` 才能拉取；离线镜像包不受影响。
+- 推送镜像与创建 Release 都用内置 `GITHUB_TOKEN`（`packages: write` / `contents: write`），
+  不需要额外配置 secret。
+- 默认只构建 `linux/amd64`；要出 `linux/arm64` 的改法写在 `release.yml` 文件末尾的注释里
+  （注意 Dockerfile 内的 Rust 编译在 QEMU 模拟下会慢约一个数量级）。
 
 ### 本地构建镜像
 
 ```bash
-make docker        # 等价于 docker build -f deploy/Dockerfile -t ghcr.io/fengyifan/alertmanager-lark-hook:latest .
+make docker        # = docker build -f deploy/Dockerfile -t alertmanager-lark-hook:dev .
 ```
 
 `.dockerignore` 排除了 `target/`、`web/node_modules`、`web/dist`、`docs/` 等与构建无关的内容

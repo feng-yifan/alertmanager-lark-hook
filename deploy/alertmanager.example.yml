@@ -5,7 +5,10 @@
 #   2. 在该渠道的「接收 Hook」标签页创建一个 Hook，复制一次性显示的完整 URL
 #   3. 把下面的 <HOOK_TOKEN> 替换为 URL 中的 token（或整段替换 url）
 #
-# 位置：本文件按 docker compose 的 demo profile 挂载到容器内 /etc/alertmanager/alertmanager.yml
+# 位置：挂载到 AlertManager 容器的 /etc/alertmanager/alertmanager.yml
+#       （例如 docker run -v ./deploy/alertmanager.example.yml:/etc/alertmanager/alertmanager.yml prom/alertmanager）
+#       注意下面的 url 必须写成 **AlertManager 进程能访问到** 的地址：容器里的 localhost
+#       不是宿主机，跨容器请用容器名或宿主机地址
 
 global:
   resolve_timeout: 5m
@@ -35,14 +38,14 @@ route:
 receivers:
   - name: lark-ops
     webhook_configs:
-      - url: http://alkh:8080/api/v1/hooks/alertmanager/<HOOK_TOKEN>
+      - url: http://<ALKH 地址>:8080/api/v1/hooks/alertmanager/<HOOK_TOKEN>
         send_resolved: true # 必须为 true，否则本服务收不到「解决告警」
         max_alerts: 50 # 超出部分由 AlertManager 截断，payload 里体现为 truncatedAlerts
         timeout: 10s
 
   - name: lark-critical
     webhook_configs:
-      - url: http://alkh:8080/api/v1/hooks/alertmanager/<CRITICAL_HOOK_TOKEN>
+      - url: http://<ALKH 地址>:8080/api/v1/hooks/alertmanager/<CRITICAL_HOOK_TOKEN>
         send_resolved: true
 
   - name: "null"

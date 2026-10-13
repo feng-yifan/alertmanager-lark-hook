@@ -1,0 +1,224 @@
+name: Release
+
+# 触发方式：**只有推送 tag**（形如 v0.1.0）才会构建镜像并创建 GitHub Release。
+#
+#   git tag -a v0.1.0 -m "v0.1.0"
+#   git push origin v0.1.0
+#
+# 推 main / 开 PR 都不再产出镜像：日常提交由 qa.yml 负责校验（其中 docker job
+# 会构建一次镜像但不推送，用来提前发现 Dockerfile 这类只在构建时才暴露的问题）。
+#
+# workflow_dispatch 是给「发布失败后重跑」用的：不会重新打 tag，也不会改镜像内容，
+# 只针对已存在的 tag 重跑一遍构建与 Release 写入（幂等：已存在则更新 Release 与附件）。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "已存在的 tag（例如 v0.1.0），用于重跑某次发布"
+        required: true
+        type: string
+
+# 发布不能被打断：同一 tag 的重复触发排队执行而不是互相取消
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write # 创建 / 更新 Release、上传附件
+  packages: write # 推送到 ghcr.io
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  # 只构建 amd64。要同时出 arm64（树莓派 / Apple Silicon 节点）见文件末尾说明。
+  PLATFORMS: linux/amd64
+  # QA 与 Release 共用同一份 buildx 缓存，tag 构建不必从零开始
+  CACHE_SCOPE: alkh
+
+jobs:
+  # tag 有可能打在任意提交上，先验证再发布。注意这不是重复劳动：
+  # qa.yml 只覆盖 main 与 PR，而发布产物一旦生成就无法「撤回」。
+  verify:
+    name: 发布前校验（fmt / test）
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # 只读代码，不需要写权限
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: 缓存 cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: 测试
+        run: cargo test --workspace
+
+  release:
+    name: 构建镜像并创建 Release
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # 手动重跑时 checkout 的是 main，必须显式切到 tag 对应的提交
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
+          # changelog 要靠完整历史 + 上一个 tag，浅克隆不行
+          fetch-depth: 0
+
+      - name: 解析 tag 与版本
+        id: ver
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-${GITHUB_REF_NAME}}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::tag 必须是 vX.Y.Z 形式，实际为：$tag"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+          # 提醒而非阻塞：Cargo.toml 里的版本号与 tag 不一致（二进制内的版本串、镜像
+          # label 都取自这里，长期漂移会让人分不清线上跑的是哪个 tag）
+          declared=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$declared" != "${tag#v}" ]; then
+            echo "::warning::Cargo.toml 声明的版本是 $declared，与 tag $tag 不一致"
+          fi
+
+      - name: 准备 Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 ghcr
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 计算镜像标签与 labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          # 非预发布 tag（v1.2.3）自动附上 latest；v1.2.3-rc.1 这类不会
+          flavor: |
+            latest=auto
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,prefix=sha-
+
+      - name: 构建并推送镜像
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 把构建来源与依赖清单一起推到 registry，可被 cosign / gh attestation 验证
+          provenance: true
+          sbom: true
+          cache-from: type=gha,scope=${{ env.CACHE_SCOPE }}
+          cache-to: type=gha,mode=max,scope=${{ env.CACHE_SCOPE }}
+
+      # 镜像本身无法作为 GitHub Release 附件上传，但可以导出成 docker save 的可加载
+      # 归档，让「离线 / 内网」用户直接从 Release 页面下载部署。
+      - name: 导出离线镜像包
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          name="${GITHUB_REPOSITORY#*/}"
+          file="dist/${name}-${VERSION}-linux-amd64.docker.tar.gz"
+
+          # 拉回刚刚推送的那个 digest，保证附件与 registry 上的镜像逐字节一致
+          docker pull --platform linux/amd64 "${IMAGE}@${DIGEST}"
+          docker tag "${IMAGE}@${DIGEST}" "${IMAGE}:${VERSION}"
+          docker save "${IMAGE}:${VERSION}" | gzip -9 > "$file"
+
+          # 校验归档完整，并且确实是 docker save 的产物（manifest.json 为经典镜像
+          # 存储格式，index.json 是 containerd 镜像存储格式）
+          gzip -t "$file"
+          listing=$(tar -tzf "$file")
+          printf '%s\n' "$listing" | grep -qx 'manifest.json' \
+            || printf '%s\n' "$listing" | grep -qx 'index.json' \
+            || { echo "::error::$file 不是合法的 docker save 归档"; exit 1; }
+
+          ls -lh dist
+
+      - name: 生成校验和
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum ./*.tar.gz > sha256sums.txt)
+          cat dist/sha256sums.txt
+
+      - name: 生成发布说明
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          args=(
+            --tag "$TAG"
+            --repo "$GITHUB_REPOSITORY"
+            --image "$IMAGE"
+            --platforms "$PLATFORMS"
+            --out dist/release-notes.md
+          )
+          if [ -n "$DIGEST" ]; then args+=(--digest "$DIGEST"); fi
+          for asset in dist/*.tar.gz dist/sha256sums.txt; do
+            args+=(--asset "$asset")
+          done
+          ./scripts/release-notes.sh "${args[@]}"
+          cat dist/release-notes.md
+
+      - name: 创建或更新 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          assets=(dist/*.tar.gz dist/sha256sums.txt)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # 重跑场景：更新说明并覆盖同名的旧附件
+            gh release edit "$TAG" --title "$TAG" --notes-file dist/release-notes.md
+            gh release upload "$TAG" "${assets[@]}" --clobber
+          else
+            extra=()
+            case "$TAG" in *-*) extra+=(--prerelease) ;; esac
+            gh release create "$TAG" "${assets[@]}" \
+              --title "$TAG" \
+              --notes-file dist/release-notes.md \
+              --verify-tag \
+              "${extra[@]}"
+          fi
+
+      - name: 写入 Actions 摘要
+        run: cat dist/release-notes.md >> "$GITHUB_STEP_SUMMARY"
+
+# ---------------------------------------------------------------------------
+# 想同时发布 linux/arm64：
+#   1. 在 release 与 ci 的 docker job 里、docker/setup-buildx-action 之后加
+#        - uses: docker/setup-qemu-action@v4
+#   2. 把 env.PLATFORMS 改成 linux/amd64,linux/arm64
+# 注意 Dockerfile 里的 Rust 编译在 QEMU 模拟下会慢一个数量级（约 20–40 分钟），
+# 而离线镜像包始终只包含 amd64 变体（见「导出离线镜像包」步骤）。
+# ---------------------------------------------------------------------------

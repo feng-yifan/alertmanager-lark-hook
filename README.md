@@ -89,26 +89,34 @@ Prometheus ──▶ AlertManager ──webhook──▶ alertmanager-lark-hook 
 
 ### 2.2 部署方式
 
-**方式一：Docker Compose（单机，最省事）**
+**方式一：使用已发布的镜像（推荐）**
+
+每次推送 tag 都会发布到 GitHub Container Registry，并在 [Releases](https://github.com/fengyifan/alertmanager-lark-hook/releases) 页面上生成 changelog、镜像 digest 与可离线加载的镜像包。
 
 ```bash
 git clone https://github.com/fengyifan/alertmanager-lark-hook.git && cd alertmanager-lark-hook
 cp .env.example .env
 
-# 生成主密钥，填进 .env 的 ALKH_MASTER_KEY
+# 生成主密钥，填进 .env 的 ALKH_MASTER_KEY；顺便把 ALKH_PUBLIC_BASE_URL 改成你的对外地址、
+# 设置 ALKH_ADMIN_PASSWORD
 openssl rand -hex 32
 
-docker compose up -d --build
+# 把 0.1.0 换成 Releases 页面上的实际版本号
+docker run -d --name alkh --restart unless-stopped \
+  -p 8080:8080 -v alkh-data:/data \
+  --env-file .env \
+  ghcr.io/fengyifan/alertmanager-lark-hook:0.1.0
 # 打开 http://<机器地址>:8080
 ```
 
-首次构建约 3–5 分钟。
+`.env.example` 里全是**容器运行时**读取的变量（清单见 [§2.3](#23-环境变量)）；端口映射与数据卷是部署参数，写在 `docker run` 里，不放进 `.env`。
 
-想顺带起一个演示用的 AlertManager：
+`latest` 指向最新的**非预发布**版本；生产环境建议固定到 `0.1.0` 这类具体版本。当前只发布 `linux/amd64`。
+
+内网 / 离线环境用 Release 附件里的镜像包：
 
 ```bash
-docker compose --profile demo up -d
-# AlertManager: http://<机器地址>:9093
+docker load -i alertmanager-lark-hook-0.1.0-linux-amd64.docker.tar.gz
 ```
 
 **方式二：Kubernetes**
