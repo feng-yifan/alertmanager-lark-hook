@@ -83,7 +83,11 @@ impl NotificationSender {
                     .card_message
                     .as_ref()
                     .ok_or_else(|| AppError::internal("卡片消息模板缺少 card_message"))?;
-                let rendered = render_card_message(spec, &ctx)?;
+                let rendered = render_card_message(spec, &ctx).inspect_err(|_| {
+                    self.deps
+                        .metrics
+                        .incr(alkh_domain::ports::Counter::RenderFailure, 1);
+                })?;
                 let digest = rendered.digest();
                 (
                     Some(t.id.clone()),
@@ -115,7 +119,11 @@ impl NotificationSender {
                         let spec = alkh_domain::template::CardMessageSpec::builder_json(
                             crate::defaults::default_card_json(),
                         );
-                        let rendered = render_card_message(&spec, &ctx)?;
+                        let rendered = render_card_message(&spec, &ctx).inspect_err(|_| {
+                            self.deps
+                                .metrics
+                                .incr(alkh_domain::ports::Counter::RenderFailure, 1);
+                        })?;
                         let digest = rendered.digest();
                         (
                             None,
@@ -523,9 +531,17 @@ impl NotificationSender {
             },
         };
         match outcome {
-            Ok(()) => d.mark_recalled(now),
+            Ok(()) => {
+                d.mark_recalled(now);
+                self.deps
+                    .metrics
+                    .incr(alkh_domain::ports::Counter::DeliveryRecalled, 1);
+            }
             Err(err) => {
                 tracing::warn!(delivery_id = %d.id, error = %err, "撤回旧消息失败（R2：不阻塞主流程）");
+                self.deps
+                    .metrics
+                    .incr(alkh_domain::ports::Counter::LarkApiError, 1);
                 d.mark_recall_failed(err.to_string(), now);
             }
         }
@@ -679,6 +695,12 @@ impl NotificationSender {
     /// 记录一次失败；可重试且未耗尽时保持 `Pending` 交给后台任务。
     fn register_failure(&self, delivery: &mut Delivery, err: AppError) {
         let now = self.deps.now();
+        // 飞书侧报错单独计数：这是运维判断「是不是飞书在抖」的第一手信号。
+        if matches!(&err, AppError::Lark(_)) {
+            self.deps
+                .metrics
+                .incr(alkh_domain::ports::Counter::LarkApiError, 1);
+        }
         // 配置类问题（如未填写飞书凭据）在修复后应能自动重试，因此保持 Pending。
         let retryable = matches!(&err, AppError::Lark(l) if l.retryable)
             || matches!(&err, AppError::Internal(_))

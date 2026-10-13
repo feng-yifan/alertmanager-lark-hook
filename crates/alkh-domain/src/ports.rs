@@ -191,6 +191,34 @@ pub fn feed_card_failure(action: &str, failed: &[LarkFailedCard]) -> LarkError {
     LarkError::new(-1, format!("{action}: {detail}"))
 }
 
+/// 需要被观测的事件（指标维度）。
+///
+/// 领域/应用层只声明「这里发生了一件值得计数的事」，不依赖任何具体指标实现 ——
+/// 否则这些计数器就会像 `deliveries_recalled_total` 那样：声明了、导出了，
+/// 却因为 app 层拿不到 metrics 而永远保持 0。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Counter {
+    /// 卡片渲染失败。
+    RenderFailure,
+    /// 飞书开放平台返回错误。
+    LarkApiError,
+    /// 成功撤回（删除）已发出的消息。
+    DeliveryRecalled,
+}
+
+/// 指标出口；由 `alkh-server` 实现为 Prometheus 文本指标。
+pub trait MetricsSink: Send + Sync {
+    fn incr(&self, counter: Counter, by: u64);
+}
+
+/// 空实现：测试与不关心指标的调用方使用。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoMetrics;
+
+impl MetricsSink for NoMetrics {
+    fn incr(&self, _counter: Counter, _by: u64) {}
+}
+
 /// 飞书开放平台网关。
 #[async_trait]
 pub trait LarkGateway: Send + Sync {

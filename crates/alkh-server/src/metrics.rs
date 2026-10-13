@@ -25,6 +25,18 @@ pub struct Metrics {
     pub render_failures_total: AtomicU64,
 }
 
+impl alkh_domain::ports::MetricsSink for Metrics {
+    fn incr(&self, counter: alkh_domain::ports::Counter, by: u64) {
+        use alkh_domain::ports::Counter;
+        let target: &AtomicU64 = match counter {
+            Counter::RenderFailure => &self.render_failures_total,
+            Counter::LarkApiError => &self.lark_api_errors_total,
+            Counter::DeliveryRecalled => &self.deliveries_recalled_total,
+        };
+        Self::add(target, by);
+    }
+}
+
 impl Metrics {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())

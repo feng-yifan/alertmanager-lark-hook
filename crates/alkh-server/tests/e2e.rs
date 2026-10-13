@@ -972,6 +972,81 @@ async fn failed_intake_stays_retryable_instead_of_being_deduped() {
     );
 }
 
+/// 回归：三个「声明了、导出了、却永远为 0」的计数器必须真的有自增点。
+///
+/// 此前 `deliveries_recalled_total` / `lark_api_errors_total` / `render_failures_total`
+/// 只在 `metrics.rs` 里声明并渲染，全仓库没有任何 `inc` —— 运维看到的是恒为 0 的
+/// 假指标，比没有指标更糟（会误判「一切正常」）。
+#[tokio::test]
+async fn previously_dead_counters_are_actually_incremented() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+
+    // ---- 1) 渲染失败 → render_failures_total ----
+    // 卡片内容序列化在 card_message 里，其中 card_json 换成非对象
+    // （绕过保存时的校验，直接用 SQL 造脏数据）
+    let original: String = sqlx::query_scalar(
+        "SELECT card_message FROM card_templates WHERE is_default = 1 AND kind = 'card_message'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE card_templates SET card_message = json_set(card_message, '$.card_json', json('[1,2]')) \
+         WHERE is_default = 1 AND kind = 'card_message'",
+    )
+    .execute(&h.pool)
+    .await
+    .unwrap();
+    let (status, body) = h.push(firing_payload(1)).await;
+    assert!(
+        status.is_client_error() || status.is_server_error(),
+        "渲染失败应报错: {status} {body}"
+    );
+    assert!(
+        metric(&h, "alkh_render_failures_total").await >= 1,
+        "渲染失败必须被计数"
+    );
+    sqlx::query(
+        "UPDATE card_templates SET card_message = ? WHERE is_default = 1 AND kind = 'card_message'",
+    )
+    .bind(&original)
+    .execute(&h.pool)
+    .await
+    .unwrap();
+
+    // ---- 2) 飞书报错 → lark_api_errors_total ----
+    h.fake.inject_send_failure(1, LarkError::CODE_RATE_LIMITED);
+    let mut payload = firing_payload(1);
+    payload["alerts"][0]["fingerprint"] = json!("counter-fp-1");
+    let (_, body) = h.push(payload).await;
+    assert_eq!(body["delivery_state"], "pending", "{body}");
+    assert!(
+        metric(&h, "alkh_lark_api_errors_total").await >= 1,
+        "飞书返回错误必须被计数"
+    );
+
+    // ---- 3) 撤回成功 → deliveries_recalled_total ----
+    // 先造一条真正发出去的投递（飞书已恢复正常）
+    let mut payload = firing_payload(1);
+    payload["alerts"][0]["fingerprint"] = json!("counter-fp-2");
+    let (_, body) = h.push(payload).await;
+    assert_eq!(body["delivery_state"], "active", "{body}");
+    let delivery_id = body["delivery_id"].as_str().unwrap().to_string();
+
+    let (status, body) = h
+        .post(
+            &format!("/api/v1/deliveries/{delivery_id}/revoke"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        metric(&h, "alkh_deliveries_recalled_total").await >= 1,
+        "成功撤回必须被计数"
+    );
+}
+
 /// 数据丢失回归：渲染后超过飞书 30KB 上限的卡片必须被截断，而不是丢掉整条告警。
 ///
 /// 模板保存时只校验**骨架**体积，真正的告警数据是渲染时注入的：一条超长 annotation

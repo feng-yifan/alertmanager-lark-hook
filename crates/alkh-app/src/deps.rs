@@ -21,6 +21,8 @@ pub struct Deps {
     pub cipher: Arc<dyn SecretCipher>,
     pub hasher: Arc<dyn PasswordHasher>,
     pub clock: Arc<dyn Clock>,
+    /// 指标出口（生产为 Prometheus，测试为空实现）。
+    pub metrics: Arc<dyn MetricsSink>,
 }
 
 impl Deps {

@@ -36,6 +36,7 @@ pub async fn build_deps(
     cipher: Arc<dyn SecretCipher>,
     hasher: Arc<dyn PasswordHasher>,
     lark_override: Option<Arc<dyn LarkGateway>>,
+    metrics: Arc<Metrics>,
 ) -> anyhow::Result<Deps> {
     let channels: Arc<dyn ChannelRepository> = Arc::new(SqliteChannelRepository::new(pool.clone()));
     let hooks: Arc<dyn HookRepository> = Arc::new(SqliteHookRepository::new(pool.clone()));
@@ -83,6 +84,7 @@ pub async fn build_deps(
         cipher,
         hasher,
         clock,
+        metrics,
     })
 }
 
@@ -98,10 +100,11 @@ pub async fn build_state(
     };
     let hasher: Arc<dyn PasswordHasher> = Arc::new(Argon2Hasher);
 
-    let deps = build_deps(&pool, cipher, hasher, lark_override).await?;
+    let metrics = Metrics::new();
+    let deps = build_deps(&pool, cipher, hasher, lark_override, metrics.clone()).await?;
     apply_env_defaults(&deps, &config).await?;
 
-    Ok(AppState::new(deps, config, Metrics::new(), pool))
+    Ok(AppState::new(deps, config, metrics, pool))
 }
 
 /// 把环境变量提供的默认值写入数据库（仅当库中尚无值时；之后以管理后台为准）。
