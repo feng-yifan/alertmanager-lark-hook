@@ -972,6 +972,39 @@ async fn failed_intake_stays_retryable_instead_of_being_deduped() {
     );
 }
 
+/// 数据丢失回归：渲染后超过飞书 30KB 上限的卡片必须被截断，而不是丢掉整条告警。
+///
+/// 模板保存时只校验**骨架**体积，真正的告警数据是渲染时注入的：一条超长 annotation
+/// 就能把卡片顶过上限，而飞书对超限返回不可重试的错误 ⇒ 该告警永远不会送达。
+#[tokio::test]
+async fn oversized_rendered_card_is_shrunk_instead_of_dropping_the_alert() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+
+    // 4 字符 × 3 字节 × 6000 ≈ 72KB，远超 30KB
+    let huge = "告警描述".repeat(6_000);
+    let mut payload = firing_payload(1);
+    payload["alerts"][0]["annotations"] = json!({ "summary": huge });
+    payload["commonAnnotations"] = json!({ "summary": huge });
+
+    let (status, body) = h.push(payload).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["delivery_state"], "active",
+        "超长卡片应被截断后照常发出，而不是丢掉整条告警: {body}"
+    );
+
+    let entities = h.fake.snapshot().card_entities.clone();
+    assert!(!entities.is_empty(), "应已创建卡片实体");
+    for card in &entities {
+        let bytes = serde_json::to_vec(card).unwrap().len();
+        assert!(
+            bytes <= 30 * 1024,
+            "发给飞书的卡片仍是 {bytes} 字节，超过 30KB 上限（线上会被拒绝）"
+        );
+    }
+}
+
 /// 数据丢失回归：同一分组的并发事件不得互相覆盖。
 ///
 /// `process_event` 是「读取分组 → 推进状态 → 落库 → 发消息」的读改写，此前没有任何

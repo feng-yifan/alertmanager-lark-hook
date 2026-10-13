@@ -5,6 +5,7 @@ use alkh_domain::channel::Channel;
 use alkh_domain::policy::NotificationPolicy;
 use alkh_domain::template::{
     render_json, CardMessageSpec, CardSource, RenderContext, RenderedAppFeedCard,
+    CARD_JSON_MAX_BYTES,
 };
 use alkh_domain::Timestamp;
 use serde_json::{json, Map, Value};
@@ -68,9 +69,19 @@ pub fn render_card_message(
                 .card_json
                 .as_ref()
                 .ok_or_else(|| AppError::validation("模板缺少 card_json"))?;
-            let rendered = render_json(card, ctx);
+            let mut rendered = render_json(card, ctx);
             if !rendered.is_object() {
                 return Err(AppError::validation("渲染后的卡片不是 JSON 对象"));
+            }
+            // 模板保存时只校验了**骨架**，真正的告警数据是这里注入的：含
+            // `${alerts_table}` 的卡片在告警很多时很容易超过 30KB，而飞书对超限返回
+            // 不可重试的错误 ⇒ 整条告警被标 Failed 丢掉。这里在渲染出口收口体积，
+            // 宁可少显示几行文本，也不要让告警消失。
+            if shrink_json_to_bytes(&mut rendered, CARD_JSON_MAX_BYTES) {
+                tracing::warn!(
+                    limit = CARD_JSON_MAX_BYTES,
+                    "渲染后的卡片超过飞书体积上限，已截断最长的文本字段"
+                );
             }
             Ok(RenderedCardMessage::Json(rendered))
         }
@@ -86,6 +97,124 @@ pub fn render_card_message(
             })
         }
     }
+}
+
+/// 把渲染结果压进飞书卡片体积上限（`CARD_JSON_MAX_BYTES`）。
+///
+/// 策略：反复找出当前**最长的字符串叶子**并按超出量截断，保证结构始终是合法 JSON。
+/// 截断会加一个可见后缀，便于用户知道内容被裁过。
+///
+/// 返回是否发生了截断。
+pub fn shrink_json_to_bytes(value: &mut Value, limit: usize) -> bool {
+    const SUFFIX: &str = "…（已截断）";
+    let mut truncated = false;
+    // 每轮都会砍掉至少 1 字节，设上限防止极端结构下空转。
+    for _ in 0..512 {
+        let Ok(bytes) = serde_json::to_vec(value) else {
+            return truncated;
+        };
+        if bytes.len() <= limit {
+            return truncated;
+        }
+        let over = bytes.len() - limit;
+        let Some((path, len)) = longest_string_leaf(value) else {
+            return truncated;
+        };
+        truncated = true;
+        if len <= SUFFIX.len() + over + 2 {
+            // 太短了，砍不出多少，直接清空这个叶子。
+            set_string_at(value, &path, String::new());
+        } else {
+            let keep = len - over - SUFFIX.len() - 8;
+            let cut = truncate_utf8(
+                value_at(value, &path).and_then(Value::as_str).unwrap_or(""),
+                keep,
+            );
+            set_string_at(value, &path, format!("{cut}{SUFFIX}"));
+        }
+    }
+    truncated
+}
+
+/// JSON 路径段。
+#[derive(Debug, Clone)]
+enum Seg {
+    Key(String),
+    Idx(usize),
+}
+
+/// 找出最长的字符串叶子及其路径（按**字节**计，因为上限是字节）。
+fn longest_string_leaf(value: &Value) -> Option<(Vec<Seg>, usize)> {
+    fn walk(v: &Value, path: &mut Vec<Seg>, best: &mut Option<(Vec<Seg>, usize)>) {
+        match v {
+            Value::String(s) => {
+                if best.as_ref().map(|(_, b)| s.len() > *b).unwrap_or(true) {
+                    *best = Some((path.clone(), s.len()));
+                }
+            }
+            Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    path.push(Seg::Idx(i));
+                    walk(item, path, best);
+                    path.pop();
+                }
+            }
+            Value::Object(map) => {
+                for (k, item) in map {
+                    path.push(Seg::Key(k.clone()));
+                    walk(item, path, best);
+                    path.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut best = None;
+    walk(value, &mut Vec::new(), &mut best);
+    best
+}
+
+fn value_at<'a>(value: &'a Value, path: &[Seg]) -> Option<&'a Value> {
+    match path.split_first() {
+        None => Some(value),
+        Some((Seg::Key(k), rest)) => value_at(value.get(k)?, rest),
+        Some((Seg::Idx(i), rest)) => value_at(value.get(*i)?, rest),
+    }
+}
+
+fn set_string_at(value: &mut Value, path: &[Seg], new: String) {
+    match path.split_first() {
+        None => {
+            if let Value::String(s) = value {
+                *s = new;
+            }
+        }
+        Some((Seg::Key(k), rest)) => {
+            if let Some(child) = value.get_mut(k) {
+                set_string_at(child, rest, new);
+            }
+        }
+        Some((Seg::Idx(i), rest)) => {
+            if let Some(child) = value.get_mut(*i) {
+                set_string_at(child, rest, new);
+            }
+        }
+    }
+}
+
+/// 按字节上限截断，保证落在 UTF-8 字符边界上。
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = 0;
+    for (i, c) in s.char_indices() {
+        if i + c.len_utf8() > max_bytes {
+            break;
+        }
+        end = i + c.len_utf8();
+    }
+    &s[..end]
 }
 
 /// 渲染「应用消息流卡片」模板。
@@ -456,6 +585,58 @@ mod tests {
 
     fn sample_channel() -> Channel {
         Channel::from_chat("oc_1", "运维告警群", None, false)
+    }
+
+    /// 未超限的卡片必须原样返回（不能误伤正常内容）。
+    #[test]
+    fn shrink_leaves_small_cards_untouched() {
+        let mut card = json!({"a": "短文本", "b": {"c": [1, 2, 3]}});
+        let before = card.clone();
+        assert!(!shrink_json_to_bytes(&mut card, 30 * 1024));
+        assert_eq!(card, before);
+    }
+
+    /// 超限时必须压到上限内、仍是合法 JSON 对象，并留下可见的截断标记。
+    #[test]
+    fn shrink_truncates_longest_string_within_limit() {
+        let mut card = json!({
+            "header": {"title": "小标题"},
+            "body": {"elements": [
+                {"tag": "markdown", "content": "x".repeat(50_000)},
+                {"tag": "markdown", "content": "y".repeat(100)}
+            ]}
+        });
+        assert!(shrink_json_to_bytes(&mut card, 4096));
+        let bytes = serde_json::to_vec(&card).unwrap().len();
+        assert!(bytes <= 4096, "压缩后仍超限: {bytes}");
+
+        let long = card["body"]["elements"][0]["content"].as_str().unwrap();
+        assert!(long.contains("已截断"), "应留可见标记");
+        let short = card["body"]["elements"][1]["content"].as_str().unwrap();
+        assert_eq!(short, "y".repeat(100), "短字段不应被动");
+        assert_eq!(card["header"]["title"], "小标题");
+    }
+
+    /// 截断必须落在 UTF-8 字符边界上（中文内容不能被切成半个字符）。
+    #[test]
+    fn shrink_never_splits_multibyte_characters() {
+        let long = "中文告警Ⓜ️".repeat(4_000);
+        let mut card = json!({"content": long.clone()});
+        assert!(shrink_json_to_bytes(&mut card, 2048));
+        let out = card["content"].as_str().unwrap();
+        assert!(serde_json::to_vec(&json!({"content": out})).unwrap().len() <= 2048);
+        // 能取到 str 本身就意味着没有切断 UTF-8；再确认前缀未被篡改
+        assert!(
+            long.starts_with(out.trim_end_matches("…（已截断）")),
+            "前缀应保持原样"
+        );
+    }
+
+    /// 没有可截断的字符串时不应死循环或 panic。
+    #[test]
+    fn shrink_gives_up_when_nothing_can_be_truncated() {
+        let mut card = json!({"a": [1, 2, 3], "b": {"c": true}, "d": null});
+        assert!(!shrink_json_to_bytes(&mut card, 8));
     }
 
     #[test]
