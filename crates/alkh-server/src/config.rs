@@ -19,6 +19,11 @@ pub struct Config {
     pub static_dir: Option<PathBuf>,
     /// 会话 Cookie 是否加 `Secure`（HTTPS 部署时应为 true）。
     pub cookie_secure: bool,
+    /// hook 接收端点的限流额度（**每个来源 IP、每 10 秒**；0 = 禁用）。
+    ///
+    /// 默认取得比较宽：AlertManager 在告警风暴时会有正当的突发，这里只挡
+    /// 「单个来源把实例打满」，不是精细限速。
+    pub hook_rate_limit: u32,
     /// 聚合冲刷循环的 tick。
     pub worker_tick_ms: u64,
     /// 失败投递重试间隔。
@@ -57,6 +62,7 @@ impl Config {
             log_json: env_bool("ALKH_LOG_JSON", false),
             static_dir: env_opt("ALKH_STATIC_DIR").map(PathBuf::from),
             cookie_secure,
+            hook_rate_limit: env_u64("ALKH_HOOK_RATE_LIMIT", 300) as u32,
             worker_tick_ms: env_u64("ALKH_WORKER_TICK_MS", 200).clamp(50, 5000),
             // 默认 5s：R14 的第一档退避是 1s，tick 太粗会让短档位实际被拉平到 tick 长度。
             // 一次 tick 只是一条走索引的查询，开销可忽略。
@@ -178,6 +184,7 @@ mod tests {
             log_json: false,
             static_dir: None,
             cookie_secure: false,
+            hook_rate_limit: 300,
             worker_tick_ms: 200,
             retry_interval_secs: 30,
             retention_interval_secs: 3600,

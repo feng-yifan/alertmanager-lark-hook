@@ -30,6 +30,8 @@ pub struct AppState {
     pub pool: sqlx::SqlitePool,
     /// `/readyz` 用的就绪标志。
     pub ready: Arc<AtomicBool>,
+    /// 未认证的 hook 接收端点限流（按来源 IP）。
+    pub hook_limiter: Arc<crate::limiter::FixedWindowLimiter>,
 }
 
 impl AppState {
@@ -39,6 +41,10 @@ impl AppState {
         metrics: Arc<Metrics>,
         pool: sqlx::SqlitePool,
     ) -> Self {
+        let hook_limiter = Arc::new(crate::limiter::FixedWindowLimiter::new(
+            std::time::Duration::from_secs(10),
+            config.hook_rate_limit,
+        ));
         Self {
             intake: Arc::new(IntakeService::new(deps.clone())),
             channels: Arc::new(ChannelService::new(deps.clone())),
@@ -52,6 +58,7 @@ impl AppState {
             metrics,
             pool,
             ready: Arc::new(AtomicBool::new(false)),
+            hook_limiter,
         }
     }
 

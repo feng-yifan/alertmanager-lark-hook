@@ -304,7 +304,7 @@ async fn pool() -> SqlitePool {
 ///
 /// `data_dir` 指向 Cargo 提供的 `CARGO_TARGET_TMPDIR`：由于显式提供了 `master_key`，
 /// 不会生成 `master.key`，因此不会写入任何文件，也就无需清理临时目录。
-fn test_config() -> Config {
+fn test_config(hook_rate_limit: u32) -> Config {
     Config {
         http_addr: "127.0.0.1:0".parse().unwrap(),
         data_dir: std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")),
@@ -320,6 +320,7 @@ fn test_config() -> Config {
         static_dir: None,
         cookie_secure: false,
         worker_tick_ms: 50,
+        hook_rate_limit,
         retry_interval_secs: 3600,
         retention_interval_secs: 3600,
     }
@@ -327,16 +328,22 @@ fn test_config() -> Config {
 
 /// 默认脚手架：只起 HTTP 服务，**不启动后台 worker**，避免其它测试被后台重试干扰。
 async fn start() -> Harness {
-    start_opts(false).await
+    // 限流额度调高，避免干扰其它用例（限流本身有专门的用例覆盖）
+    start_opts(false, 100_000).await
 }
 
 /// 需要覆盖聚合冲刷 / 重试 / 保留清理等**后台循环**时使用。
 async fn start_with_workers() -> Harness {
-    start_opts(true).await
+    start_opts(true, 100_000).await
 }
 
-async fn start_opts(with_workers: bool) -> Harness {
-    let config = Arc::new(test_config());
+/// 用较低的 hook 限流额度启动，用于覆盖未认证入口的限流。
+async fn start_with_hook_limit(limit: u32) -> Harness {
+    start_opts(false, limit).await
+}
+
+async fn start_opts(with_workers: bool, hook_rate_limit: u32) -> Harness {
+    let config = Arc::new(test_config(hook_rate_limit));
     let pool = pool().await;
     let fake = Arc::new(FakeLark::with_chats());
 
@@ -970,6 +977,71 @@ async fn failed_intake_stays_retryable_instead_of_being_deduped() {
         reqwest::StatusCode::INTERNAL_SERVER_ERROR,
         "重试应仍然失败并保持可重试，而不是被吞掉: {body2}"
     );
+}
+
+/// 回归：未认证的 hook 接收端点必须有来源级限流。
+///
+/// 该端点不需要认证（AlertManager 只带 token），任何来源都能打，每次请求都会产生
+/// DB 查询、token 有效时还会触发飞书调用。此前完全没有限流：单个来源就能把实例打满。
+#[tokio::test]
+async fn hook_endpoint_is_rate_limited_per_source() {
+    let mut h = start_with_hook_limit(3).await;
+    let _ = h.create_channel().await;
+
+    // 额度内放行（第 2、3 次会因幂等被判 duplicate，但仍是 200）
+    for i in 0..3 {
+        let (status, body) = h.push(firing_payload(1)).await;
+        assert_eq!(status, 200, "第 {i} 次应放行: {body}");
+    }
+
+    // 超限被拒
+    let (status, body) = h.push(firing_payload(1)).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        "超过额度应被限流: {body}"
+    );
+    assert_eq!(body["error"]["code"], "rate_limited");
+    assert!(
+        body["error"]["details"]["retry_after_secs"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
+
+    // 合法调用方只要来自别的来源就不受牵连（否则会连带丢掉真告警）
+    let token = h.hook_token.clone().unwrap();
+    let status = h
+        .http
+        .post(h.url(&format!("/api/v1/hooks/alertmanager/{token}")))
+        .header("x-forwarded-for", "203.0.113.9")
+        .json(&firing_payload(1))
+        .send()
+        .await
+        .expect("webhook 请求失败")
+        .status();
+    assert_eq!(
+        status,
+        reqwest::StatusCode::OK,
+        "其它来源不应被牵连（会把真告警一起拒掉）"
+    );
+
+    // token 无效同样受限流保护（连 DB 查询都不做就被挡住）
+    let mut rejected = 0;
+    for _ in 0..5 {
+        let status = h
+            .http
+            .post(h.url("/api/v1/hooks/alertmanager/alkh_not_a_real_token"))
+            .json(&firing_payload(1))
+            .send()
+            .await
+            .expect("webhook 请求失败")
+            .status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            rejected += 1;
+        }
+    }
+    assert!(rejected > 0, "无效 token 的洪水也应被限流挡住");
 }
 
 /// 回归：三个「声明了、导出了、却永远为 0」的计数器必须真的有自增点。

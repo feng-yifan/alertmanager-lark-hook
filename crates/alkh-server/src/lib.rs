@@ -9,6 +9,7 @@ pub mod assets;
 pub mod config;
 pub mod credentials;
 pub mod error;
+pub mod limiter;
 pub mod metrics;
 pub mod state;
 pub mod wiring;

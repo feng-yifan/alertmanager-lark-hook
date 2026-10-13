@@ -7,7 +7,10 @@
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
+use axum::http::HeaderMap;
 use axum::Json;
+
+use alkh_app::error::AppError;
 
 use crate::error::{ApiError, ApiResult};
 use crate::metrics::Metrics;
@@ -16,8 +19,21 @@ use crate::state::AppState;
 pub async fn alertmanager(
     State(state): State<AppState>,
     Path(token): Path<String>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<Json<alkh_app::intake::IntakeOutcome>> {
+    // 未认证入口：任何来源都能打，先按来源 IP 过一道宽松限流。
+    // 放在最前面，连 token 哈希与 DB 查询都省掉。
+    let client = client_ip(&headers);
+    if let Some(retry_after) = state.hook_limiter.check(client.as_deref()) {
+        Metrics::inc(&state.metrics.hook_rejected_total);
+        tracing::warn!(
+            retry_after_secs = retry_after,
+            "hook 接收端点触发限流，已拒绝"
+        );
+        return Err(ApiError(AppError::rate_limited(retry_after)));
+    }
+
     match state.intake.handle_hook(&token, &body).await {
         Ok(outcome) => {
             Metrics::inc(&state.metrics.hook_received_total);
@@ -54,4 +70,23 @@ pub async fn alertmanager(
             Err(ApiError(err))
         }
     }
+}
+
+/// 取来源 IP：优先 `X-Forwarded-For` 的第一段（反代场景），其次 `X-Real-IP`。
+fn client_ip(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        })
 }

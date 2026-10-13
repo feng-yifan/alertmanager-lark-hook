@@ -155,6 +155,7 @@ kubectl apply -f deploy/kubernetes.yaml
 | `ALKH_ADMIN_USERNAME` | 管理员用户名 | 建议设置 | `admin` |
 | `ALKH_LARK_BASE_URL` | 飞书开放平台基址 | 用 Lark 国际版时必填 | `https://open.feishu.cn`（国际版为 `https://open.larksuite.com`） |
 | `ALKH_COOKIE_SECURE` | 登录 Cookie 是否加 `Secure` | 一般不用设：不填时会按 `ALKH_PUBLIC_BASE_URL` 是否为 `https://` 自动判断 | 自动推断（无对外基址时为 `false`） |
+| `ALKH_HOOK_RATE_LIMIT` | 未认证的接收端点限流额度（每个来源 IP、每 10 秒；`0` 关闭） | 告警风暴很猛时可以调大 | `300` |
 | `ALKH_HTTP_ADDR` | 监听地址 | 否 | `0.0.0.0:8080` |
 | `ALKH_DATA_DIR` | 数据目录（SQLite、主密钥） | 否 | `/data` |
 | `ALKH_DATABASE_URL` | 直接指定数据库 URL，一般不用改 | 否 | `sqlite://{ALKH_DATA_DIR}/alkh.db` |
