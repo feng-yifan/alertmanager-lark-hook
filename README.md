@@ -490,3 +490,7 @@ cardkit:card:write
 - `ok: true` 只代表**请求已受理**，不代表消息已发出。真实结果看投递记录的 `state`（`active` 已发出 / `pending` 待重试 / `failed` 失败）。
 - 发送失败会按 1s / 5s / 30s / 2m / 10m 退避重试 5 次，之后可在管理后台手动重试。
 - 未配置飞书凭据时，收到的告警会被记录为 `pending`，配好凭据后会自动补发。
+
+---
+
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
