@@ -2,22 +2,94 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="light dark" />
-    <meta name="description" content="AlertManager 告警经由飞书机器人投递到飞书渠道的管理后台" />
-    <!-- 浏览器标签页主题色取自图标中告警铃的主色 -->
-    <meta name="theme-color" content="#F84715" />
-    <!-- 品牌图标见 web/public/favicon.ico（原样入库）；派生尺寸由 `make icons` 生成，
-         来源与约定见 scripts/make-icons.py -->
-    <link rel="icon" href="/favicon.ico" sizes="any" />
-    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
-    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
-    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
-    <title>AlertManager → 飞书 管理后台</title>
-    <script type="module" crossorigin src="/assets/index-euZzKB1v.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-AI7kj9-7.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>管理后台未构建 · alertmanager-lark-hook</title>
+    <!--
+      这是提交进版本库的**占位页**，保证 rust-embed 的 #[folder = "web-dist"] 目录存在。
+      `make web` 会用 Vite 的真实产物覆盖它（之后 git status 会显示本文件被修改，属正常）。
+      Dockerfile 不受影响：它从 web 构建阶段复制真实产物覆盖本文件。
+      注意：不要在这里引用任何 assets/ 下的文件——那些构建产物不入库。
+    -->
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font:
+          15px/1.7 system-ui,
+          -apple-system,
+          "Segoe UI",
+          "PingFang SC",
+          "Microsoft YaHei",
+          sans-serif;
+        background: #f7f8fa;
+        color: #1f2329;
+      }
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: #17181c;
+          color: #e8eaed;
+        }
+        pre {
+          background: rgba(255, 255, 255, 0.08);
+        }
+      }
+      main {
+        max-width: 36rem;
+        padding: 2rem;
+      }
+      h1 {
+        font-size: 1.2rem;
+        margin: 0 0 0.9rem;
+      }
+      p {
+        margin: 0 0 0.9rem;
+      }
+      code,
+      pre {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.92em;
+      }
+      pre {
+        background: rgba(127, 127, 127, 0.14);
+        padding: 0.75rem 1rem;
+        border-radius: 6px;
+        overflow-x: auto;
+      }
+      .hint {
+        opacity: 0.72;
+        font-size: 0.9em;
+      }
+      .tag {
+        display: inline-block;
+        padding: 0.1rem 0.45rem;
+        border-radius: 4px;
+        background: #f84715;
+        color: #fff;
+        font-size: 0.8em;
+        vertical-align: 1px;
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <main>
+      <h1><span class="tag">未构建</span> 管理后台静态资源尚未生成</h1>
+      <p>
+        你看到的是前端产物的<strong>占位页</strong>。可执行文件内嵌的管理后台需要先把
+        Vite 产物构建并同步到 <code>crates/alkh-server/web-dist</code>：
+      </p>
+      <pre>make web
+cargo build --release --bin alkh</pre>
+      <p class="hint">
+        只调后端时可以免去重新编译，直接读磁盘上的产物：<code>make run</code>
+      </p>
+      <p class="hint">
+        容器部署不受影响：<code>deploy/Dockerfile</code> 会用真实构建产物覆盖本文件。
+      </p>
+    </main>
   </body>
 </html>

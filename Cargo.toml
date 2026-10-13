@@ -11,7 +11,9 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-rust-version = "1.82"
+# 实际下限由 Cargo.lock 中依赖声明的最高 rust-version 决定（当前 1.89，来自 uuid 1.28.0）。
+# deploy/Dockerfile 的基础镜像与 CI 的 msrv job 必须与之一致。
+rust-version = "1.89"
 description = "Forward Prometheus AlertManager alerts into Feishu/Lark via cards"
 
 [workspace.dependencies]

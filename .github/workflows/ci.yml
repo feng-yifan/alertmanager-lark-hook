@@ -36,6 +36,33 @@ jobs:
       - name: 测试
         run: cargo test --workspace
 
+  msrv:
+    name: MSRV（Cargo.toml 声明的下限）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 用 Cargo.toml 声明的 rust-version 构建一次。
+      # 目的：`deploy/Dockerfile` 的基础镜像版本与锁定依赖要求的 MSRV 一旦脱节，
+      # 只有真正构建镜像时才会失败（而 rust job 用的是 stable，永远绿）。
+      # 这个 job 让漂移在 PR 阶段就暴露。
+      - name: 读取声明的 MSRV
+        id: msrv
+        run: |
+          v=$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          test -n "$v" || { echo "Cargo.toml 未声明 rust-version" >&2; exit 1; }
+          echo "MSRV = $v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check（MSRV 工具链）
+        run: cargo check --workspace --all-targets
+
   web:
     name: Web（tsc / build）
     runs-on: ubuntu-latest

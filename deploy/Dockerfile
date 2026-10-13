@@ -14,7 +14,9 @@ RUN pnpm build
 # ---------------------------------------------------------------------------
 # Stage 2 — 构建 Rust 后端（把前端产物内嵌进二进制）
 # ---------------------------------------------------------------------------
-FROM rust:1.85-bookworm AS builder
+# ⚠️ 必须 ≥ Cargo.lock 里依赖声明的最高 rust-version（当前由 uuid 1.28.0 定为 1.89）。
+# 改这个版本时请同时更新 Cargo.toml 的 rust-version 与下方 CI 的 msrv job。
+FROM rust:1.89-bookworm AS builder
 WORKDIR /src
 
 RUN apt-get update \
