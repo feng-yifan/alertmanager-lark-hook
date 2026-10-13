@@ -181,9 +181,12 @@ Dockerfile 才会暴露」的问题拦在 PR 阶段。它与发布流水线共�
 「发布前校验 → 构建并推送镜像 → 生成 changelog → 创建 GitHub Release」：
 
 ```bash
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
+git tag -a 0.1.0 -m "0.1.0"
+git push origin 0.1.0
 ```
+
+**tag 直接用版本号，不带 `v` 前缀**（与 `Cargo.toml` 的 `version` 字面一致）。`release.yml`
+只对数字开头的 semver tag（`0.1.0`、`0.2.0-rc.1`）生效，`v0.1.0` 不会触发任何东西。
 
 推 main 不再产出镜像，日常提交交给上面的 `qa.yml`（其中 `docker` job 保证镜像仍然可构建）。
 
@@ -203,7 +206,7 @@ Release 正文由 `scripts/release-notes.sh` 生成，它只读 git 历史与传
 可以在本地原样试跑（需要 bash 4+，用到了关联数组）：
 
 ```bash
-scripts/release-notes.sh --tag v0.1.0 --repo fengyifan/alertmanager-lark-hook \
+scripts/release-notes.sh --tag 0.1.0 --repo fengyifan/alertmanager-lark-hook \
   --image ghcr.io/fengyifan/alertmanager-lark-hook --digest sha256:deadbeef \
   --platforms linux/amd64 --asset dist/demo.tar.gz
 ```

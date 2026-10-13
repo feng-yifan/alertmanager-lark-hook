@@ -9,7 +9,7 @@
 #
 # 本脚本只读 git 历史与传入的文件，不访问网络，可以在本地随意试跑：
 #
-#   scripts/release-notes.sh --tag v0.1.0 --image ghcr.io/fengyifan/alertmanager-lark-hook \
+#   scripts/release-notes.sh --tag 0.1.0 --image ghcr.io/fengyifan/alertmanager-lark-hook \
 #       --digest sha256:deadbeef --platforms linux/amd64 --asset dist/foo.tar.gz
 #
 set -euo pipefail
@@ -27,9 +27,9 @@ die() { printf 'release-notes: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'EOF'
-用法: release-notes.sh --tag <vX.Y.Z> [选项]
+用法: release-notes.sh --tag <X.Y.Z> [选项]
 
-  --tag <tag>          必需。要发布的 tag，例如 v0.1.0
+  --tag <tag>          必需。要发布的 tag，例如 0.1.0（不带 v 前缀）
   --from <tag>         起始 tag（不含）；默认用 git describe 找 tag 的前一个可达 tag
   --repo <owner/repo>  仓库，用于生成提交/比较链接；默认取 $GITHUB_REPOSITORY 或 origin
   --image <ref>        镜像名（不含 tag），例如 ghcr.io/fengyifan/alertmanager-lark-hook
@@ -57,7 +57,7 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$TAG" ] || { usage >&2; die "缺少 --tag"; }
-[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] || die "tag 必须是 vX.Y.Z 形式，实际为：$TAG"
+[[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || die "tag 必须是 X.Y.Z 形式（不带 v 前缀），实际为：$TAG"
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || die "本地不存在 tag $TAG"
 
 if [ -z "$REPO" ]; then
@@ -69,11 +69,12 @@ if [ -z "$REPO" ]; then
 fi
 [ -n "$REPO" ] || die "无法确定仓库名，请显式传 --repo owner/repo"
 REPO_URL="https://github.com/$REPO"
-VERSION="${TAG#v}"
+VERSION="$TAG"
 
-# 起始 tag：显式传入 > 自动查找（tag 的前一个可达 tag）
+# 起始 tag：显式传入 > 自动查找（tag 的前一个可达 tag）。
+# --match '[0-9]*' 只认数字开头的版本 tag，避免把无关 tag 当成上一个版本。
 if [ -z "$FROM" ]; then
-    FROM=$(git describe --tags --abbrev=0 --match 'v*' "${TAG}^" 2>/dev/null || true)
+    FROM=$(git describe --tags --abbrev=0 --match '[0-9]*' "${TAG}^" 2>/dev/null || true)
 fi
 if [ -n "$FROM" ]; then
     git rev-parse -q --verify "refs/tags/$FROM" >/dev/null || die "本地不存在起始 tag $FROM"

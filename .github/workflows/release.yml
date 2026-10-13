@@ -1,9 +1,10 @@
 name: Release
 
-# 触发方式：**只有推送 tag**（形如 v0.1.0）才会构建镜像并创建 GitHub Release。
+# 触发方式：**只有推送 tag** 才会构建镜像并创建 GitHub Release。tag 直接用版本号，
+# **不带 `v` 前缀**（与 Cargo.toml 的 version 保持字面一致）：
 #
-#   git tag -a v0.1.0 -m "v0.1.0"
-#   git push origin v0.1.0
+#   git tag -a 0.1.0 -m "0.1.0"
+#   git push origin 0.1.0
 #
 # 推 main / 开 PR 都不再产出镜像：日常提交由 qa.yml 负责校验（其中 docker job
 # 会构建一次镜像但不推送，用来提前发现 Dockerfile 这类只在构建时才暴露的问题）。
@@ -13,11 +14,14 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    # 只认「数字开头、形如 X.Y.Z」的 tag（0.1.0、10.2.3、0.2.0-rc.1）；v0.1.0 不会触发。
+    # 这里用 [0-9]* 而不是 [0-9]+，只依赖最基本的 glob 语义；是否严格 semver 由下面
+    # 的解析步骤再校验一次，不合法会给出明确报错。
+    tags: ["[0-9]*.[0-9]*.[0-9]*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "已存在的 tag（例如 v0.1.0），用于重跑某次发布"
+        description: "已存在的 tag（例如 0.1.0），用于重跑某次发布"
         required: true
         type: string
 
@@ -83,17 +87,17 @@ jobs:
         run: |
           set -euo pipefail
           tag="${INPUT_TAG:-${GITHUB_REF_NAME}}"
-          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-            echo "::error::tag 必须是 vX.Y.Z 形式，实际为：$tag"
+          if [[ ! "$tag" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::tag 必须是 X.Y.Z 形式（不带 v 前缀），实际为：$tag"
             exit 1
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
 
           # 提醒而非阻塞：Cargo.toml 里的版本号与 tag 不一致（二进制内的版本串、镜像
           # label 都取自这里，长期漂移会让人分不清线上跑的是哪个 tag）
           declared=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          if [ "$declared" != "${tag#v}" ]; then
+          if [ "$declared" != "$tag" ]; then
             echo "::warning::Cargo.toml 声明的版本是 $declared，与 tag $tag 不一致"
           fi
 
