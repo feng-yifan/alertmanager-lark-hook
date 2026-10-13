@@ -715,7 +715,10 @@ pub struct Delivery {
 }
 
 impl Delivery {
-    pub const MAX_ATTEMPTS: u32 = 5;
+    /// 最大尝试次数（**含首次发送**）：1 次首发 + 5 次重试。
+    ///
+    /// 与 R14 的退避档位数量对齐（1s / 5s / 30s / 2m / 10m），否则最后一档永远用不到。
+    pub const MAX_ATTEMPTS: u32 = 6;
 
     pub fn new(
         alert_group_id: AlertGroupId,

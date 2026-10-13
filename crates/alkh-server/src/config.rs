@@ -58,7 +58,9 @@ impl Config {
             static_dir: env_opt("ALKH_STATIC_DIR").map(PathBuf::from),
             cookie_secure,
             worker_tick_ms: env_u64("ALKH_WORKER_TICK_MS", 200).clamp(50, 5000),
-            retry_interval_secs: env_u64("ALKH_RETRY_INTERVAL_SECS", 30).max(5),
+            // 默认 5s：R14 的第一档退避是 1s，tick 太粗会让短档位实际被拉平到 tick 长度。
+            // 一次 tick 只是一条走索引的查询，开销可忽略。
+            retry_interval_secs: env_u64("ALKH_RETRY_INTERVAL_SECS", 5).max(1),
             retention_interval_secs: env_u64("ALKH_RETENTION_INTERVAL_SECS", 3600).max(60),
         })
     }

@@ -104,7 +104,11 @@ fn backoff_for(attempt: u32) -> Duration {
 
 fn backoff_elapsed(delivery: &alkh_domain::alert::Delivery, now: alkh_domain::Timestamp) -> bool {
     let waited = now.signed_duration_since(delivery.updated_at);
-    waited >= chrono::Duration::from_std(backoff_for(delivery.attempt)).unwrap_or_default()
+    // `attempt` 是「已失败的次数」，首次失败后为 1；而退避表是按「第几次重试」
+    // 从 0 起排的（1s / 5s / 30s / 2m / 10m）。直接用 attempt 会让第一档 1s
+    // 永远用不到、首重试变成 5s，所以这里减一。
+    let retry_index = delivery.attempt.saturating_sub(1);
+    waited >= chrono::Duration::from_std(backoff_for(retry_index)).unwrap_or_default()
 }
 
 /// 数据保留清理。
@@ -220,9 +224,37 @@ mod tests {
         assert!(!backoff_elapsed(&d, now));
         assert!(backoff_elapsed(&d, now + chrono::Duration::seconds(2)));
 
-        // attempt 3 ⇒ 需要等 2 分钟
-        d.attempt = 3;
+        // attempt 是「已失败次数」：首次失败后为 1，对应**第一档 1 秒**。
+        // （修复前直接用 attempt 索引，导致 1s 档永远用不到、首次重试要等 5s。）
+        d.attempt = 1;
+        assert!(!backoff_elapsed(
+            &d,
+            now + chrono::Duration::milliseconds(500)
+        ));
+        assert!(backoff_elapsed(&d, now + chrono::Duration::seconds(2)));
+
+        // 第 5 次失败 ⇒ 最后一档 10 分钟
+        d.attempt = 5;
         assert!(!backoff_elapsed(&d, now + chrono::Duration::seconds(60)));
-        assert!(backoff_elapsed(&d, now + chrono::Duration::seconds(130)));
+        assert!(backoff_elapsed(&d, now + chrono::Duration::seconds(601)));
+
+        // 超出表长仍然封顶在 10 分钟
+        d.attempt = 99;
+        assert!(!backoff_elapsed(&d, now + chrono::Duration::seconds(60)));
+        assert!(backoff_elapsed(&d, now + chrono::Duration::seconds(601)));
+    }
+
+    /// 重试次数必须正好用完所有退避档位，否则最后一档永远用不到
+    /// （修复前就是：档位有 5 个，但最多只可能重试 4 次）。
+    #[test]
+    fn retry_attempts_cover_all_backoff_tiers() {
+        use alkh_domain::alert::Delivery;
+        assert_eq!(
+            Delivery::MAX_ATTEMPTS as usize - 1,
+            5,
+            "应为 1 次首发 + 5 次重试"
+        );
+        assert_eq!(backoff_for(4), Duration::from_secs(600));
+        assert_eq!(backoff_for(5), Duration::from_secs(600), "超出表长应封顶");
     }
 }
