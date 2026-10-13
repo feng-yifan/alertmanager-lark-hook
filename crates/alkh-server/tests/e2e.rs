@@ -325,7 +325,17 @@ fn test_config() -> Config {
     }
 }
 
+/// 默认脚手架：只起 HTTP 服务，**不启动后台 worker**，避免其它测试被后台重试干扰。
 async fn start() -> Harness {
+    start_opts(false).await
+}
+
+/// 需要覆盖聚合冲刷 / 重试 / 保留清理等**后台循环**时使用。
+async fn start_with_workers() -> Harness {
+    start_opts(true).await
+}
+
+async fn start_opts(with_workers: bool) -> Harness {
     let config = Arc::new(test_config());
     let pool = pool().await;
     let fake = Arc::new(FakeLark::with_chats());
@@ -355,6 +365,10 @@ async fn start() -> Harness {
     alkh_app::bootstrap::ensure_default_templates(&state.deps)
         .await
         .expect("创建默认模板失败");
+
+    if with_workers {
+        alkh_server::workers::spawn(state.clone());
+    }
 
     let app = alkh_server::build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -461,6 +475,38 @@ impl Harness {
         let body = resp.json().await.unwrap_or(Value::Null);
         (status, body)
     }
+}
+
+/// 从 `/metrics` 读取一个计数器的值（Prometheus 文本格式）。
+async fn metric(h: &Harness, name: &str) -> u64 {
+    let text = h
+        .http
+        .get(h.url("/metrics"))
+        .send()
+        .await
+        .expect("/metrics 请求失败")
+        .text()
+        .await
+        .expect("/metrics 读取失败");
+    text.lines()
+        .find(|l| l.starts_with(&format!("{name} ")))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// 轮询等待某个计数器达到条件。
+async fn wait_for_metric(h: &Harness, name: &str, at_least: u64, secs: u64) -> u64 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let mut last = 0;
+    while std::time::Instant::now() < deadline {
+        last = metric(h, name).await;
+        if last >= at_least {
+            return last;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    last
 }
 
 fn firing_payload(alerts: usize) -> Value {
@@ -923,6 +969,95 @@ async fn failed_intake_stays_retryable_instead_of_being_deduped() {
         status2,
         reqwest::StatusCode::INTERNAL_SERVER_ERROR,
         "重试应仍然失败并保持可重试，而不是被吞掉: {body2}"
+    );
+}
+
+/// 数据丢失回归：聚合桶冲刷失败必须放回队列重试，而不是静默丢弃。
+///
+/// 聚合桶只在进程内存里，AM 又已经收到 200（不会再重发），因此冲刷失败时丢掉桶
+/// 等于永久丢失这条告警。原实现直接 `return false`，只在日志里留一行 warn。
+#[tokio::test]
+async fn failed_aggregate_flush_is_requeued_and_eventually_delivered() {
+    let mut h = start_with_workers().await;
+    let _ = h.create_channel().await;
+
+    // 开启聚合窗口，让事件先进桶
+    let channel_id = h.channel_id.clone().unwrap();
+    let resp = h
+        .http
+        .put(h.url(&format!("/api/v1/channels/{channel_id}/policy")))
+        .bearer_auth(&h.token)
+        .json(&json!({
+            "message_type": "card_message",
+            "pin_unresolved": false,
+            "repeat_policy": "suppress",
+            "resolved_policy": "send",
+            "group_update_policy": "update_previous",
+            "label_matchers": [],
+            "aggregation_window_secs": 2,
+            "min_send_interval_secs": 0,
+            "max_alerts_per_message": 20,
+            "mute_until": null
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+
+    // 让冲刷必定失败：把默认卡片模板的内容清空（prepare 会直接报 internal）
+    let original: Option<String> = sqlx::query_scalar(
+        "SELECT card_message FROM card_templates WHERE is_default = 1 AND kind = 'card_message'",
+    )
+    .fetch_one(&h.pool)
+    .await
+    .unwrap();
+    assert!(original.is_some(), "应存在默认卡片模板");
+    sqlx::query("UPDATE card_templates SET card_message = NULL WHERE is_default = 1 AND kind = 'card_message'")
+        .execute(&h.pool)
+        .await
+        .unwrap();
+
+    // 事件先进聚合桶（响应为 deferred）
+    let (_, body) = h.push(firing_payload(1)).await;
+    assert_eq!(body["deferred"], true, "应被聚合窗口延后: {body}");
+
+    // 到期后冲刷失败 ⇒ 必须放回队列（而不是丢弃）
+    let requeued = wait_for_metric(&h, "alkh_aggregator_requeued_total", 1, 15).await;
+    assert!(
+        requeued >= 1,
+        "冲刷失败后应放回队列重试，而不是静默丢弃（requeued={requeued}）"
+    );
+    assert_eq!(
+        metric(&h, "alkh_aggregator_dropped_total").await,
+        0,
+        "可恢复的失败不应被计入丢弃"
+    );
+
+    // 修复模板 ⇒ 退避重试应当把这条事件补投出去
+    sqlx::query(
+        "UPDATE card_templates SET card_message = ? WHERE is_default = 1 AND kind = 'card_message'",
+    )
+    .bind(original.unwrap())
+    .execute(&h.pool)
+    .await
+    .unwrap();
+
+    let flushed = wait_for_metric(&h, "alkh_aggregator_flushed_total", 1, 25).await;
+    assert!(
+        flushed >= 1,
+        "模板恢复后重试应成功补投（flushed={flushed}）"
+    );
+
+    let (_, deliveries) = h.get("/api/v1/deliveries?limit=10").await;
+    let states: Vec<&str> = deliveries["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|d| d["state"].as_str())
+        .collect();
+    assert!(
+        states.contains(&"active"),
+        "最终应有一条投递成功，实际: {states:?}"
     );
 }
 

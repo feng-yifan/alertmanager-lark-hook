@@ -76,6 +76,18 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
+    // 聚合桶只存在于进程内存中：关停前冲一次，避免「发布 / 滚动重启」把已受理
+    // （已回 200）的事件整批丢掉。
+    let report = state.intake.flush_all_pending().await;
+    if report.handled + report.requeued + report.dropped > 0 {
+        tracing::info!(
+            handled = report.handled,
+            requeued = report.requeued,
+            dropped = report.dropped,
+            "停机冲刷聚合桶完成"
+        );
+    }
+
     tracing::info!("正在刷写 SQLite WAL 并退出");
     alkh_infra::db::checkpoint(&pool).await;
     Ok(())

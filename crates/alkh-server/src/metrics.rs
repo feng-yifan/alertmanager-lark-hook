@@ -19,6 +19,8 @@ pub struct Metrics {
     pub deliveries_suppressed_total: AtomicU64,
     pub delivery_retries_total: AtomicU64,
     pub aggregator_flushed_total: AtomicU64,
+    pub aggregator_requeued_total: AtomicU64,
+    pub aggregator_dropped_total: AtomicU64,
     pub lark_api_errors_total: AtomicU64,
     pub render_failures_total: AtomicU64,
 }
@@ -134,6 +136,18 @@ impl Metrics {
         );
         gauge(
             &mut out,
+            "alkh_aggregator_requeued_total",
+            "Aggregated events requeued after a recoverable failure",
+            Self::get(&self.aggregator_requeued_total),
+        );
+        gauge(
+            &mut out,
+            "alkh_aggregator_dropped_total",
+            "Aggregated events abandoned (unrecoverable)",
+            Self::get(&self.aggregator_dropped_total),
+        );
+        gauge(
+            &mut out,
             "alkh_lark_api_errors_total",
             "Feishu OpenAPI errors",
             Self::get(&self.lark_api_errors_total),
@@ -161,6 +175,38 @@ mod tests {
         assert!(text.contains("alkh_hook_received_total 1"));
         assert!(text.contains("alkh_deliveries_sent_total 3"));
         assert!(text.contains("# TYPE alkh_http_requests_total counter"));
-        assert_eq!(text.lines().filter(|l| l.starts_with("# HELP")).count(), 16);
+        // 逐个断言「每个声明的计数器都被渲染」。写死数量既容易过时，也抓不到
+        // 「声明了却忘了渲染」这种等于「永远不动的指标」的问题。
+        let expected = [
+            "alkh_http_requests_total",
+            "alkh_http_errors_total",
+            "alkh_hook_received_total",
+            "alkh_hook_skipped_total",
+            "alkh_hook_rejected_total",
+            "alkh_alerts_firing_total",
+            "alkh_alerts_resolved_total",
+            "alkh_deliveries_sent_total",
+            "alkh_deliveries_updated_total",
+            "alkh_deliveries_recalled_total",
+            "alkh_deliveries_failed_total",
+            "alkh_deliveries_suppressed_total",
+            "alkh_delivery_retries_total",
+            "alkh_aggregator_flushed_total",
+            "alkh_aggregator_requeued_total",
+            "alkh_aggregator_dropped_total",
+            "alkh_lark_api_errors_total",
+            "alkh_render_failures_total",
+        ];
+        for name in expected {
+            assert!(
+                text.contains(&format!("# HELP {name} ")),
+                "指标未渲染: {name}"
+            );
+        }
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with("# HELP")).count(),
+            expected.len(),
+            "渲染出的指标数量应与声明一致（多出来说明有指标没被登记）"
+        );
     }
 }

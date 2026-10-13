@@ -21,10 +21,28 @@ async fn aggregator_loop(state: AppState) {
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         interval.tick().await;
-        let flushed = state.intake.flush_due().await;
-        if flushed > 0 {
-            Metrics::add(&state.metrics.aggregator_flushed_total, flushed as u64);
-            tracing::debug!(flushed, "聚合桶已冲刷");
+        let report = state.intake.flush_due().await;
+        if report.handled > 0 {
+            Metrics::add(
+                &state.metrics.aggregator_flushed_total,
+                report.handled as u64,
+            );
+            tracing::debug!(flushed = report.handled, "聚合桶已冲刷");
+        }
+        // 冲刷失败不再静默丢弃：放回队列退避重试，超限才放弃。这两个计数让
+        // 「聚合层正在丢事件」这件事变得可见（此前完全没有信号）。
+        if report.requeued > 0 {
+            Metrics::add(
+                &state.metrics.aggregator_requeued_total,
+                report.requeued as u64,
+            );
+        }
+        if report.dropped > 0 {
+            Metrics::add(
+                &state.metrics.aggregator_dropped_total,
+                report.dropped as u64,
+            );
+            tracing::error!(dropped = report.dropped, "有聚合事件被放弃（已无法重试）");
         }
     }
 }

@@ -13,6 +13,9 @@ use tokio::time::Instant;
 /// 默认去重窗口（R9）。
 pub const DEFAULT_DEDUP_WINDOW_SECS: i64 = 60;
 
+/// 一个聚合桶最多被重新排队多少次；超过后丢弃并记 error（此时已重试约 1 分钟）。
+pub const MAX_BUCKET_ATTEMPTS: u32 = 10;
+
 /// 一个等待冲刷的聚合桶。同一 `(hook, group_key)` 在窗口内只保留最后一个事件（R6）。
 #[derive(Debug, Clone)]
 pub struct PendingBucket {
@@ -74,6 +77,38 @@ impl Aggregator {
             .collect();
         due.sort_by_key(|b| b.deadline);
         due
+    }
+
+    /// 冲刷失败后把桶放回队列，保留事件并增加尝试次数。
+    ///
+    /// 返回 `false` 表示尝试次数已超限、该事件被丢弃。
+    ///
+    /// 若期间同一 `(hook, group_key)` 已有**更新**的事件入桶，则保留更新者
+    /// （R6 last-wins），本次的旧快照直接丢弃 —— 这样不会用旧状态覆盖新状态。
+    pub fn requeue_after_failure(&self, bucket: PendingBucket, retry_at: Instant) -> bool {
+        let key = Self::key(&bucket.hook_id, &bucket.group_key);
+        if self.buckets.contains_key(&key) {
+            return true;
+        }
+        let mut bucket = bucket;
+        bucket.attempts += 1;
+        bucket.deadline = retry_at;
+        if bucket.attempts > MAX_BUCKET_ATTEMPTS {
+            return false;
+        }
+        self.buckets.insert(key, bucket);
+        true
+    }
+
+    /// 取出全部桶（不论是否到期），用于优雅停机时冲刷。
+    pub fn take_all(&self) -> Vec<PendingBucket> {
+        let keys: Vec<String> = self.buckets.iter().map(|e| e.key().clone()).collect();
+        let mut all: Vec<PendingBucket> = keys
+            .into_iter()
+            .filter_map(|k| self.buckets.remove(&k).map(|(_, v)| v))
+            .collect();
+        all.sort_by_key(|b| b.deadline);
+        all
     }
 
     /// 最近一个到期时间，供调度循环决定 sleep 时长。
@@ -150,6 +185,85 @@ mod tests {
             reason,
             attempts: 0,
         }
+    }
+
+    /// 指定 hook 与 group_key 的桶，便于构造同键 / 跨键场景。
+    fn bucket_for(hook_id: &HookId, group_key: &str, deadline: Instant) -> PendingBucket {
+        PendingBucket {
+            hook_id: hook_id.clone(),
+            group_key: group_key.to_string(),
+            ..bucket(deadline, BucketReason::Aggregation)
+        }
+    }
+
+    /// 冲刷失败必须**保留事件**并增加尝试次数；超过上限才允许丢弃。
+    /// 这条路径以前是直接丢掉，等于静默吃掉一条 AM 认为已经投递成功的告警。
+    #[test]
+    fn requeue_after_failure_keeps_event_until_attempt_cap() {
+        let agg = Aggregator::default();
+        let hook = HookId::new();
+        let now = Instant::now();
+        agg.submit(bucket_for(&hook, "g", now));
+
+        let taken = agg.take_due(now + Duration::from_secs(1));
+        assert_eq!(taken.len(), 1);
+        assert!(agg.is_empty());
+
+        let retry_at = now + Duration::from_secs(2);
+        assert!(agg.requeue_after_failure(taken[0].clone(), retry_at));
+        assert_eq!(agg.len(), 1, "事件必须还在队列里");
+        assert_eq!(agg.next_deadline(), Some(retry_at), "应按新的重试时间排队");
+
+        // 未到期不会被取出
+        assert!(agg.take_due(now).is_empty());
+        let again = agg.take_due(retry_at);
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].attempts, 1, "尝试次数应递增");
+
+        // 到达上限后拒绝再排队
+        let mut capped = again[0].clone();
+        capped.attempts = MAX_BUCKET_ATTEMPTS;
+        assert!(!agg.requeue_after_failure(capped, retry_at));
+        assert!(agg.is_empty());
+    }
+
+    /// 失败重排期间若有更新的事件入桶，必须保留更新者（R6 last-wins），
+    /// 不能用旧快照把新状态覆盖回去。
+    #[test]
+    fn requeue_does_not_clobber_a_newer_event() {
+        let agg = Aggregator::default();
+        let hook = HookId::new();
+        let now = Instant::now();
+        agg.submit(bucket_for(&hook, "g", now));
+        let taken = agg.take_due(now + Duration::from_secs(1));
+
+        // 期间来了一个更新的事件
+        let mut newer = bucket_for(&hook, "g", now + Duration::from_secs(5));
+        newer.event.common_labels.insert("v".into(), "2".into());
+        agg.submit(newer.clone());
+
+        assert!(agg.requeue_after_failure(taken[0].clone(), now));
+        assert_eq!(agg.len(), 1);
+        // 保留的是更新者
+        let kept = agg.take_all();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            kept[0].event.common_labels.get("v").map(String::as_str),
+            Some("2")
+        );
+    }
+
+    /// 停机冲刷必须取出**全部**桶（含未到期），否则关停时照样丢事件。
+    #[test]
+    fn take_all_returns_undue_buckets_too() {
+        let agg = Aggregator::default();
+        let hook = HookId::new();
+        let now = Instant::now();
+        agg.submit(bucket_for(&hook, "g1", now + Duration::from_secs(600)));
+        agg.submit(bucket_for(&hook, "g2", now + Duration::from_secs(900)));
+        assert!(agg.take_due(now).is_empty(), "都还没到期");
+        assert_eq!(agg.take_all().len(), 2, "停机时应全部取出");
+        assert!(agg.is_empty());
     }
 
     #[test]

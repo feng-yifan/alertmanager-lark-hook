@@ -18,13 +18,37 @@ use tokio::time::Instant;
 
 use crate::aggregator::{
     Aggregator, BucketReason, PendingBucket, RateLimiter, DEFAULT_DEDUP_WINDOW_SECS,
+    MAX_BUCKET_ATTEMPTS,
 };
 use crate::deps::Deps;
 use crate::error::AppResult;
 use crate::sender::NotificationSender;
 
-/// 单个聚合桶的最大重调度次数，避免异常的自我延续。
-const MAX_BUCKET_ATTEMPTS: u32 = 10;
+/// 一次聚合冲刷的结果统计，供 `alkh-server` 更新指标与审计。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FlushReport {
+    /// 已成功处理。
+    pub handled: usize,
+    /// 处理失败但可恢复：已放回队列、等待退避重试。
+    pub requeued: usize,
+    /// 永久失败或重试超限而放弃。
+    pub dropped: usize,
+}
+
+enum FlushOutcome {
+    Done,
+    /// 可恢复的失败：把事件放回队列重试。
+    ///
+    /// 用 `Box` 是因为 `PendingBucket` 带整份事件快照（>280 字节），
+    /// 直接内联会让枚举尺寸膨胀（失败路径才会分配，可接受）。
+    Requeue(Box<PendingBucket>),
+    /// 永久失败（hook 被删、尝试次数超限等）。
+    Drop,
+}
+
+/// 聚合桶失败重试的基础退避（按尝试次数线性增长并封顶）。
+const BUCKET_RETRY_BASE_SECS: u64 = 2;
+const BUCKET_RETRY_MAX_SECS: u64 = 60;
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct IntakeOutcome {
@@ -233,19 +257,66 @@ impl IntakeService {
         }
     }
 
-    /// 冲刷到期的聚合桶；返回处理成功的事件数。由 `alkh-server` 定时调用。
-    pub async fn flush_due(&self) -> usize {
+    /// 冲刷所有到期桶，返回本次处理结果统计。
+    pub async fn flush_due(&self) -> FlushReport {
         let due = self.aggregator.take_due(Instant::now());
-        let mut handled = 0usize;
-        for bucket in due {
-            if self.flush_one(bucket).await {
-                handled += 1;
-            }
-        }
-        handled
+        self.flush_buckets(due).await
     }
 
-    async fn flush_one(&self, bucket: PendingBucket) -> bool {
+    /// 优雅停机时冲刷**全部**待处理桶（不论是否到期）。
+    ///
+    /// 聚合桶只存在于进程内存中，直接退出会把已受理（已回 200）的事件整批丢掉。
+    /// 关停前冲一次，至少覆盖「发布 / 滚动重启」这一最常见场景。
+    pub async fn flush_all_pending(&self) -> FlushReport {
+        let all = self.aggregator.take_all();
+        if !all.is_empty() {
+            tracing::info!(pending = all.len(), "停机前冲刷待处理的聚合桶");
+        }
+        self.flush_buckets(all).await
+    }
+
+    async fn flush_buckets(&self, buckets: Vec<PendingBucket>) -> FlushReport {
+        let mut report = FlushReport::default();
+        for bucket in buckets {
+            match self.flush_one(bucket).await {
+                FlushOutcome::Done => report.handled += 1,
+                FlushOutcome::Requeue(bucket) => {
+                    let bucket = *bucket;
+                    // 退避后重试。这里以前是直接丢弃，于是「当时飞书不可用 / 模板临时
+                    // 损坏 / 渠道被临时停用」会静默吃掉整条事件 —— 而 AM 早已收到 200，
+                    // 永远不会重发，告警就此消失。
+                    let backoff = (BUCKET_RETRY_BASE_SECS * bucket.attempts.max(1) as u64)
+                        .min(BUCKET_RETRY_MAX_SECS);
+                    let retry_at = Instant::now() + Duration::from_secs(backoff);
+                    if self
+                        .aggregator
+                        .requeue_after_failure(bucket.clone(), retry_at)
+                    {
+                        report.requeued += 1;
+                        tracing::debug!(
+                            hook_id = %bucket.hook_id,
+                            group_key = %bucket.group_key,
+                            attempts = bucket.attempts,
+                            backoff_secs = backoff,
+                            "聚合桶冲刷失败，已放回队列退避重试"
+                        );
+                    } else {
+                        report.dropped += 1;
+                        tracing::error!(
+                            hook_id = %bucket.hook_id,
+                            group_key = %bucket.group_key,
+                            attempts = bucket.attempts,
+                            "聚合桶重试次数超限，放弃该事件（AM 已收到 200，不会重发）"
+                        );
+                    }
+                }
+                FlushOutcome::Drop => report.dropped += 1,
+            }
+        }
+        report
+    }
+
+    async fn flush_one(&self, bucket: PendingBucket) -> FlushOutcome {
         if bucket.attempts > MAX_BUCKET_ATTEMPTS {
             tracing::warn!(
                 hook_id = %bucket.hook_id,
@@ -253,27 +324,29 @@ impl IntakeService {
                 attempts = bucket.attempts,
                 "聚合桶重调度次数超限，丢弃"
             );
-            return false;
+            return FlushOutcome::Drop;
         }
 
+        // hook 已被删除 ⇒ 永久失败，重试没有意义。
         let hook = match self.deps.hooks.get(&bucket.hook_id).await {
             Ok(Some(h)) => h,
-            Ok(None) => return false,
+            Ok(None) => return FlushOutcome::Drop,
             Err(e) => {
                 tracing::error!(error = %e, "冲刷聚合桶时读取 hook 失败");
-                return false;
+                return FlushOutcome::Requeue(Box::new(bucket));
             }
         };
         let channel = match self.deps.channels.get(&bucket.channel_id).await {
             Ok(Some(c)) => c,
-            Ok(None) => return false,
+            Ok(None) => return FlushOutcome::Drop,
             Err(e) => {
                 tracing::error!(error = %e, "冲刷聚合桶时读取渠道失败");
-                return false;
+                return FlushOutcome::Requeue(Box::new(bucket));
             }
         };
+        // 被停用是**可恢复**的：管理员重新启用后应当补发，所以放回队列而不是丢弃。
         if !hook.enabled || !channel.enabled {
-            return false;
+            return FlushOutcome::Requeue(Box::new(bucket));
         }
         let policy = match self.deps.policies.get(&channel.id).await {
             Ok(Some(p)) => p,
@@ -282,14 +355,17 @@ impl IntakeService {
 
         let hash = event_hash(&hook.id, &bucket.event);
         let now = self.deps.now();
+        // 需要保留事件本身以便失败后重试；聚合桶冲刷不是热路径（每个窗口至多一次），
+        // 一次克隆的成本远小于后面那次飞书调用。
+        let event = bucket.event.clone();
         match self
-            .process_event(&hook, &channel, &policy, bucket.event, hash, now)
+            .process_event(&hook, &channel, &policy, event, hash, now)
             .await
         {
-            Ok(_) => true,
+            Ok(_) => FlushOutcome::Done,
             Err(e) => {
-                tracing::warn!(error = %e, "冲刷聚合桶失败");
-                false
+                tracing::warn!(error = %e, "冲刷聚合桶失败，将退避重试");
+                FlushOutcome::Requeue(Box::new(bucket))
             }
         }
     }
