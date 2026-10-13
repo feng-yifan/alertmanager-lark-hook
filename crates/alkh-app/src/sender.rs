@@ -654,12 +654,9 @@ impl NotificationSender {
                     )
                     .await?;
                 if !outcome.failed_cards.is_empty() {
-                    return Err(AppError::Lark(LarkError::new(
-                        -1,
-                        format!(
-                            "飞书返回部分失败: {}",
-                            serde_json::to_string(&outcome.failed_cards).unwrap_or_default()
-                        ),
+                    return Err(AppError::Lark(alkh_domain::ports::feed_card_failure(
+                        "发送应用消息流卡片部分失败",
+                        &outcome.failed_cards,
                     )));
                 }
                 delivery.app_feed_biz_id = Some(
@@ -722,6 +719,8 @@ pub fn is_update_unavailable(err: &LarkError) -> bool {
         200740 | 200750 | 200860 | 300311
         // 消息已删除 / 已过期 / 不可见
         | 230110 | 230009 | 230050
+            // 应用消息流卡片不存在（本适配器由 failed_cards 的 reason 归一而来）
+            | LarkError::CODE_FEED_CARD_NOT_FOUND
     )
 }
 
@@ -746,6 +745,12 @@ mod tests {
             "rate limited"
         )));
         assert!(!is_update_unavailable(&LarkError::new(0, "ok")));
+        // 应用消息流卡片不存在（由 failed_cards 的 reason 归一而来）也要触发 R1 降级，
+        // 否则 app feed 的原地更新失效后不会改发新消息。
+        assert!(is_update_unavailable(&LarkError::new(
+            LarkError::CODE_FEED_CARD_NOT_FOUND,
+            "feed card not created"
+        )));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! 端口（ports）：领域层向外声明的能力契约，由 `alkh-infra` 实现。
 
+use crate::error::LarkError;
 use async_trait::async_trait;
 
 use crate::alert::{AlertGroup, Delivery, DeliveryState, GroupStatus};
@@ -142,6 +143,52 @@ pub struct LarkFailedCard {
     pub biz_id: Option<String>,
     pub user_id: Option<String>,
     pub reason: Option<String>,
+}
+
+impl LarkFailedCard {
+    fn reason_code(&self) -> Option<&str> {
+        self.reason.as_deref().map(str::trim)
+    }
+
+    /// 卡片不存在（飞书 `reason = 2` / `NOT_CREATED`）：更新它永远不会成功，
+    /// 应走 R1 降级发新消息。
+    pub fn is_not_found(&self) -> bool {
+        matches!(
+            self.reason_code(),
+            Some("2") | Some("NOT_CREATED") | Some("not_created")
+        )
+    }
+
+    /// 触发频率限制（`reason = 3` / `RATE_LIMITED`）：可重试。
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(
+            self.reason_code(),
+            Some("3") | Some("RATE_LIMITED") | Some("rate_limited")
+        )
+    }
+}
+
+/// 把 `failed_cards` 归一成一个 `LarkError`。
+///
+/// 原先两处都合成固定码 `-1`，既不可重试、也不满足 `is_update_unavailable`，
+/// 于是「应用消息流卡片的原地更新已不可用」会被当成普通失败直接标 Failed，
+/// R1 降级对 app feed 完全失效；限频也同样不会被重试。
+pub fn feed_card_failure(action: &str, failed: &[LarkFailedCard]) -> LarkError {
+    let detail = serde_json::to_string(failed).unwrap_or_default();
+    if failed.iter().any(LarkFailedCard::is_not_found) {
+        return LarkError::new(
+            LarkError::CODE_FEED_CARD_NOT_FOUND,
+            format!("{action}：卡片不存在（可降级为新消息）: {detail}"),
+        );
+    }
+    if failed.iter().any(LarkFailedCard::is_rate_limited) {
+        return LarkError::new(
+            LarkError::CODE_RATE_LIMITED,
+            format!("{action}：触发频率限制（可重试）: {detail}"),
+        )
+        .retryable(true);
+    }
+    LarkError::new(-1, format!("{action}: {detail}"))
 }
 
 /// 飞书开放平台网关。
@@ -408,5 +455,45 @@ pub fn actor_label(actor: &AuditActor) -> String {
         AuditActor::Admin { username } => format!("admin:{username}"),
         AuditActor::AlertManager { hook_id } => format!("hook:{hook_id}"),
         AuditActor::System { job } => format!("job:{job}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn card(reason: &str) -> LarkFailedCard {
+        LarkFailedCard {
+            biz_id: Some("b1".into()),
+            user_id: None,
+            reason: Some(reason.into()),
+        }
+    }
+
+    /// 飞书的 `failed_cards` 只有 reason 枚举、没有数字错误码。
+    /// 归一化必须区分「卡片不存在」（可降级）与「限频」（可重试），
+    /// 否则 R1 对应用消息流卡片失效、限频也不会重试。
+    #[test]
+    fn feed_card_failure_is_normalized_by_reason() {
+        let not_created = feed_card_failure("x", &[card("NOT_CREATED")]);
+        assert_eq!(not_created.code, LarkError::CODE_FEED_CARD_NOT_FOUND);
+        assert!(!not_created.retryable);
+        // 数字形式（飞书两种都出现过）
+        assert_eq!(
+            feed_card_failure("x", &[card("2")]).code,
+            LarkError::CODE_FEED_CARD_NOT_FOUND
+        );
+
+        let limited = feed_card_failure("x", &[card("3")]);
+        assert_eq!(limited.code, LarkError::CODE_RATE_LIMITED);
+        assert!(limited.retryable, "限频必须可重试");
+
+        let permission = feed_card_failure("x", &[card("NO_PERMISSION")]);
+        assert_eq!(permission.code, -1);
+        assert!(!permission.retryable);
+
+        // 混合时以「卡片不存在」优先：此时重试更新永远不会成功，应降级。
+        let mixed = feed_card_failure("x", &[card("RATE_LIMITED"), card("NOT_CREATED")]);
+        assert_eq!(mixed.code, LarkError::CODE_FEED_CARD_NOT_FOUND);
     }
 }

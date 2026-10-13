@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 
 use alkh_domain::channel::ReceiveIdType;
 use alkh_domain::error::{LarkError, PortError};
-use alkh_domain::ports::{AppFeedCardPayload, LarkChat, LarkGateway, LarkSendOutcome};
+use alkh_domain::ports::{
+    feed_card_failure, AppFeedCardPayload, LarkChat, LarkFailedCard, LarkGateway, LarkSendOutcome,
+};
 use alkh_server::config::Config;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -42,6 +44,9 @@ struct FakeState {
     /// 用于覆盖发送失败路径（默认 0 = 不注入）。
     fail_send_times: usize,
     fail_send_code: i64,
+    /// 注入故障：应用消息流卡片**更新**返回 `failed_cards[].reason = 该值`
+    /// （例如 `NOT_CREATED`），用于覆盖 R1 对 app feed 的降级路径。
+    fail_feed_update_reason: Option<String>,
 }
 
 #[derive(Default)]
@@ -94,6 +99,11 @@ impl FakeLark {
         let mut s = self.snapshot();
         s.fail_send_times = times;
         s.fail_send_code = code;
+    }
+
+    /// 让下一次应用消息流卡片**更新**以 `failed_cards` 形式失败，reason 由调用方指定。
+    fn inject_app_feed_update_reason(&self, reason: Option<&str>) {
+        self.snapshot().fail_feed_update_reason = reason.map(str::to_string);
     }
 
     fn take_injected_send_failure(&self) -> Option<PortError> {
@@ -237,6 +247,19 @@ impl LarkGateway for FakeLark {
         _user_id_type: ReceiveIdType,
         payload: &AppFeedCardPayload,
     ) -> alkh_domain::PortResult<()> {
+        // 真实网关在 `failed_cards` 非空时用同一套归一化生成错误，这里保持一致，
+        // 否则假网关会掩盖 R1 对 app feed 的降级行为。
+        let injected = self.snapshot().fail_feed_update_reason.clone();
+        if let Some(reason) = injected {
+            return Err(PortError::Lark(feed_card_failure(
+                "更新应用消息流卡片失败",
+                &[LarkFailedCard {
+                    biz_id: payload.biz_id.clone(),
+                    user_id: None,
+                    reason: Some(reason),
+                }],
+            )));
+        }
         self.snapshot().feed_cards.push(payload.clone());
         Ok(())
     }
@@ -958,6 +981,81 @@ async fn repeated_login_failures_are_throttled_and_do_not_leak_usernames() {
     // 被节流期间即使密码正确也不放行（否则节流形同虚设）
     let (status, _) = login(json!({"username": "admin", "password": "test-password-123"})).await;
     assert_eq!(status, reqwest::StatusCode::TOO_MANY_REQUESTS);
+}
+
+/// 回归：应用消息流卡片的「卡片已不存在」必须触发 R1 降级（改发新消息）。
+///
+/// 飞书该接口的 `failed_cards` 只有 `reason` 枚举、没有数字错误码，而原实现一律
+/// 合成 `-1`：既不满足 `is_update_unavailable`、也不可重试，于是 app feed 的原地
+/// 更新一旦失效就直接标 Failed —— R1 对应用消息流卡片完全失效，用户再也收不到更新。
+#[tokio::test]
+async fn app_feed_update_not_created_degrades_to_new_message() {
+    let mut h = start().await;
+
+    // 用户级渠道（app_feed_card 只支持 open_id / user_id）
+    let (status, body) = h
+        .post(
+            "/api/v1/channels",
+            json!({
+                "name": "值班同学",
+                "receive_id": "ou_feed_user",
+                "receive_id_type": "open_id"
+            }),
+        )
+        .await;
+    assert_eq!(status, 201, "{body}");
+    let channel_id = body["id"].as_str().unwrap().to_string();
+    h.hook_token = Some(body["hook_token"].as_str().unwrap().to_string());
+    h.channel_id = Some(channel_id.clone());
+
+    let resp = h
+        .http
+        .put(h.url(&format!("/api/v1/channels/{channel_id}/policy")))
+        .bearer_auth(&h.token)
+        .json(&json!({
+            "message_type": "app_feed_card",
+            "pin_unresolved": false,
+            "repeat_policy": "suppress",
+            "resolved_policy": "send",
+            "group_update_policy": "update_previous",
+            "label_matchers": [],
+            "aggregation_window_secs": 0,
+            "min_send_interval_secs": 0,
+            "max_alerts_per_message": 20,
+            "mute_until": null
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // 1) 首次告警 → 正常发出
+    let (_, body) = h.push(firing_payload(1)).await;
+    assert_eq!(body["action"], "send_new");
+    assert_eq!(body["delivery_state"], "active");
+    let sent_before = h.fake.snapshot().feed_cards.len();
+
+    // 2) 让后续更新以 failed_cards(reason=NOT_CREATED) 失败 —— 卡片已不存在
+    h.fake.inject_app_feed_update_reason(Some("NOT_CREATED"));
+
+    // 3) 内容变化 → 原地更新不可用 → 必须降级为新消息
+    // 注意：必须让**渲染结果**变化，否则 R3「内容未变化则跳过更新」会提前返回，
+    // 根本不会去调更新接口（默认 app feed 模板只渲染 alertname/summary 等，
+    // 单纯增加告警条数不会改变渲染结果）。
+    let mut evolved = firing_payload(2);
+    evolved["commonAnnotations"] = json!({"summary": "CPU 过高（已升级）"});
+    for alert in evolved["alerts"].as_array_mut().unwrap() {
+        alert["annotations"] = json!({"summary": "CPU 过高（已升级）"});
+    }
+    let (_, body) = h.push(evolved).await;
+    assert_eq!(body["action"], "update_in_place", "{body}");
+    assert!(
+        h.fake.snapshot().feed_cards.len() > sent_before,
+        "卡片不存在时应降级改发新消息（R1）：feed_cards {} -> {}（修复前一律合成 -1，\
+         既不触发降级也不可重试，会直接标 Failed）: {body}",
+        sent_before,
+        h.fake.snapshot().feed_cards.len()
+    );
 }
 
 /// 安全回归：告警的 `generatorURL` / `externalURL` 由发送方完全控制，

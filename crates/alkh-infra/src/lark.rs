@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 use alkh_domain::channel::ReceiveIdType;
 use alkh_domain::error::{LarkError, PortError, PortResult};
 use alkh_domain::ports::{
-    AppFeedCardPayload, LarkChat, LarkCredential, LarkCredentials, LarkFailedCard, LarkGateway,
-    LarkSendOutcome,
+    feed_card_failure, AppFeedCardPayload, LarkChat, LarkCredential, LarkCredentials,
+    LarkFailedCard, LarkGateway, LarkSendOutcome,
 };
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
@@ -593,9 +593,9 @@ impl LarkGateway for LarkClient {
         let data = self.call(reqwest::Method::PUT, &path, Some(&body)).await?;
         let failed = parse_failed_cards(&data);
         if !failed.is_empty() {
-            return Err(PortError::Lark(LarkError::new(
-                -1,
-                format!("更新应用消息流卡片失败: {failed:?}"),
+            return Err(PortError::Lark(feed_card_failure(
+                "更新应用消息流卡片失败",
+                &failed,
             )));
         }
         Ok(())
@@ -619,9 +619,9 @@ impl LarkGateway for LarkClient {
             .await?;
         let failed = parse_failed_cards(&data);
         if !failed.is_empty() {
-            return Err(PortError::Lark(LarkError::new(
-                -1,
-                format!("删除应用消息流卡片失败: {failed:?}"),
+            return Err(PortError::Lark(feed_card_failure(
+                "删除应用消息流卡片失败",
+                &failed,
             )));
         }
         Ok(())
