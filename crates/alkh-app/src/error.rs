@@ -13,6 +13,9 @@ pub enum AppError {
     Unauthenticated,
     #[error("{0}")]
     Forbidden(String),
+    /// 登录失败次数过多，暂时拒绝该来源（429）。`retry_after_secs` 为建议的等待秒数。
+    #[error("尝试过于频繁")]
+    RateLimited { retry_after_secs: u64 },
     /// 尚未配置飞书应用凭据（或其它必需配置）。
     #[error("{0}")]
     LarkNotConfigured(String),
@@ -36,6 +39,9 @@ impl AppError {
     pub fn internal(msg: impl std::fmt::Display) -> Self {
         Self::Internal(msg.to_string())
     }
+    pub fn rate_limited(retry_after_secs: u64) -> Self {
+        Self::RateLimited { retry_after_secs }
+    }
     pub fn not_configured(msg: impl std::fmt::Display) -> Self {
         Self::LarkNotConfigured(msg.to_string())
     }
@@ -48,6 +54,7 @@ impl AppError {
             AppError::Conflict(_) => "conflict",
             AppError::Unauthenticated => "unauthenticated",
             AppError::Forbidden(_) => "forbidden",
+            AppError::RateLimited { .. } => "rate_limited",
             AppError::LarkNotConfigured(_) => "lark_not_configured",
             AppError::Lark(_) => "lark_api_error",
             AppError::Internal(_) => "internal_error",

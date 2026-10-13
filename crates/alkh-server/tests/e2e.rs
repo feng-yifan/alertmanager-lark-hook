@@ -903,6 +903,63 @@ async fn failed_intake_stays_retryable_instead_of_being_deduped() {
     );
 }
 
+/// 安全回归：登录失败达到阈值后必须被节流（429），否则公网入口可无限撞库；
+/// 且「用户名不存在」与「密码错误」的对外表现必须完全一致（不泄露账号是否存在）。
+#[tokio::test]
+async fn repeated_login_failures_are_throttled_and_do_not_leak_usernames() {
+    let h = start().await;
+    let path = "/api/v1/auth/login";
+    let login = |body: Value| {
+        let req = h.http.post(h.url(path)).json(&body);
+        async move {
+            let resp = req.send().await.expect("登录请求失败");
+            let status = resp.status();
+            let parsed = resp.json().await.unwrap_or(Value::Null);
+            (status, parsed)
+        }
+    };
+
+    // 用户名不存在 vs 密码错误：状态码与错误信封必须一致
+    let (s1, b1) = login(json!({"username": "no-such-user", "password": "whatever-123"})).await;
+    let (s2, b2) = login(json!({"username": "admin", "password": "wrong-password"})).await;
+    assert_eq!(s1, reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(s2, reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        b1["error"], b2["error"],
+        "两种失败必须给出完全相同的响应，否则可枚举用户名"
+    );
+
+    // 把 admin 打到阈值（上面已经失败 1 次）
+    for _ in 0..4 {
+        let (status, _) = login(json!({"username": "admin", "password": "wrong-password"})).await;
+        assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    // 再试一次：应被节流
+    let (status, body) = login(json!({"username": "admin", "password": "wrong-password"})).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        "连续失败后应被节流: {body}"
+    );
+    assert_eq!(body["error"]["code"], "rate_limited");
+    assert!(
+        body["error"]["details"]["retry_after_secs"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
+        "应给出 retry_after_secs: {body}"
+    );
+
+    // 节流是按 (用户名, 来源) 计的：别的用户名不受影响（避免误伤）
+    let (status, _) = login(json!({"username": "other-admin", "password": "wrong-password"})).await;
+    assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+
+    // 被节流期间即使密码正确也不放行（否则节流形同虚设）
+    let (status, _) = login(json!({"username": "admin", "password": "test-password-123"})).await;
+    assert_eq!(status, reqwest::StatusCode::TOO_MANY_REQUESTS);
+}
+
 /// 安全回归：告警的 `generatorURL` / `externalURL` 由发送方完全控制，
 /// 非 http(s) 的值（尤其 `javascript:`）必须在入库前被丢弃。
 ///

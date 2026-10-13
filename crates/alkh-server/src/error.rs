@@ -62,6 +62,12 @@ impl IntoResponse for ApiError {
                 None,
             ),
             AppError::Forbidden(m) => (StatusCode::FORBIDDEN, "forbidden", m.clone(), None),
+            AppError::RateLimited { retry_after_secs } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                format!("尝试过于频繁，请 {retry_after_secs} 秒后再试"),
+                Some(json!({ "retry_after_secs": retry_after_secs })),
+            ),
             // 未知 hook token 使用专用错误码（`docs/api.md` §8）
             AppError::NotFound(m) if m == "unknown_hook" => (
                 StatusCode::NOT_FOUND,
