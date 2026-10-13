@@ -53,17 +53,10 @@ export interface MetaVariable {
 
 export interface Meta {
   version: string;
-  message_types: EnumOption[];
   repeat_policies: EnumOption[];
   resolved_policies: EnumOption[];
   group_update_policies: EnumOption[];
   match_ops: EnumOption[];
-  /** 状态标签类型：{value,label} 对象数组（不是字符串数组）。 */
-  status_label_types: EnumOption[];
-  /** 应用消息流卡片按钮类型（default/primary/success），与 status_label_types 不是同一个枚举。 */
-  feed_button_types: EnumOption[];
-  /** 应用消息流卡片 biz_id 生成策略。 */
-  biz_id_sources: EnumOption[];
   card_sources: EnumOption[];
   channel_kinds: EnumOption[];
   receive_id_types: EnumOption[];
@@ -74,8 +67,6 @@ export interface Meta {
   card_presets: CardPresetMeta[];
   /** 严重级别 → 卡片 header 颜色。 */
   severity_colors: Record<string, string>;
-  /** `pin_unresolved` 生效的消息类型（目前仅 app_feed_card）。 */
-  pin_supported_message_types: string[];
   token_prefix: string;
   hook_path_template: string;
 }
@@ -152,7 +143,6 @@ export type ReceiveIdType = 'chat_id' | 'open_id' | 'user_id' | 'email';
 export type ChannelKind = 'group' | 'p2p_user';
 export type ChannelSource = 'feishu_sync' | 'manual';
 
-export type MessageType = 'card_message' | 'app_feed_card';
 export type RepeatPolicy = 'suppress' | 'send' | 'send_and_revoke_previous';
 export type ResolvedPolicy = 'send' | 'send_and_delete_previous' | 'update_previous';
 export type GroupUpdatePolicy = 'update_previous' | 'send' | 'suppress';
@@ -165,9 +155,7 @@ export interface LabelMatcher {
 }
 
 export interface NotificationPolicy {
-  message_type: MessageType;
   card_template_id: UUID | null;
-  pin_unresolved: boolean;
   repeat_policy: RepeatPolicy;
   resolved_policy: ResolvedPolicy;
   group_update_policy: GroupUpdatePolicy;
@@ -270,7 +258,6 @@ export interface ChannelSyncResult {
 }
 
 export interface TestMessageRequest {
-  message_type?: MessageType;
   card_template_id?: UUID;
   /** 后端请求字段名是 `sample`（不是 `kind`）；省略时后端按 firing 处理。 */
   sample?: 'firing' | 'resolved';
@@ -280,17 +267,7 @@ export interface TestMessageRequest {
 /* 5. Card templates                                                   */
 /* ------------------------------------------------------------------ */
 
-export type CardTemplateKind = 'card_message' | 'app_feed_card';
 export type CardSource = 'builder_json' | 'builder_template';
-export type StatusLabelType = 'primary' | 'secondary' | 'success' | 'danger';
-/** 飞书应用消息流卡片按钮类型（`open_app_feed_card_button.button_type`）。 */
-export type FeedButtonType = 'default' | 'primary' | 'success';
-/**
- * `docs/api.md` §5 shows the literal `"alert_group"`; `docs/domain-model.md` names the
- * variants `AlertGroupId | HookId | Custom`. The short forms are used here, and the UI
- * renders whatever unknown value the API returns instead of rewriting it.
- */
-export type BizIdSource = 'alert_group' | 'hook' | 'custom';
 
 /** CardKit JSON 2.0 is an arbitrary (but valid) JSON document. */
 export type CardJson = Record<string, unknown>;
@@ -351,34 +328,6 @@ export interface CardPresetMeta {
   nodes_json: string;
 }
 
-export interface StatusLabelSpec {
-  text: string;
-  type_firing: StatusLabelType;
-  type_resolved: StatusLabelType;
-}
-
-export interface LinkSpec {
-  enabled: boolean;
-  url: string;
-}
-
-export interface FeedButtonSpec {
-  text: string;
-  url: string;
-  button_type: FeedButtonType;
-}
-
-export interface AppFeedCardSpec {
-  title: string;
-  preview: string;
-  status_label: StatusLabelSpec;
-  link: LinkSpec;
-  /** `docs/domain-model.md`: at most 2 buttons. */
-  buttons: FeedButtonSpec[];
-  close_notify: boolean;
-  biz_id_source: BizIdSource;
-}
-
 /** 卡片消息内容：真实线格式是嵌在 `CardTemplate.card_message` 下的对象。 */
 export interface CardMessageSpec {
   source: CardSource;
@@ -388,34 +337,17 @@ export interface CardMessageSpec {
   variables: TemplateVariable[];
 }
 
-export interface CardMessageTemplate {
+export interface CardTemplate {
   id: UUID;
-  kind: 'card_message';
   name: string;
   /** 卡片内容嵌套在此字段下（顶层没有扁平的 source/card_json/variables）。 */
   card_message: CardMessageSpec | null;
-  app_feed_spec: AppFeedCardSpec | null;
   detected_variables: string[];
   unknown_variables: string[];
   is_default: boolean;
   created_at: ISODateTime;
   updated_at: ISODateTime;
 }
-
-export interface AppFeedCardTemplate {
-  id: UUID;
-  kind: 'app_feed_card';
-  name: string;
-  card_message: CardMessageSpec | null;
-  app_feed_spec: AppFeedCardSpec | null;
-  detected_variables: string[];
-  unknown_variables: string[];
-  is_default: boolean;
-  created_at: ISODateTime;
-  updated_at: ISODateTime;
-}
-
-export type CardTemplate = CardMessageTemplate | AppFeedCardTemplate;
 
 export interface CardMessageInput {
   source: CardSource;
@@ -425,23 +357,20 @@ export interface CardMessageInput {
   variables?: TemplateVariable[];
 }
 
-/** `POST`/`PATCH /card-templates` 的真实请求体；`name` 与 `kind` 是必填。 */
+/** `POST`/`PATCH /card-templates` 的真实请求体；`name` 必填。 */
 export interface CardTemplateInput {
   name: string;
-  kind: CardTemplateKind;
   card_message?: CardMessageInput | null;
-  app_feed_spec?: AppFeedCardSpec | null;
   is_default?: boolean;
 }
 
 export type CardTemplateCreate = CardTemplateInput;
-/** PATCH 与创建共用同一请求体（`name`/`kind` 同样必填）。 */
+/** PATCH 与创建共用同一请求体。 */
 export type CardTemplatePatch = CardTemplateInput;
 
 /** `GET /card-templates/default`：内置默认模板内容。 */
 export interface CardTemplateDefaults {
   card_message: CardMessageSpec;
-  app_feed_spec: AppFeedCardSpec;
 }
 
 /**
@@ -459,9 +388,7 @@ export type ValidationItem =
 
 export interface ValidateRequest {
   name: string;
-  kind: CardTemplateKind;
   card_message?: CardMessageInput | null;
-  app_feed_spec?: AppFeedCardSpec | null;
   is_default?: boolean;
 }
 
@@ -505,8 +432,7 @@ export interface MockBaseline {
 }
 
 export interface PreviewResponse {
-  rendered_card_json: CardJson | null;
-  rendered_app_feed_spec: AppFeedCardSpec | null;
+  rendered_card_json: CardJson;
   variables: Record<string, unknown>;
 }
 
@@ -588,12 +514,10 @@ export interface Delivery {
   id: UUID;
   alert_group_id: UUID;
   kind: DeliveryKind;
-  message_type: MessageType;
   state: DeliveryState;
   card_template_id: UUID | null;
   lark_message_id: string | null;
   card_entity_id: string | null;
-  app_feed_biz_id: string | null;
   attempt: number;
   last_error: string | null;
   created_at: ISODateTime;

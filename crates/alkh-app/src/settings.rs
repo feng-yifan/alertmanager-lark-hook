@@ -16,7 +16,6 @@ pub struct SettingsView {
     pub app_secret_set: bool,
     pub lark_base_url: String,
     pub public_base_url: Option<String>,
-    pub default_app_feed_link: Option<String>,
     pub retention: RetentionPolicy,
     pub updated_at: alkh_domain::Timestamp,
     pub configured: bool,
@@ -32,8 +31,6 @@ pub struct SettingsInput {
     pub lark_base_url: String,
     #[serde(default)]
     pub public_base_url: Option<String>,
-    #[serde(default)]
-    pub default_app_feed_link: Option<String>,
     pub retention: RetentionPolicy,
 }
 
@@ -66,7 +63,6 @@ impl SettingsService {
             app_secret_set: s.lark_app_secret_enc.is_some(),
             lark_base_url: s.lark_base_url.clone(),
             public_base_url: s.public_base_url.clone(),
-            default_app_feed_link: s.default_app_feed_link.clone(),
             retention: s.retention,
             updated_at: s.updated_at,
             configured: s.is_configured(),
@@ -96,7 +92,6 @@ impl SettingsService {
 
         s.lark_base_url = input.lark_base_url.trim().to_string();
         s.public_base_url = normalize(input.public_base_url);
-        s.default_app_feed_link = normalize(input.default_app_feed_link);
         s.retention = input.retention;
         s.updated_at = self.deps.now();
         s.validate()?;

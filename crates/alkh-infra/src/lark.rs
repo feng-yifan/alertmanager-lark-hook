@@ -11,19 +11,13 @@
 //! | 发送消息 | `POST /open-apis/im/v1/messages?receive_id_type=` |
 //! | 更新已发卡片消息 | `PATCH /open-apis/im/v1/messages/:message_id` |
 //! | 撤回消息 | `DELETE /open-apis/im/v1/messages/:message_id` |
-//! | 发送应用消息流卡片 | `POST /open-apis/im/v2/app_feed_card` |
-//! | 更新应用消息流卡片 | `PUT /open-apis/im/v2/app_feed_card/batch` |
-//! | 删除应用消息流卡片 | `DELETE /open-apis/im/v2/app_feed_card/batch` |
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use alkh_domain::channel::ReceiveIdType;
 use alkh_domain::error::{LarkError, PortError, PortResult};
-use alkh_domain::ports::{
-    feed_card_failure, AppFeedCardPayload, LarkChat, LarkCredential, LarkCredentials,
-    LarkFailedCard, LarkGateway, LarkSendOutcome,
-};
+use alkh_domain::ports::{LarkChat, LarkCredential, LarkCredentials, LarkGateway, LarkSendOutcome};
 use async_trait::async_trait;
 use serde_json::{json, Map, Value};
 use tokio::sync::RwLock;
@@ -32,8 +26,6 @@ use tokio::sync::RwLock;
 const TOKEN_REFRESH_MARGIN_SECS: u64 = 300;
 /// 单个 HTTP 请求的最大重试次数（限频 / 5xx / 网络错误）。
 const MAX_ATTEMPTS: u32 = 3;
-/// 应用消息流卡片更新字段：标题 / 预览 / 状态标签 / 按钮 / 跳转链接 / 即时提醒 / 进行通知。
-const FEED_UPDATE_FIELDS: [&str; 7] = ["1", "3", "10", "11", "12", "13", "103"];
 
 struct CachedToken {
     token: String,
@@ -278,86 +270,9 @@ fn is_token_error(code: i64) -> bool {
     matches!(code, 99991663 | 99991664 | 99991661 | 99991668 | 99991677)
 }
 
-fn user_id_type_str(t: ReceiveIdType) -> PortResult<&'static str> {
-    match t {
-        ReceiveIdType::OpenId => Ok("open_id"),
-        ReceiveIdType::UserId => Ok("user_id"),
-        ReceiveIdType::ChatId => Err(PortError::Internal(
-            "应用消息流卡片不支持 chat_id（该接口只有用户维度）".into(),
-        )),
-        ReceiveIdType::Email => Err(PortError::Internal(
-            "应用消息流卡片不支持 email，请使用 open_id / user_id".into(),
-        )),
-    }
-}
-
-/// 构造 `open_app_feed_card` JSON。
-fn app_feed_card_json(payload: &AppFeedCardPayload, include_biz_id: bool) -> Value {
-    let mut card = Map::new();
-    if include_biz_id {
-        if let Some(biz) = &payload.biz_id {
-            card.insert("biz_id".into(), json!(biz));
-        }
-    } else if let Some(biz) = &payload.biz_id {
-        card.insert("biz_id".into(), json!(biz));
-    }
-    card.insert("title".into(), json!(payload.title));
-    card.insert("preview".into(), json!(payload.preview));
-
-    if let Some(label) = &payload.status_label {
-        card.insert(
-            "status_label".into(),
-            json!({ "text": label.text, "type": label.label_type.as_str() }),
-        );
-    }
-    if let Some(link) = &payload.link {
-        card.insert("link".into(), json!({ "link": link }));
-    }
-    if !payload.buttons.is_empty() {
-        let buttons: Vec<Value> = payload
-            .buttons
-            .iter()
-            .map(|b| {
-                json!({
-                    "action_type": "url_page",
-                    "text": { "text": b.text },
-                    "button_type": b.button_type.as_str(),
-                    "multi_url": { "url": b.url }
-                })
-            })
-            .collect();
-        card.insert("buttons".into(), json!({ "buttons": buttons }));
-    }
-    card.insert("time_sensitive".into(), json!(payload.time_sensitive));
-    card.insert(
-        "notify".into(),
-        json!({ "close_notify": payload.close_notify }),
-    );
-    Value::Object(card)
-}
-
 /// 数据包装成 JSON 字符串（飞书要求 `content` / `data` 为转义后的字符串）。
 fn as_json_string(v: &Value) -> PortResult<String> {
     serde_json::to_string(v).map_err(|e| PortError::Internal(format!("JSON 序列化失败: {e}")))
-}
-
-fn parse_failed_cards(data: &Value) -> Vec<LarkFailedCard> {
-    data.get("failed_cards")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .map(|c| LarkFailedCard {
-                    biz_id: c.get("biz_id").and_then(Value::as_str).map(str::to_string),
-                    user_id: c.get("user_id").and_then(Value::as_str).map(str::to_string),
-                    reason: c.get("reason").map(|r| {
-                        r.as_str()
-                            .map(str::to_string)
-                            .unwrap_or_else(|| r.to_string())
-                    }),
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 #[async_trait]
@@ -511,8 +426,6 @@ impl LarkGateway for LarkClient {
                 .get("message_id")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            app_feed_biz_id: None,
-            failed_cards: Vec::new(),
         })
     }
 
@@ -546,185 +459,16 @@ impl LarkGateway for LarkClient {
         self.call(reqwest::Method::DELETE, &path, None).await?;
         Ok(())
     }
-
-    async fn send_app_feed_card(
-        &self,
-        user_id: &str,
-        user_id_type: ReceiveIdType,
-        payload: &AppFeedCardPayload,
-    ) -> PortResult<LarkSendOutcome> {
-        let path = format!(
-            "/open-apis/im/v2/app_feed_card?user_id_type={}",
-            user_id_type_str(user_id_type)?
-        );
-        let body = json!({
-            "app_feed_card": app_feed_card_json(payload, true),
-            "user_ids": [user_id],
-        });
-        let data = self.call(reqwest::Method::POST, &path, Some(&body)).await?;
-        Ok(LarkSendOutcome {
-            message_id: None,
-            app_feed_biz_id: data
-                .get("biz_id")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| payload.biz_id.clone()),
-            failed_cards: parse_failed_cards(&data),
-        })
-    }
-
-    async fn update_app_feed_card(
-        &self,
-        user_id: &str,
-        user_id_type: ReceiveIdType,
-        payload: &AppFeedCardPayload,
-    ) -> PortResult<()> {
-        let path = format!(
-            "/open-apis/im/v2/app_feed_card/batch?user_id_type={}",
-            user_id_type_str(user_id_type)?
-        );
-        let body = json!({
-            "feed_cards": [{
-                "app_feed_card": app_feed_card_json(payload, true),
-                "user_id": user_id,
-                "update_fields": FEED_UPDATE_FIELDS,
-            }]
-        });
-        let data = self.call(reqwest::Method::PUT, &path, Some(&body)).await?;
-        let failed = parse_failed_cards(&data);
-        if !failed.is_empty() {
-            return Err(PortError::Lark(feed_card_failure(
-                "更新应用消息流卡片失败",
-                &failed,
-            )));
-        }
-        Ok(())
-    }
-
-    async fn delete_app_feed_card(
-        &self,
-        user_id: &str,
-        user_id_type: ReceiveIdType,
-        biz_id: &str,
-    ) -> PortResult<()> {
-        let path = format!(
-            "/open-apis/im/v2/app_feed_card/batch?user_id_type={}",
-            user_id_type_str(user_id_type)?
-        );
-        let body = json!({
-            "feed_cards": [{ "biz_id": biz_id, "user_id": user_id }]
-        });
-        let data = self
-            .call(reqwest::Method::DELETE, &path, Some(&body))
-            .await?;
-        let failed = parse_failed_cards(&data);
-        if !failed.is_empty() {
-            return Err(PortError::Lark(feed_card_failure(
-                "删除应用消息流卡片失败",
-                &failed,
-            )));
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alkh_domain::template::{
-        FeedButtonType, RenderedFeedButton, RenderedStatusLabel, StatusLabelType,
-    };
-
-    fn payload() -> AppFeedCardPayload {
-        AppFeedCardPayload {
-            biz_id: Some("alkh-abc".into()),
-            title: "标题".into(),
-            preview: "预览".into(),
-            status_label: Some(RenderedStatusLabel {
-                text: "严重".into(),
-                label_type: StatusLabelType::Danger,
-            }),
-            link: Some("https://example.com".into()),
-            buttons: vec![RenderedFeedButton {
-                text: "查看详情".into(),
-                url: "https://example.com".into(),
-                button_type: FeedButtonType::Primary,
-            }],
-            time_sensitive: true,
-            close_notify: false,
-        }
-    }
-
-    #[test]
-    fn app_feed_json_matches_documented_shape() {
-        let v = app_feed_card_json(&payload(), true);
-        assert_eq!(v["biz_id"], "alkh-abc");
-        assert_eq!(v["title"], "标题");
-        assert_eq!(v["status_label"]["text"], "严重");
-        assert_eq!(v["status_label"]["type"], "danger");
-        assert_eq!(v["link"]["link"], "https://example.com");
-        assert_eq!(v["buttons"]["buttons"][0]["action_type"], "url_page");
-        assert_eq!(v["buttons"]["buttons"][0]["text"]["text"], "查看详情");
-        assert_eq!(
-            v["buttons"]["buttons"][0]["multi_url"]["url"],
-            "https://example.com"
-        );
-        assert_eq!(v["time_sensitive"], true);
-        assert_eq!(v["notify"]["close_notify"], false);
-    }
-
-    #[test]
-    fn app_feed_json_omits_optional_fields() {
-        let mut p = payload();
-        p.status_label = None;
-        p.link = None;
-        p.buttons.clear();
-        let v = app_feed_card_json(&p, true);
-        assert!(v.get("status_label").is_none());
-        assert!(v.get("link").is_none());
-        assert!(v.get("buttons").is_none());
-    }
-
-    #[test]
-    fn feed_update_fields_cover_documented_enum() {
-        for f in FEED_UPDATE_FIELDS {
-            assert!(
-                matches!(
-                    f,
-                    "1" | "2" | "3" | "10" | "11" | "12" | "13" | "101" | "102" | "103"
-                ),
-                "非法 update_fields: {f}"
-            );
-        }
-        assert!(FEED_UPDATE_FIELDS.contains(&"13"), "必须支持即时提醒更新");
-    }
-
-    #[test]
-    fn user_id_type_rejects_chat_and_email() {
-        assert_eq!(user_id_type_str(ReceiveIdType::OpenId).unwrap(), "open_id");
-        assert_eq!(user_id_type_str(ReceiveIdType::UserId).unwrap(), "user_id");
-        assert!(user_id_type_str(ReceiveIdType::ChatId).is_err());
-        assert!(user_id_type_str(ReceiveIdType::Email).is_err());
-    }
 
     #[test]
     fn token_errors_detected() {
         assert!(is_token_error(99991663));
         assert!(!is_token_error(0));
-    }
-
-    #[test]
-    fn failed_cards_parsed() {
-        let data = json!({
-            "failed_cards": [
-                {"biz_id": "b1", "user_id": "ou_1", "reason": 4},
-                {"biz_id": "b2", "user_id": "ou_2", "reason": "NO_PERMISSION"}
-            ]
-        });
-        let cards = parse_failed_cards(&data);
-        assert_eq!(cards.len(), 2);
-        assert_eq!(cards[0].reason.as_deref(), Some("4"));
-        assert_eq!(cards[1].reason.as_deref(), Some("NO_PERMISSION"));
     }
 
     #[test]

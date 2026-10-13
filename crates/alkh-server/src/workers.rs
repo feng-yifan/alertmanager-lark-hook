@@ -208,14 +208,11 @@ mod tests {
     fn backoff_gate_respects_elapsed_time() {
         use alkh_domain::alert::{Delivery, DeliveryKind};
         use alkh_domain::ids::{AlertGroupId, ChannelId};
-        use alkh_domain::policy::MessageType;
-
         let now = chrono::Utc::now();
         let mut d = Delivery::new(
             AlertGroupId::new(),
             ChannelId::new(),
             DeliveryKind::FiringCreated,
-            MessageType::CardMessage,
             None,
             "d",
             now,

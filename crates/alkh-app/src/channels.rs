@@ -3,10 +3,9 @@
 use alkh_domain::audit::{action as audit_action, AuditActor, AuditLog};
 use alkh_domain::channel::{Channel, ChannelKind, ChannelSource, ReceiveIdType};
 use alkh_domain::ids::{ChannelId, HookId};
-use alkh_domain::policy::{MessageType, NotificationPolicy};
+use alkh_domain::policy::NotificationPolicy;
 use alkh_domain::ports::{ChannelFilter, DeliveryFilter};
 use alkh_domain::settings::AppSettings;
-use alkh_domain::template::TemplateKind;
 use alkh_domain::{Page, Timestamp};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -403,22 +402,13 @@ impl ChannelService {
     pub async fn send_test(
         &self,
         id: &ChannelId,
-        message_type: Option<MessageType>,
         card_template_id: Option<alkh_domain::ids::CardTemplateId>,
         sample: TestSample,
         mock: &crate::mock::MockSpec,
         actor: &AuditActor,
     ) -> AppResult<alkh_domain::alert::Delivery> {
-        self.send_test_inner(
-            id,
-            message_type,
-            card_template_id,
-            None,
-            sample,
-            mock,
-            actor,
-        )
-        .await
+        self.send_test_inner(id, card_template_id, None, sample, mock, actor)
+            .await
     }
 
     /// 用**未保存的草稿模板** + mock 数据发送一条测试消息（管理端卡片编辑器 P1）。
@@ -433,27 +423,13 @@ impl ChannelService {
         mock: &crate::mock::MockSpec,
         actor: &AuditActor,
     ) -> AppResult<alkh_domain::alert::Delivery> {
-        let message_type = match template.kind {
-            TemplateKind::CardMessage => MessageType::CardMessage,
-            TemplateKind::AppFeedCard => MessageType::AppFeedCard,
-        };
-        self.send_test_inner(
-            id,
-            Some(message_type),
-            None,
-            Some(template),
-            sample,
-            mock,
-            actor,
-        )
-        .await
+        self.send_test_inner(id, None, Some(template), sample, mock, actor)
+            .await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn send_test_inner(
         &self,
         id: &ChannelId,
-        message_type: Option<MessageType>,
         card_template_id: Option<alkh_domain::ids::CardTemplateId>,
         draft: Option<&alkh_domain::template::CardTemplate>,
         sample: TestSample,
@@ -473,9 +449,6 @@ impl ChannelService {
             .get(id)
             .await?
             .unwrap_or_else(|| NotificationPolicy::default_for(id.clone()));
-        if let Some(mt) = message_type {
-            policy.message_type = mt;
-        }
         if card_template_id.is_some() {
             policy.card_template_id = card_template_id;
         }
@@ -485,21 +458,13 @@ impl ChannelService {
         }
         policy.validate(&channel)?;
 
-        // 校验模板类型匹配
+        // 校验模板存在
         if let Some(tid) = &policy.card_template_id {
-            let t = self
-                .deps
+            self.deps
                 .templates
                 .get(tid)
                 .await?
                 .ok_or_else(|| AppError::not_found("卡片模板不存在"))?;
-            let want = match policy.message_type {
-                MessageType::CardMessage => TemplateKind::CardMessage,
-                MessageType::AppFeedCard => TemplateKind::AppFeedCard,
-            };
-            if t.kind != want {
-                return Err(AppError::validation("模板类型与消息类型不匹配"));
-            }
         }
 
         // 复用渠道的第一个 Hook，使同一渠道的多次测试复用同一个「测试分组」行，
@@ -524,7 +489,7 @@ impl ChannelService {
             self.deps.now(),
         )
         .await?;
-        // 选了历史分组就以它的状态为准，保证 app_feed_card 的状态标签与数据一致。
+        // 选了历史分组就以它的状态为准，保证卡片里的状态与数据一致。
         let resolved = if mock.alert_group_id.is_some() {
             mock_source.status == alkh_domain::alert::GroupStatus::Resolved
         } else {

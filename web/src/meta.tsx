@@ -17,10 +17,6 @@ import type { EnumOption, Meta } from './types';
 
 export const FALLBACK_META: Meta = {
   version: '0.0.0',
-  message_types: [
-    { value: 'card_message', label: '卡片消息' },
-    { value: 'app_feed_card', label: '应用消息流消息' },
-  ],
   repeat_policies: [
     { value: 'suppress', label: '不发送' },
     { value: 'send', label: '发送' },
@@ -42,21 +38,6 @@ export const FALLBACK_META: Meta = {
     { value: '=~', label: '正则匹配' },
     { value: '!~', label: '正则不匹配' },
   ],
-  status_label_types: [
-    { value: 'primary', label: '主类型' },
-    { value: 'secondary', label: '次要类型' },
-    { value: 'success', label: '成功类型' },
-    { value: 'danger', label: '危险类型' },
-  ],
-  feed_button_types: [
-    { value: 'default', label: '默认' },
-    { value: 'primary', label: '主要' },
-    { value: 'success', label: '成功' },
-  ],
-  biz_id_sources: [
-    { value: 'alert_group', label: '按告警分组（同分组复用同一张卡片，默认）' },
-    { value: 'hook', label: '按 Hook + 告警分组' },
-  ],
   card_sources: [
     { value: 'builder_json', label: '卡片搭建工具 JSON（JSON 2.0）' },
     { value: 'builder_template', label: '卡片搭建工具模板（template_id）' },
@@ -71,7 +52,6 @@ export const FALLBACK_META: Meta = {
     { value: 'user_id', label: '用户 user_id' },
     { value: 'email', label: '用户邮箱' },
   ],
-  pin_supported_message_types: ['app_feed_card'],
   token_prefix: 'alkh_',
   hook_path_template: '/api/v1/hooks/alertmanager/{token}',
   variables: [
@@ -234,7 +214,6 @@ function mergeMeta(remote: Meta): Meta {
     nonEmpty(normalizeEnumList(value), fallback);
   return {
     version: remote.version ?? FALLBACK_META.version,
-    message_types: list(remote.message_types, FALLBACK_META.message_types),
     repeat_policies: list(remote.repeat_policies, FALLBACK_META.repeat_policies),
     resolved_policies: list(remote.resolved_policies, FALLBACK_META.resolved_policies),
     group_update_policies: list(
@@ -242,9 +221,6 @@ function mergeMeta(remote: Meta): Meta {
       FALLBACK_META.group_update_policies,
     ),
     match_ops: list(remote.match_ops, FALLBACK_META.match_ops),
-    status_label_types: list(remote.status_label_types, FALLBACK_META.status_label_types),
-    feed_button_types: list(remote.feed_button_types, FALLBACK_META.feed_button_types),
-    biz_id_sources: list(remote.biz_id_sources, FALLBACK_META.biz_id_sources),
     card_sources: list(remote.card_sources, FALLBACK_META.card_sources),
     channel_kinds: list(remote.channel_kinds, FALLBACK_META.channel_kinds),
     receive_id_types: list(remote.receive_id_types, FALLBACK_META.receive_id_types),
@@ -257,8 +233,6 @@ function mergeMeta(remote: Meta): Meta {
     // 而不是用一份会漂移的本地副本悄悄产出过时的 JSON。
     card_components: Array.isArray(remote.card_components) ? remote.card_components : [],
     card_presets: Array.isArray(remote.card_presets) ? remote.card_presets : [],
-    pin_supported_message_types:
-      remote.pin_supported_message_types ?? FALLBACK_META.pin_supported_message_types,
     token_prefix: remote.token_prefix ?? FALLBACK_META.token_prefix,
     hook_path_template: remote.hook_path_template ?? FALLBACK_META.hook_path_template,
   };

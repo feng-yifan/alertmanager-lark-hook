@@ -9,7 +9,6 @@ import {
   DELIVERY_KIND_LABEL,
   DELIVERY_STATE_LABEL,
   GROUP_STATUS_LABEL,
-  MESSAGE_TYPE_LABEL,
   label as mapLabel,
 } from '../labels';
 import { cx, outcomeLabel, outcomeTone, prettyJson } from '../utils';
@@ -256,7 +255,6 @@ export type StatusKind =
   | 'delivery_kind'
   | 'group'
   | 'alert'
-  | 'message_type'
   | 'enabled'
   | 'outcome'
   | 'channel_source'
@@ -293,8 +291,6 @@ function resolveStatus(kind: StatusKind, value: unknown): { tone: Tone; text: st
       return { tone: raw === 'firing' ? 'danger' : 'ok', text: mapLabel(GROUP_STATUS_LABEL, raw) };
     case 'alert':
       return { tone: raw === 'firing' ? 'danger' : 'ok', text: mapLabel(ALERT_STATUS_LABEL, raw) };
-    case 'message_type':
-      return { tone: raw === 'card_message' ? 'accent' : 'info', text: mapLabel(MESSAGE_TYPE_LABEL, raw) };
     case 'enabled':
       return raw === 'true' ? { tone: 'ok', text: '已启用' } : { tone: 'muted', text: '已停用' };
     case 'outcome':

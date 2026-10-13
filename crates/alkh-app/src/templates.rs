@@ -4,9 +4,7 @@ use alkh_domain::audit::{action as audit_action, AuditActor, AuditLog};
 use alkh_domain::channel::Channel;
 use alkh_domain::ids::CardTemplateId;
 use alkh_domain::policy::NotificationPolicy;
-use alkh_domain::template::{
-    AppFeedCardSpec, CardMessageSpec, CardSource, CardTemplate, TemplateKind, TemplateVariable,
-};
+use alkh_domain::template::{CardMessageSpec, CardSource, CardTemplate, TemplateVariable};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -17,11 +15,9 @@ use crate::meta;
 #[derive(Debug, Clone, Deserialize)]
 pub struct TemplateInput {
     pub name: String,
-    pub kind: TemplateKind,
+    /// 卡片内容；缺省时回退到内置默认卡片（R12 的保存侧对应行为）。
     #[serde(default)]
     pub card_message: Option<CardMessageSpec>,
-    #[serde(default)]
-    pub app_feed_spec: Option<AppFeedCardSpec>,
     #[serde(default)]
     pub is_default: bool,
 }
@@ -57,10 +53,11 @@ pub struct ValidationReport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PreviewReport {
-    pub kind: TemplateKind,
-    pub rendered_card_json: Option<Value>,
-    pub rendered_app_feed_spec: Option<Value>,
+    /// 渲染后的卡片 JSON（与真实投递的内容完全一致）。
+    pub rendered_card_json: Value,
+    /// 渲染上下文（mock 覆盖后的有效值）。
     pub variables: Value,
+    /// 发送给飞书 `content` 字段的内容。
     pub card_content: Value,
 }
 
@@ -69,14 +66,12 @@ pub struct PreviewReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct DefaultTemplatesView {
     pub card_message: CardMessageSpec,
-    pub app_feed_spec: AppFeedCardSpec,
 }
 
 /// 返回内置默认模板内容（不查库）。
 pub fn default_templates() -> DefaultTemplatesView {
     DefaultTemplatesView {
         card_message: CardMessageSpec::builder_json(crate::defaults::default_card_json()),
-        app_feed_spec: AppFeedCardSpec::default(),
     }
 }
 
@@ -103,11 +98,11 @@ impl TemplateService {
         Self { deps }
     }
 
-    pub async fn list(&self, kind: Option<TemplateKind>) -> AppResult<Vec<CardTemplateView>> {
+    pub async fn list(&self) -> AppResult<Vec<CardTemplateView>> {
         Ok(self
             .deps
             .templates
-            .list(kind)
+            .list()
             .await?
             .into_iter()
             .map(CardTemplateView::of)
@@ -132,7 +127,7 @@ impl TemplateService {
         let mut template = build(input)?;
         self.enforce(&mut template)?;
         if template.is_default {
-            self.deps.templates.clear_default(template.kind).await?;
+            self.deps.templates.clear_default().await?;
         }
         self.deps.templates.insert(&template).await?;
         self.audit(actor, audit_action::TEMPLATE_CREATED, &template)
@@ -159,7 +154,7 @@ impl TemplateService {
         self.enforce(&mut template)?;
 
         if template.is_default && !existing.is_default {
-            self.deps.templates.clear_default(template.kind).await?;
+            self.deps.templates.clear_default().await?;
         }
         self.deps.templates.update(&template).await?;
         self.audit(actor, audit_action::TEMPLATE_UPDATED, &template)
@@ -188,7 +183,7 @@ impl TemplateService {
             self.deps.now(),
         )
         .target(template.id.to_string())
-        .detail(json!({"name": template.name, "kind": template.kind.as_str()}));
+        .detail(json!({"name": template.name}));
         if let Err(e) = self.deps.audit.append(&log).await {
             tracing::warn!(error = %e, "审计写入失败");
         }
@@ -212,11 +207,7 @@ impl TemplateService {
 
         // 组件目录校验：给出**全部**结构错误，并把可疑用法放进 warnings。
         if let Some(template) = built.as_mut() {
-            if let Some(card) = template
-                .card_message
-                .as_ref()
-                .and_then(|spec| spec.card_json.as_ref())
-            {
+            if let Some(card) = template.card_message.card_json.as_ref() {
                 let catalog = alkh_domain::card_catalog::validate_card_json(card);
                 if !catalog.errors.is_empty() {
                     report.valid = false;
@@ -224,7 +215,7 @@ impl TemplateService {
                 report.errors.extend(catalog.errors);
                 report.warnings.extend(catalog.warnings);
             }
-            // 领域级校验：schema / update_multi / 体积 / 应用消息流字段。
+            // 领域级校验：schema / update_multi / 体积 / 组件目录。
             if let Err(e) = template.validate() {
                 let message = e.to_string();
                 if !report.errors.contains(&message) {
@@ -253,19 +244,13 @@ impl TemplateService {
     fn enforce(&self, template: &mut CardTemplate) -> AppResult<()> {
         // P2：停用「卡片搭建工具模板」来源。历史模板仍可读取/预览，
         // 编辑器提供「转换为本地卡片」。
-        if let Some(spec) = &template.card_message {
-            if spec.source == CardSource::BuilderTemplate {
-                return Err(AppError::validation(
-                    "已停用来源 builder_template：请在卡片编辑器里点「转换为本地卡片」后保存（本地 JSON 卡片同样支持变量与原地更新）",
-                ));
-            }
+        if template.card_message.source == CardSource::BuilderTemplate {
+            return Err(AppError::validation(
+                "已停用来源 builder_template：请在卡片编辑器里点「转换为本地卡片」后保存（本地 JSON 卡片同样支持变量与原地更新）",
+            ));
         }
         template.validate()?;
-        if let Some(card) = template
-            .card_message
-            .as_ref()
-            .and_then(|spec| spec.card_json.as_ref())
-        {
+        if let Some(card) = template.card_message.card_json.as_ref() {
             let catalog = alkh_domain::card_catalog::validate_card_json(card);
             if let Some(first) = catalog.errors.first() {
                 return Err(AppError::validation(format!(
@@ -361,39 +346,21 @@ impl TemplateService {
         .await?;
         let mut ctx = crate::render::build_context(&group, &channel, &policy, self.deps.now());
         mock.apply(&mut ctx);
-        let is_firing = crate::render::is_firing_group(&group);
 
         let variables = serde_json::to_value(ctx.vars())?;
-        match template.kind {
-            TemplateKind::CardMessage => {
-                let spec = template.card_message.clone().unwrap();
-                let rendered = crate::render::render_card_message(&spec, &ctx)?;
-                Ok(PreviewReport {
-                    kind: template.kind,
-                    rendered_card_json: Some(rendered.to_content()),
-                    rendered_app_feed_spec: None,
-                    variables,
-                    card_content: rendered.to_content(),
-                })
-            }
-            TemplateKind::AppFeedCard => {
-                let spec = template.app_feed_spec.clone().unwrap();
-                let rendered = crate::render::render_app_feed_card(&spec, &ctx, is_firing);
-                Ok(PreviewReport {
-                    kind: template.kind,
-                    rendered_card_json: None,
-                    rendered_app_feed_spec: Some(serde_json::to_value(&rendered)?),
-                    variables,
-                    card_content: serde_json::to_value(&rendered)?,
-                })
-            }
-        }
+        let rendered = crate::render::render_card_message(&template.card_message, &ctx)?;
+        let content = rendered.to_content();
+        Ok(PreviewReport {
+            rendered_card_json: content.clone(),
+            variables,
+            card_content: content,
+        })
     }
 
     async fn audit(&self, actor: &AuditActor, action: &str, t: &CardTemplate) {
         let log = AuditLog::ok(actor.clone(), action, self.deps.now())
             .target(t.id.to_string())
-            .detail(json!({"name": t.name, "kind": t.kind.as_str()}));
+            .detail(json!({"name": t.name}));
         if let Err(e) = self.deps.audit.append(&log).await {
             tracing::warn!(error = %e, "审计写入失败");
         }
@@ -403,37 +370,19 @@ impl TemplateService {
 fn build(input: TemplateInput) -> AppResult<CardTemplate> {
     let TemplateInput {
         name,
-        kind,
         card_message,
-        app_feed_spec,
         is_default,
     } = input;
     let now = alkh_domain::now();
-    let template = match kind {
-        TemplateKind::CardMessage => CardTemplate {
-            id: CardTemplateId::new(),
-            name,
-            kind,
-            card_message: Some(card_message.unwrap_or_else(|| {
-                CardMessageSpec::builder_json(crate::defaults::default_card_json())
-            })),
-            app_feed_spec: None,
-            is_default,
-            created_at: now,
-            updated_at: now,
-        },
-        TemplateKind::AppFeedCard => CardTemplate {
-            id: CardTemplateId::new(),
-            name,
-            kind,
-            card_message: None,
-            app_feed_spec: Some(app_feed_spec.unwrap_or_default()),
-            is_default,
-            created_at: now,
-            updated_at: now,
-        },
-    };
-    Ok(template)
+    Ok(CardTemplate {
+        id: CardTemplateId::new(),
+        name,
+        card_message: card_message
+            .unwrap_or_else(|| CardMessageSpec::builder_json(crate::defaults::default_card_json())),
+        is_default,
+        created_at: now,
+        updated_at: now,
+    })
 }
 
 fn unknown_variables(detected: &[String]) -> Vec<String> {
@@ -473,28 +422,15 @@ mod tests {
     }
 
     #[test]
-    fn build_defaults_by_kind() {
+    fn build_falls_back_to_the_builtin_card() {
         let t = build(TemplateInput {
             name: "x".into(),
-            kind: TemplateKind::CardMessage,
             card_message: None,
-            app_feed_spec: None,
             is_default: false,
         })
         .unwrap();
-        assert!(t.card_message.is_some());
-        assert!(t.app_feed_spec.is_none());
-
-        let t = build(TemplateInput {
-            name: "y".into(),
-            kind: TemplateKind::AppFeedCard,
-            card_message: None,
-            app_feed_spec: None,
-            is_default: false,
-        })
-        .unwrap();
-        assert!(t.app_feed_spec.is_some());
-        assert!(t.card_message.is_none());
+        assert_eq!(t.card_message.source, CardSource::BuilderJson);
+        assert!(t.card_message.card_json.is_some());
     }
 
     #[test]

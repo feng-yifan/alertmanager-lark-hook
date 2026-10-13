@@ -91,17 +91,15 @@ POST /api/v1/hooks/alertmanager/{token}
 
 补充规则：
 
-- **R1 卡片实体不可用时降级**：`UpdateInPlace` 需要 `delivery.card_entity_id`（或应用消息流
-  `app_feed_biz_id`）仍然有效。若不存在、已撤回或创建超过 14 天（CardKit 实体有效期），
+- **R1 卡片实体不可用时降级**：`UpdateInPlace` 需要 `delivery.card_entity_id`（或 `lark_message_id`）仍然有效。若不存在、已撤回或创建超过 14 天（CardKit 实体有效期），
   自动降级为 **SendNew** 并记录 `fallback=update_unavailable`；不返回错误。
 - **R2 撤回失败不阻塞**：撤回/删除失败（超出撤回时限、消息已被删、权限不足）时
   Delivery 标记 `Recalled`→`RecallFailed` 交由审计，主流程仍返回 200。
 - **R3 内容未变化则不重复更新**：`UpdateInPlace` 前比较 `rendered_digest`，
   相同则跳过更新调用（幂等，避免飞书限频与无意义的 `update_time` 变化）。
-- **R4 置顶（pin）**：`pin_unresolved = true` 时，**仅当**本次消息包含至少一条 firing 告警，
-  对**应用消息流卡片**设置 `time_sensitive = true`；恢复消息始终 `false`。
-  卡片消息（`im/v1/messages`）无对应官方字段，此开关对卡片消息记为 no-op，
-  并在管理后台显式提示。
+- **R4 废弃（原「置顶 pin」）**：卡片消息（`im/v1/messages`）**没有**官方的置顶 /
+  即时提醒字段，因此本项目不提供该开关。（原实现靠应用消息流卡片的
+  `time_sensitive` 实现，该消息形态已整体移除）。
 - **R5 静默期**：`mute_until` 未过期时抑制所有发送类动作，但事件分类与分组状态照常推进
   （即解除静默后不会补发历史消息，只反映最新状态）。
 - **R6 聚合窗口**：`aggregation_window_secs > 0` 时，同一 `(hook, group_key)` 在窗口内的事件
@@ -136,9 +134,8 @@ POST /api/v1/hooks/alertmanager/{token}
 
 ## 4.1 飞书 API 约束带来的硬性规则
 
-- **R15 应用消息流卡片只能发给用户**：`im/v2/app_feed_card` 的接收者是 `user_ids`（1–20），
-  没有群维度。因此 `message_type = app_feed_card` 的渠道必须是用户级渠道
-  （`receive_id_type ∈ {open_id, user_id}`）。群聊渠道选用应用消息流卡片时，策略保存即被拒绝。
+- **R15 （已废弃）**：原「应用消息流卡片只能发给用户」——该消息形态已整体移除，
+  编号保留以避免与旧文档/审计日志串号。
 - **R16 卡片实体只能发送一次**（官方明示）：`cardkit/v1/cards` 创建的 `card_id` 仅能用于一次
   `im/v1/messages` 发送，实体有效期 14 天。因此：
   - `SendNew` → 每次重新创建卡片实体；
@@ -149,9 +146,7 @@ POST /api/v1/hooks/alertmanager/{token}
   - 两条更新路径均受"仅支持更新 14 天内发送的消息"限制；超期即触发 R1 降级为 `SendNew`。
 - **R17 卡片必须是 `update_multi = true`**：原地更新要求更新前后 `config.update_multi` 均为
   `true`。模板校验阶段强制注入/校验该字段，否则拒绝保存（否则后续"更新旧告警"必然失败）。
-- **R18 应用消息流卡片更新字段**：更新走 `PUT /im/v2/app_feed_card/batch`，`update_fields` 取值
-  `1`(标题) `3`(预览) `10`(状态标签) `11`(按钮) `12`(跳转链接) `13`(即时提醒) `103`(进行通知)；
-  删除走 `DELETE /im/v2/app_feed_card/batch`，以 `{biz_id, user_id}` 定位。
+- **R18 （已废弃）**：原「应用消息流卡片更新字段」。
 
 ## 5. 变量与渲染
 
@@ -183,7 +178,7 @@ POST /api/v1/hooks/alertmanager/{token}
 
 命名沿革（避免误解）：本项目用 `${...}` 而非 AlertManager 的 Go 模板 `{{ ... }}`；
 `${...}` 也**不是**飞书官方文档化的语法（官方只有搭建工具的 `template_variable` 键值映射）。
-应用消息流卡片的字段长度上限在渲染时**截断**而非报错以保证告警不丢。
+卡片 JSON 在渲染后会做一次体积收口与长字符串截断，避免超过 30KB 导致整条告警被丢弃。
 
 ### 5.1 mock 数据（预览 / 测试发送，P1）
 
@@ -196,8 +191,7 @@ POST /api/v1/hooks/alertmanager/{token}
 
 - mock 只影响**渲染**：历史分组只作数据源、**绝不回写**；测试消息仍写入该渠道的
   「测试分组」行，因此依旧可更新 / 可撤回，且不污染真实告警数据。
-- 指定 `alert_group_id` 时以其状态为准（`firing` / `resolved`），保证应用消息流卡片的
-  状态标签与数据一致。
+- 指定 `alert_group_id` 时以其状态为准（`firing` / `resolved`）。
 - 草稿测试（`POST /card-templates/send-test`）不落库模板，
   `Delivery.card_template_id` 为 `null`，投递记录仍为 `kind=test` 并写审计。
 - 规模上限：`variables` ≤ 200 项、值 ≤ 4000 字符、key ≤ 128 字符。
@@ -239,7 +233,6 @@ POST /api/v1/hooks/alertmanager/{token}
 | 渠道 | 名称 ≤ 64；`receive_id` 非空；同 `(type,id)` 唯一 |
 | Hook | 名称 ≤ 64；token 轮换后旧的立即失效 |
 | 卡片模板（卡片消息） | `schema` 必须 `"2.0"`；JSON 合法；组件数 ≤ 200；体积 ≤ 30KB（发送前预估）；组件目录校验无 errors（见 §5.2） |
-| 卡片模板（应用消息流） | title ≤ 60；preview ≤ 120；status_label.text ≤ 20；按钮 ≤ 2、文案 ≤ 30；link 必须 `https` |
 | 通知策略 | 正则 matcher 可编译；聚合窗口 0–3600s；最小间隔 0–3600s；告警上限 1–200 |
 | mock 数据 | 变量 ≤ 200 项；单值 ≤ 4000 字符；单 key ≤ 128 字符；`alert_group_id` 必须存在（否则 404） |
 | 卡片来源 | `builder_template` 已停用：新建/更新 `400 validation`（历史模板只读可预览） |
@@ -250,7 +243,7 @@ POST /api/v1/hooks/alertmanager/{token}
 | 需求 | 落地 |
 |---|---|
 | 1. 卡片模板 | 本地可视化/JSON 构建 `CardTemplate.card_message.source = builder_json`（CardKit JSON 2.0），含组件目录校验、变量识别、mock 预览与草稿测试发送（§5.1/§5.2）；`builder_template` 已停用 |
-| 2. 通过飞书机器人发送消息 | `LarkGateway` 使用 `tenant_access_token` 调用 `im/v1/messages` 与 `im/v2/app_feed_card` |
+| 2. 通过飞书机器人发送消息 | `LarkGateway` 使用 `tenant_access_token` 调用 `im/v1/messages`（卡片实体 + `msg_type=interactive`）|
 | 3. API 读取可接收消息的渠道 + 每渠道独立 hook | `im/v1/chats` 同步 → Channel；每个 Channel 签发独立 Hook token/URL，可多个 |
 | 4. 发送规则配置 | 第 4 节决策表 + NotificationPolicy 字段 |
 | 5. Rust + TS 管理后台 + 容器化 | `crates/*` + `web/*` + `deploy/*` |

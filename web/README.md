@@ -49,9 +49,9 @@ pnpm preview          # 预览构建产物
 | `/login` | `pages/LoginPage.tsx` | 登录表单、会话引导、重定向回原路径 |
 | `/` | `pages/OverviewPage.tsx` | `GET /overview` 统计卡（渠道 / Hook / firing·resolved 分组 / 近 24h sent·failed·suppressed）+ 最近事件 |
 | `/channels` | `pages/ChannelsPage.tsx` | 列表、启用开关、搜索、从飞书同步、手动创建（含一次性 `hook_token` 展示） |
-| `/channels/:id` | `pages/ChannelDetailPage.tsx` + `pages/channels/*` | 三个 Tab：发送规则（完整 NotificationPolicy 表单 + 决策表 + R4/R5/R6/R7/R8/R11 说明）、接收 Hook（创建 / 轮换 / 重命名 / 启停 / 删除 + 一次性 token）、发送测试 |
-| `/card-templates` | `pages/CardTemplatesPage.tsx` | 模板列表（裸数组）、按 kind 过滤、设为默认（回传整份模板，避免后端整份替换时丢内容）、删除（409 通用冲突提示） |
-| `/card-templates/new`、`/card-templates/:id` | `pages/CardTemplateEditorPage.tsx` | card_message：JSON 编辑器（失焦校验）+ 搭建工具导入 + source 切换 + 变量面板 + 校验 / 预览；app_feed_card：强类型表单 + 长度实时提示 + 变量插入按钮；已存在的模板可发送测试（`/card-templates/:id/send-test`） |
+| `/channels/:id` | `pages/ChannelDetailPage.tsx` + `pages/channels/*` | 三个 Tab：发送规则（完整 NotificationPolicy 表单 + 决策表 + R5/R6/R7/R8/R11 说明）、接收 Hook（创建 / 轮换 / 重命名 / 启停 / 删除 + 一次性 token）、发送测试 |
+| `/card-templates` | `pages/CardTemplatesPage.tsx` | 模板列表（裸数组）、设为默认（回传整份模板，避免后端整份替换时丢内容）、删除（409 通用冲突提示） |
+| `/card-templates/new`、`/card-templates/:id` | `pages/CardTemplateEditorPage.tsx` | 可视化拖拽画布 + JSON 编辑器（同一份文档）+ 搭建工具导入 + 变量面板 + 校验 / 预览；已存在的模板可发送测试（`/card-templates/:id/send-test`） |
 | `/alert-groups` | `pages/AlertGroupsPage.tsx` | status / channel / severity / 搜索过滤，分页，删除记录 |
 | `/alert-groups/:id` | `pages/AlertGroupDetailPage.tsx` | 分组元数据、告警表格（labels / annotations / generator_url）、labels 面板、投递时间线（重试 / 撤回） |
 | `/deliveries` | `pages/DeliveriesPage.tsx` | 状态徽标、过滤（alert_group_id / channel / state）、重试 / 撤回 |
@@ -128,8 +128,6 @@ web/
     `docs/api.md` 的示例里没有，故在类型中是可选的，界面不依赖它们。
 11. **跨渠道 `GET /hooks` 未使用**：契约存在该端点（返回裸数组），但 Hook 列表直接取渠道详情里的
     `hooks`（避免为跨渠道列表臆造 channel 名称映射）。
-12. **`AppSettings.default_app_feed_link`**：`docs/domain-model.md` §8 有该字段，但
-    `docs/api.md` 的 `GET /settings` 示例与本次 UI 需求都没有它，故未在界面暴露。
 13. **`RecallFailed`**：`docs/business-rules.md` R2 提到该状态，但 §7 的 `DeliveryState`
     枚举里没有；前端把它加入联合类型与徽标映射，遇到时正常显示而不会退化成未知值。
 14. **`link.url` 的 https 校验**：约束针对**渲染后**的值，因此模板化写法（如 `${external_url}`）

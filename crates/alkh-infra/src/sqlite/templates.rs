@@ -3,20 +3,21 @@
 use alkh_domain::error::PortResult;
 use alkh_domain::ids::CardTemplateId;
 use alkh_domain::ports::CardTemplateRepository;
-use alkh_domain::template::{AppFeedCardSpec, CardMessageSpec, CardTemplate, TemplateKind};
+use alkh_domain::template::{CardMessageSpec, CardTemplate};
 use async_trait::async_trait;
 use sqlx::sqlite::SqliteRow;
 use sqlx::SqlitePool;
 
-use super::common::{self, b, enum_to_str, to_json, ts, RowExt};
+use super::common::{self, b, to_json, ts, RowExt};
 
 fn row_to_template(row: &SqliteRow) -> PortResult<CardTemplate> {
+    let card_message: Option<CardMessageSpec> = row.json_opt_col::<CardMessageSpec>("card_message");
     Ok(CardTemplate {
         id: CardTemplateId::from_string(row.str_col("id")?),
         name: row.str_col("name")?,
-        kind: row.enum_col("kind")?,
-        card_message: row.json_opt_col::<CardMessageSpec>("card_message"),
-        app_feed_spec: row.json_opt_col::<AppFeedCardSpec>("app_feed_spec"),
+        card_message: card_message.ok_or_else(|| {
+            alkh_domain::error::PortError::Internal("card_templates.card_message 为空".into())
+        })?,
         is_default: row.bool_col("is_default")?,
         created_at: row.ts_col("created_at")?,
         updated_at: row.ts_col("updated_at")?,
@@ -37,21 +38,11 @@ impl SqliteCardTemplateRepository {
 
 #[async_trait]
 impl CardTemplateRepository for SqliteCardTemplateRepository {
-    async fn list(&self, kind: Option<TemplateKind>) -> PortResult<Vec<CardTemplate>> {
-        let rows = match kind {
-            Some(kind) => {
-                sqlx::query("SELECT * FROM card_templates WHERE kind = ? ORDER BY created_at ASC")
-                    .bind(enum_to_str(&kind))
-                    .fetch_all(&self.pool)
-                    .await
-            }
-            None => {
-                sqlx::query("SELECT * FROM card_templates ORDER BY created_at ASC")
-                    .fetch_all(&self.pool)
-                    .await
-            }
-        }
-        .map_err(common::map_sql)?;
+    async fn list(&self) -> PortResult<Vec<CardTemplate>> {
+        let rows = sqlx::query("SELECT * FROM card_templates ORDER BY created_at ASC")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(common::map_sql)?;
         rows.iter().map(row_to_template).collect()
     }
 
@@ -67,14 +58,12 @@ impl CardTemplateRepository for SqliteCardTemplateRepository {
     async fn insert(&self, template: &CardTemplate) -> PortResult<()> {
         sqlx::query(
             "INSERT INTO card_templates \
-             (id, kind, name, card_message, app_feed_spec, is_default, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, name, card_message, is_default, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(template.id.as_str())
-        .bind(enum_to_str(&template.kind))
         .bind(&template.name)
-        .bind(template.card_message.as_ref().map(to_json))
-        .bind(template.app_feed_spec.as_ref().map(to_json))
+        .bind(to_json(&template.card_message))
         .bind(b(template.is_default))
         .bind(ts(template.created_at))
         .bind(ts(template.updated_at))
@@ -86,13 +75,11 @@ impl CardTemplateRepository for SqliteCardTemplateRepository {
 
     async fn update(&self, template: &CardTemplate) -> PortResult<()> {
         sqlx::query(
-            "UPDATE card_templates SET kind = ?, name = ?, card_message = ?, app_feed_spec = ?, \
-             is_default = ?, updated_at = ? WHERE id = ?",
+            "UPDATE card_templates SET name = ?, card_message = ?, is_default = ?, updated_at = ? \
+             WHERE id = ?",
         )
-        .bind(enum_to_str(&template.kind))
         .bind(&template.name)
-        .bind(template.card_message.as_ref().map(to_json))
-        .bind(template.app_feed_spec.as_ref().map(to_json))
+        .bind(to_json(&template.card_message))
         .bind(b(template.is_default))
         .bind(ts(template.updated_at))
         .bind(template.id.as_str())
@@ -111,21 +98,18 @@ impl CardTemplateRepository for SqliteCardTemplateRepository {
         Ok(())
     }
 
-    async fn find_default(&self, kind: TemplateKind) -> PortResult<Option<CardTemplate>> {
+    async fn find_default(&self) -> PortResult<Option<CardTemplate>> {
         let row = sqlx::query(
-            "SELECT * FROM card_templates WHERE kind = ? AND is_default = 1 \
-             ORDER BY created_at DESC LIMIT 1",
+            "SELECT * FROM card_templates WHERE is_default = 1 ORDER BY created_at DESC LIMIT 1",
         )
-        .bind(enum_to_str(&kind))
         .fetch_optional(&self.pool)
         .await
         .map_err(common::map_sql)?;
         row.as_ref().map(row_to_template).transpose()
     }
 
-    async fn clear_default(&self, kind: TemplateKind) -> PortResult<()> {
-        sqlx::query("UPDATE card_templates SET is_default = 0 WHERE kind = ?")
-            .bind(enum_to_str(&kind))
+    async fn clear_default(&self) -> PortResult<()> {
+        sqlx::query("UPDATE card_templates SET is_default = 0")
             .execute(&self.pool)
             .await
             .map_err(common::map_sql)?;
@@ -156,29 +140,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_get_roundtrip_for_both_kinds() {
+    async fn insert_get_roundtrip() {
         let repo = SqliteCardTemplateRepository::new(pool().await);
 
         let cm = card_message("卡片");
         repo.insert(&cm).await.unwrap();
         let got = repo.get(&cm.id).await.unwrap().unwrap();
         assert_eq!(got.name, "卡片");
-        assert_eq!(got.kind, TemplateKind::CardMessage);
-        assert_eq!(got.card_message.as_ref().unwrap().template_id, None);
-        assert!(got.app_feed_spec.is_none());
+        assert_eq!(got.card_message.template_id, None);
         assert!(!got.is_default);
-
-        let mut feed = CardTemplate::new_app_feed_card("feed", AppFeedCardSpec::default());
-        feed.is_default = true;
-        repo.insert(&feed).await.unwrap();
-        let got = repo.get(&feed.id).await.unwrap().unwrap();
-        assert_eq!(got.kind, TemplateKind::AppFeedCard);
-        assert!(got.app_feed_spec.is_some());
-        assert!(got.is_default);
     }
 
     #[tokio::test]
-    async fn default_is_unique_per_kind() {
+    async fn default_is_unique() {
         let repo = SqliteCardTemplateRepository::new(pool().await);
         let base = alkh_domain::now();
         let mut a = card_message("a");
@@ -194,23 +168,12 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(
-            repo.find_default(TemplateKind::CardMessage)
-                .await
-                .unwrap()
-                .unwrap()
-                .id,
-            a.id
-        );
+        assert_eq!(repo.find_default().await.unwrap().unwrap().id, a.id);
 
-        repo.clear_default(TemplateKind::CardMessage).await.unwrap();
-        assert!(repo
-            .find_default(TemplateKind::CardMessage)
-            .await
-            .unwrap()
-            .is_none());
+        repo.clear_default().await.unwrap();
+        assert!(repo.find_default().await.unwrap().is_none());
 
-        // 两个同类默认标记同时存在时，返回创建时间最新的一个。
+        // 两个默认标记同时存在时，返回创建时间最新的一个。
         repo.update(&CardTemplate {
             is_default: true,
             ..a.clone()
@@ -223,53 +186,19 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(
-            repo.find_default(TemplateKind::CardMessage)
-                .await
-                .unwrap()
-                .unwrap()
-                .id,
-            b.id
-        );
-
-        // 其他 kind 不受影响。
-        assert!(repo
-            .find_default(TemplateKind::AppFeedCard)
-            .await
-            .unwrap()
-            .is_none());
+        assert_eq!(repo.find_default().await.unwrap().unwrap().id, b.id);
     }
 
     #[tokio::test]
-    async fn list_by_kind_and_delete() {
+    async fn list_and_delete() {
         let repo = SqliteCardTemplateRepository::new(pool().await);
         repo.insert(&card_message("a")).await.unwrap();
         repo.insert(&card_message("b")).await.unwrap();
-        repo.insert(&CardTemplate::new_app_feed_card(
-            "f",
-            AppFeedCardSpec::default(),
-        ))
-        .await
-        .unwrap();
 
-        assert_eq!(repo.list(None).await.unwrap().len(), 3);
-        assert_eq!(
-            repo.list(Some(TemplateKind::CardMessage))
-                .await
-                .unwrap()
-                .len(),
-            2
-        );
-        assert_eq!(
-            repo.list(Some(TemplateKind::AppFeedCard))
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(repo.list().await.unwrap().len(), 2);
 
-        let all = repo.list(None).await.unwrap();
+        let all = repo.list().await.unwrap();
         repo.delete(&all[0].id).await.unwrap();
-        assert_eq!(repo.list(None).await.unwrap().len(), 2);
+        assert_eq!(repo.list().await.unwrap().len(), 1);
     }
 }

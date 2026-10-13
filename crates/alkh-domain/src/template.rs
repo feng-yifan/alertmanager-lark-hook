@@ -16,77 +16,8 @@ pub enum CardSource {
     /// 卡片搭建工具导出的卡片 JSON（CardKit JSON 2.0）。
     #[default]
     BuilderJson,
-    /// 卡片搭建工具发布产出的模板（`template_id` + 版本）。
+    /// 卡片搭建工具发布产出的模板（`template_id` + 版本）。**已停用**（P2），仅为历史模板保留反序列化。
     BuilderTemplate,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum TemplateKind {
-    #[default]
-    CardMessage,
-    AppFeedCard,
-}
-
-impl TemplateKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            TemplateKind::CardMessage => "card_message",
-            TemplateKind::AppFeedCard => "app_feed_card",
-        }
-    }
-}
-
-/// 应用消息流卡片状态标签类型。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum StatusLabelType {
-    #[default]
-    Primary,
-    Secondary,
-    Success,
-    Danger,
-}
-
-impl StatusLabelType {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            StatusLabelType::Primary => "primary",
-            StatusLabelType::Secondary => "secondary",
-            StatusLabelType::Success => "success",
-            StatusLabelType::Danger => "danger",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum FeedButtonType {
-    #[default]
-    Default,
-    Primary,
-    Success,
-}
-
-impl FeedButtonType {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            FeedButtonType::Default => "default",
-            FeedButtonType::Primary => "primary",
-            FeedButtonType::Success => "success",
-        }
-    }
-}
-
-/// `biz_id` 生成策略：应用消息流卡片以 biz_id 定位并更新。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum BizIdSource {
-    /// `alkh-{alert_group_id}`（默认，同分组更新同一张卡片）。
-    #[default]
-    AlertGroup,
-    /// `alkh-{hook_id}-{alert_group_id}`。
-    Hook,
 }
 
 /// 模板变量的类型声明（用于 `template` 来源时按声明类型强转，避免飞书 200732 类型错误）。
@@ -256,205 +187,6 @@ impl CardMessageSpec {
 }
 
 // ---------------------------------------------------------------------------
-// 应用消息流卡片模板
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StatusLabelSpec {
-    pub text: String,
-    pub type_firing: StatusLabelType,
-    pub type_resolved: StatusLabelType,
-}
-
-impl Default for StatusLabelSpec {
-    fn default() -> Self {
-        Self {
-            text: "${severity_text}".into(),
-            type_firing: StatusLabelType::Danger,
-            type_resolved: StatusLabelType::Success,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LinkSpec {
-    pub enabled: bool,
-    pub url: String,
-}
-
-impl Default for LinkSpec {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            url: "${external_url}".into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FeedButtonSpec {
-    pub text: String,
-    pub url: String,
-    pub button_type: FeedButtonType,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppFeedCardSpec {
-    pub title: String,
-    pub preview: String,
-    pub status_label: StatusLabelSpec,
-    pub link: LinkSpec,
-    #[serde(default)]
-    pub buttons: Vec<FeedButtonSpec>,
-    #[serde(default)]
-    pub close_notify: bool,
-    #[serde(default)]
-    pub biz_id_source: BizIdSource,
-}
-
-impl Default for AppFeedCardSpec {
-    fn default() -> Self {
-        Self {
-            title: "【${status_text}】${alertname}".into(),
-            preview: "${summary}".into(),
-            status_label: StatusLabelSpec::default(),
-            link: LinkSpec::default(),
-            buttons: vec![FeedButtonSpec {
-                text: "查看详情".into(),
-                url: "${external_url}".into(),
-                button_type: FeedButtonType::Default,
-            }],
-            close_notify: false,
-            biz_id_source: BizIdSource::AlertGroup,
-        }
-    }
-}
-
-impl AppFeedCardSpec {
-    pub const MAX_TITLE_CHARS: usize = 60;
-    pub const MAX_PREVIEW_CHARS: usize = 120;
-    pub const MAX_STATUS_TEXT_CHARS: usize = 20;
-    pub const MAX_BUTTONS: usize = 2;
-    pub const MAX_BUTTON_TEXT_CHARS: usize = 30;
-    pub const MAX_URL_CHARS: usize = 700;
-
-    pub fn validate(&self) -> DomainResult<()> {
-        for b in &self.buttons {
-            if b.text.trim().is_empty() {
-                return Err(DomainError::validation("按钮文案不能为空"));
-            }
-            if b.url.trim().is_empty() {
-                return Err(DomainError::validation("按钮跳转 URL 不能为空"));
-            }
-        }
-        if self.buttons.len() > Self::MAX_BUTTONS {
-            return Err(DomainError::validation(format!(
-                "应用消息流卡片最多支持 {} 个按钮",
-                Self::MAX_BUTTONS
-            )));
-        }
-        Ok(())
-    }
-
-    pub fn detected_variables(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        for s in [
-            &self.title,
-            &self.preview,
-            &self.status_label.text,
-            &self.link.url,
-        ] {
-            out.extend(detect_variables(s));
-        }
-        for b in &self.buttons {
-            out.extend(detect_variables(&b.text));
-            out.extend(detect_variables(&b.url));
-        }
-        out.sort();
-        out.dedup();
-        out
-    }
-}
-
-/// 渲染后的应用消息流卡片内容（尚未带上 `biz_id` / `time_sensitive`）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RenderedAppFeedCard {
-    pub title: String,
-    pub preview: String,
-    pub status_label: Option<RenderedStatusLabel>,
-    pub link: Option<String>,
-    pub buttons: Vec<RenderedFeedButton>,
-    pub close_notify: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RenderedStatusLabel {
-    pub text: String,
-    pub label_type: StatusLabelType,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RenderedFeedButton {
-    pub text: String,
-    pub url: String,
-    pub button_type: FeedButtonType,
-}
-
-impl AppFeedCardSpec {
-    /// 渲染为飞书 `open_app_feed_card` 的内容（不含 `biz_id` 与 `time_sensitive`）。
-    pub fn render(&self, ctx: &RenderContext, is_firing: bool) -> RenderedAppFeedCard {
-        let status_text = truncate_chars(
-            &render_str(&self.status_label.text, ctx),
-            Self::MAX_STATUS_TEXT_CHARS,
-        );
-        let status_label = if status_text.trim().is_empty() {
-            None
-        } else {
-            Some(RenderedStatusLabel {
-                text: status_text,
-                label_type: if is_firing {
-                    self.status_label.type_firing
-                } else {
-                    self.status_label.type_resolved
-                },
-            })
-        };
-
-        let link = if self.link.enabled {
-            let url = render_str(&self.link.url, ctx);
-            if url.trim().is_empty() {
-                None
-            } else {
-                Some(truncate_chars(&url, Self::MAX_URL_CHARS))
-            }
-        } else {
-            None
-        };
-
-        let buttons = self
-            .buttons
-            .iter()
-            .take(Self::MAX_BUTTONS)
-            .map(|b| RenderedFeedButton {
-                text: truncate_chars(&render_str(&b.text, ctx), Self::MAX_BUTTON_TEXT_CHARS),
-                url: truncate_chars(&render_str(&b.url, ctx), Self::MAX_URL_CHARS),
-                button_type: b.button_type,
-            })
-            .filter(|b| !b.text.trim().is_empty() && !b.url.trim().is_empty())
-            .collect();
-
-        RenderedAppFeedCard {
-            title: truncate_chars(&render_str(&self.title, ctx), Self::MAX_TITLE_CHARS),
-            preview: truncate_chars(&render_str(&self.preview, ctx), Self::MAX_PREVIEW_CHARS),
-            status_label,
-            link,
-            buttons,
-            close_notify: self.close_notify,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // 模板聚合根
 // ---------------------------------------------------------------------------
 
@@ -462,13 +194,7 @@ impl AppFeedCardSpec {
 pub struct CardTemplate {
     pub id: CardTemplateId,
     pub name: String,
-    pub kind: TemplateKind,
-    /// `kind = card_message` 时非空。
-    #[serde(default)]
-    pub card_message: Option<CardMessageSpec>,
-    /// `kind = app_feed_card` 时非空。
-    #[serde(default)]
-    pub app_feed_spec: Option<AppFeedCardSpec>,
+    pub card_message: CardMessageSpec,
     pub is_default: bool,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
@@ -482,23 +208,7 @@ impl CardTemplate {
         Self {
             id: CardTemplateId::new(),
             name: name.into(),
-            kind: TemplateKind::CardMessage,
-            card_message: Some(spec),
-            app_feed_spec: None,
-            is_default: false,
-            created_at: now,
-            updated_at: now,
-        }
-    }
-
-    pub fn new_app_feed_card(name: impl Into<String>, spec: AppFeedCardSpec) -> Self {
-        let now = crate::now();
-        Self {
-            id: CardTemplateId::new(),
-            name: name.into(),
-            kind: TemplateKind::AppFeedCard,
-            card_message: None,
-            app_feed_spec: Some(spec),
+            card_message: spec,
             is_default: false,
             created_at: now,
             updated_at: now,
@@ -515,46 +225,11 @@ impl CardTemplate {
                 Self::MAX_NAME_LEN
             )));
         }
-        match self.kind {
-            TemplateKind::CardMessage => {
-                let spec = self.card_message.as_mut().ok_or_else(|| {
-                    DomainError::validation("kind=card_message 时必须提供 card_message")
-                })?;
-                if self.app_feed_spec.is_some() {
-                    return Err(DomainError::validation(
-                        "kind=card_message 时不应提供 app_feed_spec",
-                    ));
-                }
-                spec.normalize_and_validate()?;
-            }
-            TemplateKind::AppFeedCard => {
-                let spec = self.app_feed_spec.as_ref().ok_or_else(|| {
-                    DomainError::validation("kind=app_feed_card 时必须提供 app_feed_spec")
-                })?;
-                if self.card_message.is_some() {
-                    return Err(DomainError::validation(
-                        "kind=app_feed_card 时不应提供 card_message",
-                    ));
-                }
-                spec.validate()?;
-            }
-        }
-        Ok(())
+        self.card_message.normalize_and_validate()
     }
 
     pub fn detected_variables(&self) -> Vec<String> {
-        match self.kind {
-            TemplateKind::CardMessage => self
-                .card_message
-                .as_ref()
-                .map(|s| s.detected_variables())
-                .unwrap_or_default(),
-            TemplateKind::AppFeedCard => self
-                .app_feed_spec
-                .as_ref()
-                .map(|s| s.detected_variables())
-                .unwrap_or_default(),
-        }
+        self.card_message.detected_variables()
     }
 }
 
@@ -690,14 +365,6 @@ fn collect_variables(value: &Value, out: &mut Vec<String>) {
     }
 }
 
-/// 按**字符**（而非字节）截断，避免截坏 UTF-8。
-pub fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    s.chars().take(max).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -764,22 +431,6 @@ mod tests {
                 "alerts_table".into(),
                 "severity".into()
             ]
-        );
-    }
-
-    #[test]
-    fn app_feed_render_truncates_to_feishu_limits() {
-        let spec = AppFeedCardSpec {
-            title: "${long}".into(),
-            preview: "${long}".into(),
-            ..Default::default()
-        };
-        let ctx = RenderContext::new().with("long", "字".repeat(300));
-        let r = spec.render(&ctx, true);
-        assert_eq!(r.title.chars().count(), AppFeedCardSpec::MAX_TITLE_CHARS);
-        assert_eq!(
-            r.preview.chars().count(),
-            AppFeedCardSpec::MAX_PREVIEW_CHARS
         );
     }
 

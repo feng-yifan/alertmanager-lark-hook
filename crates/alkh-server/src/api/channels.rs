@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use alkh_app::channels::{CreateChannel, SyncRequest, TestSample, UpdateChannel};
 use alkh_app::policies::PolicyInput;
 use alkh_domain::ids::{CardTemplateId, ChannelId, HookId};
-use alkh_domain::policy::{MessageType, NotificationPolicy};
+use alkh_domain::policy::NotificationPolicy;
 use alkh_domain::ports::ChannelFilter;
 use alkh_domain::Page;
 
@@ -35,8 +35,6 @@ pub struct DeleteQuery {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct TestMessageRequest {
-    #[serde(default)]
-    pub message_type: Option<MessageType>,
     #[serde(default)]
     pub card_template_id: Option<CardTemplateId>,
     #[serde(default)]
@@ -174,7 +172,6 @@ pub async fn test_message(
             .channels
             .send_test(
                 &id,
-                req.message_type,
                 req.card_template_id,
                 req.sample.unwrap_or_default(),
                 &req.mock,

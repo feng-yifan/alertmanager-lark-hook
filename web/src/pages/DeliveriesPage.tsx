@@ -178,7 +178,6 @@ export default function DeliveriesPage(): JSX.Element {
                   <tr>
                     <th>状态</th>
                     <th>类型</th>
-                    <th>消息类型</th>
                     <th>告警分组</th>
                     <th className="num">尝试</th>
                     <th>飞书消息 ID</th>
@@ -202,9 +201,6 @@ export default function DeliveriesPage(): JSX.Element {
                         </td>
                         <td>
                           <StatusBadge kind="delivery_kind" value={delivery.kind} />
-                        </td>
-                        <td>
-                          <StatusBadge kind="message_type" value={delivery.message_type} />
                         </td>
                         <td>
                           <Link to={`/alert-groups/${delivery.alert_group_id}`} className="mono" title={delivery.alert_group_id}>

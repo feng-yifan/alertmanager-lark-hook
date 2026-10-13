@@ -1,11 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { errorMessage, listCardTemplates, sendTestMessage } from '../../api';
 import { Banner, Button, Card, Field, JsonBlock, Options, RadioGroup, Select, StatusBadge } from '../../components/ui';
 import { useAsync } from '../../hooks';
-import { MESSAGE_TYPE_LABEL } from '../../labels';
 import { useToast } from '../../toast';
-import type { Channel, Delivery, MessageType } from '../../types';
+import type { Channel, Delivery } from '../../types';
 
 interface Props {
   channel: Channel;
@@ -14,19 +13,13 @@ interface Props {
 export default function TestMessageTab({ channel }: Props): JSX.Element {
   const toast = useToast();
   const [kind, setKind] = useState<'firing' | 'resolved'>('firing');
-  const [messageType, setMessageType] = useState<'' | MessageType>('');
   const [templateId, setTemplateId] = useState('');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<Delivery | null>(null);
   const [error, setError] = useState<unknown>(null);
 
-  const { data: templates } = useAsync((signal) => listCardTemplates({}, signal), []);
-
-  const effectiveType: MessageType = messageType || channel.policy?.message_type || 'card_message';
-  const templateOptions = useMemo(
-    () => (templates ?? []).filter((template) => template.kind === effectiveType),
-    [templates, effectiveType],
-  );
+  const { data: templates } = useAsync((signal) => listCardTemplates(signal), []);
+  const templateOptions = templates ?? [];
 
   const submit = async () => {
     setBusy(true);
@@ -35,7 +28,6 @@ export default function TestMessageTab({ channel }: Props): JSX.Element {
     try {
       const response = await sendTestMessage(channel.id, {
         sample: kind,
-        ...(messageType ? { message_type: messageType } : {}),
         ...(templateId ? { card_template_id: templateId } : {}),
       });
       setResult(response);
@@ -65,22 +57,9 @@ export default function TestMessageTab({ channel }: Props): JSX.Element {
               onChange={setKind}
             />
           </Field>
-          <Field label="消息类型（message_type）" hint="留空表示跟随渠道策略">
-            <Select
-              value={messageType}
-              onChange={(event) => {
-                setMessageType(event.target.value as '' | MessageType);
-                setTemplateId('');
-              }}
-            >
-              <option value="">（跟随渠道策略）</option>
-              <option value="card_message">{MESSAGE_TYPE_LABEL.card_message}</option>
-              <option value="app_feed_card">{MESSAGE_TYPE_LABEL.app_feed_card}</option>
-            </Select>
-          </Field>
           <Field
             label="卡片模板（card_template_id）"
-            hint={`仅列出 ${MESSAGE_TYPE_LABEL[effectiveType]} 模板；留空使用渠道策略中的模板`}
+            hint="留空使用渠道策略中的模板"
           >
             <Select value={templateId} onChange={(event) => setTemplateId(event.target.value)}>
               <option value="">（使用策略默认）</option>
@@ -98,9 +77,6 @@ export default function TestMessageTab({ channel }: Props): JSX.Element {
           <Button variant="primary" loading={busy} onClick={() => void submit()}>
             发送测试消息
           </Button>
-          <span className="faint small">
-            当前渠道策略的消息类型：{MESSAGE_TYPE_LABEL[channel.policy?.message_type ?? 'card_message']}
-          </span>
         </div>
       </Card>
 

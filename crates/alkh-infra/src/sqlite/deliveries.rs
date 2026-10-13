@@ -33,14 +33,12 @@ fn row_to_delivery(row: &SqliteRow) -> PortResult<Delivery> {
         alert_group_id: AlertGroupId::from_string(row.str_col("alert_group_id")?),
         channel_id: ChannelId::from_string(row.str_col("channel_id")?),
         kind: row.enum_col("kind")?,
-        message_type: row.enum_col("message_type")?,
         state: row.enum_col("state")?,
         card_template_id: row
             .opt_str_col("card_template_id")?
             .map(CardTemplateId::from_string),
         lark_message_id: row.opt_str_col("lark_message_id")?,
         card_entity_id: row.opt_str_col("card_entity_id")?,
-        app_feed_biz_id: row.opt_str_col("app_feed_biz_id")?,
         card_sequence: row.i64_col("card_sequence")?,
         rendered_digest: row.str_col("rendered_digest")?,
         attempt: row.u32_col("attempt")?,
@@ -67,21 +65,19 @@ impl DeliveryRepository for SqliteDeliveryRepository {
     async fn insert(&self, delivery: &Delivery) -> PortResult<()> {
         sqlx::query(
             "INSERT INTO deliveries \
-             (id, alert_group_id, channel_id, kind, message_type, state, card_template_id, \
-              lark_message_id, card_entity_id, app_feed_biz_id, card_sequence, rendered_digest, \
+             (id, alert_group_id, channel_id, kind, state, card_template_id, \
+              lark_message_id, card_entity_id, card_sequence, rendered_digest, \
               attempt, last_error, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(delivery.id.as_str())
         .bind(delivery.alert_group_id.as_str())
         .bind(delivery.channel_id.as_str())
         .bind(enum_to_str(&delivery.kind))
-        .bind(enum_to_str(&delivery.message_type))
         .bind(enum_to_str(&delivery.state))
         .bind(delivery.card_template_id.as_ref().map(|t| t.as_str()))
         .bind(delivery.lark_message_id.as_deref())
         .bind(delivery.card_entity_id.as_deref())
-        .bind(delivery.app_feed_biz_id.as_deref())
         .bind(delivery.card_sequence)
         .bind(&delivery.rendered_digest)
         .bind(i64::from(delivery.attempt))
@@ -96,20 +92,18 @@ impl DeliveryRepository for SqliteDeliveryRepository {
 
     async fn update(&self, delivery: &Delivery) -> PortResult<()> {
         sqlx::query(
-            "UPDATE deliveries SET alert_group_id = ?, channel_id = ?, kind = ?, message_type = ?, \
+            "UPDATE deliveries SET alert_group_id = ?, channel_id = ?, kind = ?, \
              state = ?, card_template_id = ?, lark_message_id = ?, card_entity_id = ?, \
-             app_feed_biz_id = ?, card_sequence = ?, rendered_digest = ?, attempt = ?, \
+             card_sequence = ?, rendered_digest = ?, attempt = ?, \
              last_error = ?, updated_at = ? WHERE id = ?",
         )
         .bind(delivery.alert_group_id.as_str())
         .bind(delivery.channel_id.as_str())
         .bind(enum_to_str(&delivery.kind))
-        .bind(enum_to_str(&delivery.message_type))
         .bind(enum_to_str(&delivery.state))
         .bind(delivery.card_template_id.as_ref().map(|t| t.as_str()))
         .bind(delivery.lark_message_id.as_deref())
         .bind(delivery.card_entity_id.as_deref())
-        .bind(delivery.app_feed_biz_id.as_deref())
         .bind(delivery.card_sequence)
         .bind(&delivery.rendered_digest)
         .bind(i64::from(delivery.attempt))
@@ -243,7 +237,6 @@ impl DeliveryRepository for SqliteDeliveryRepository {
 mod tests {
     use super::*;
     use alkh_domain::alert::DeliveryKind;
-    use alkh_domain::policy::MessageType;
 
     async fn pool() -> SqlitePool {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -260,7 +253,6 @@ mod tests {
             group.clone(),
             channel.clone(),
             DeliveryKind::FiringCreated,
-            MessageType::CardMessage,
             None,
             "digest",
             now,
@@ -275,7 +267,6 @@ mod tests {
         d.card_template_id = Some(CardTemplateId::new());
         d.lark_message_id = Some("om_1".into());
         d.card_entity_id = Some("card_1".into());
-        d.app_feed_biz_id = Some("biz_1".into());
         d.card_sequence = 3;
         d.attempt = 2;
         d.last_error = Some("boom".into());
@@ -283,12 +274,10 @@ mod tests {
 
         let got = repo.get(&d.id).await.unwrap().unwrap();
         assert_eq!(got.kind, DeliveryKind::FiringCreated);
-        assert_eq!(got.message_type, MessageType::CardMessage);
         assert_eq!(got.state, DeliveryState::Pending);
         assert_eq!(got.card_template_id, d.card_template_id);
         assert_eq!(got.lark_message_id.as_deref(), Some("om_1"));
         assert_eq!(got.card_entity_id.as_deref(), Some("card_1"));
-        assert_eq!(got.app_feed_biz_id.as_deref(), Some("biz_1"));
         assert_eq!(got.card_sequence, 3);
         assert_eq!(got.rendered_digest, "digest");
         assert_eq!(got.attempt, 2);

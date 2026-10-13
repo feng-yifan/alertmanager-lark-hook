@@ -20,14 +20,12 @@ import {
   Options,
   RadioGroup,
   Select,
-  Switch,
 } from '../../components/ui';
 import { useAsync } from '../../hooks';
 import {
   DECISION_TABLE,
   MATCH_OP_LABEL,
   R11_FILTER_NOTE,
-  R4_APP_FEED_NOTE,
   R4_CARD_MESSAGE_CAVEAT,
   R5_MUTE_NOTE,
 } from '../../labels';
@@ -39,7 +37,6 @@ import type {
   GroupUpdatePolicy,
   LabelMatcher,
   MatchOp,
-  MessageType,
   NotificationPolicy,
   NotificationPolicyInput,
   RepeatPolicy,
@@ -55,9 +52,7 @@ interface Props {
 }
 
 interface Draft {
-  message_type: MessageType;
   card_template_id: string;
-  pin_unresolved: boolean;
   repeat_policy: RepeatPolicy;
   resolved_policy: ResolvedPolicy;
   group_update_policy: GroupUpdatePolicy;
@@ -70,9 +65,7 @@ interface Draft {
 
 /** Defaults mirror the example policy in `docs/api.md` §3. */
 const DEFAULT_DRAFT: Draft = {
-  message_type: 'card_message',
   card_template_id: '',
-  pin_unresolved: false,
   repeat_policy: 'suppress',
   resolved_policy: 'send',
   group_update_policy: 'update_previous',
@@ -96,10 +89,6 @@ function toRadio<T extends string>(options: EnumOption[]): Array<{ value: T; lab
   return options.map((option) => ({ value: option.value as T, label: option.label }));
 }
 
-function templateKindLabel(template: CardTemplate): string {
-  return template.kind === 'card_message' ? '卡片消息' : '应用消息流消息';
-}
-
 export default function PolicyTab({ channelId, channelName, onSaved }: Props): JSX.Element {
   const toast = useToast();
   const { meta } = useMeta();
@@ -110,7 +99,7 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
         if (cause instanceof ApiError && cause.status === 404) return null;
         throw cause;
       }),
-      listCardTemplates({}, signal).catch(() => null),
+      listCardTemplates(signal).catch(() => null),
     ]);
     return { policy, templates };
   }, [channelId]);
@@ -131,30 +120,25 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
 
   const templates: CardTemplate[] = useMemo(() => data?.templates ?? [], [data]);
 
-  const matchingTemplates = useMemo(
-    () => templates.filter((template) => template.kind === draft.message_type),
-    [templates, draft.message_type],
-  );
-
   const selectedTemplate = templates.find((template) => template.id === draft.card_template_id);
   const selectedTemplateMissing = draft.card_template_id !== '' && !selectedTemplate;
 
   const templateOptions = useMemo(() => {
-    const options = matchingTemplates.map((template) => ({
+    const options = templates.map((template) => ({
       value: template.id,
-      label: `${template.name}${template.is_default ? ' · 默认' : ''}（${templateKindLabel(template)}）`,
+      label: `${template.name}${template.is_default ? ' · 默认' : ''}`,
     }));
     if (draft.card_template_id && !options.some((option) => option.value === draft.card_template_id)) {
       const referenced = templates.find((template) => template.id === draft.card_template_id);
       options.push({
         value: draft.card_template_id,
         label: referenced
-          ? `${referenced.name}（${templateKindLabel(referenced)} · 与消息类型不匹配）`
+          ? `${referenced.name}（不在列表中）`
           : `未知模板 ${shortId(draft.card_template_id)}（不在列表中）`,
       });
     }
     return options;
-  }, [matchingTemplates, templates, draft.card_template_id]);
+  }, [templates, draft.card_template_id]);
 
   const validate = (value: Draft): DraftErrors => {
     const result: DraftErrors = { matchers: {} };
@@ -205,9 +189,7 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
       return;
     }
     const payload: NotificationPolicyInput = {
-      message_type: draft.message_type,
       card_template_id: draft.card_template_id || null,
-      pin_unresolved: draft.pin_unresolved,
       repeat_policy: draft.repeat_policy,
       resolved_policy: draft.resolved_policy,
       group_update_policy: draft.group_update_policy,
@@ -271,24 +253,9 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
         title="消息类型与卡片模板"
         actions={policy ? <span className="faint small">策略更新于 {formatDateTime(policy.updated_at)}</span> : null}
       >
-        <Field label="message_type" required hint="卡片消息走 im/v1/messages；应用消息流走 im/v2/app_feed_card">
-          <RadioGroup<MessageType>
-            value={draft.message_type}
-            options={toRadio<MessageType>(meta.message_types)}
-            onChange={(next) =>
-              setDraft((current) => {
-                const stillMatches = templates.some(
-                  (template) => template.id === current.card_template_id && template.kind === next,
-                );
-                return { ...current, message_type: next, card_template_id: stillMatches ? current.card_template_id : '' };
-              })
-            }
-          />
-        </Field>
-
         <Field
           label="card_template_id"
-          hint="仅列出与 message_type 匹配的模板（domain-model §5 交叉校验）；留空时运行时使用内置默认模板（R12 fallback=default_template）"
+          hint="留空时运行时使用内置默认模板（R12 fallback=default_template）；保存时会校验引用的模板存在"
         >
           <Select
             value={draft.card_template_id}
@@ -310,19 +277,7 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
           </Banner>
         ) : null}
 
-        <div className="mt-8">
-          <Switch
-            checked={draft.pin_unresolved}
-            onChange={(next) => setDraft((current) => ({ ...current, pin_unresolved: next }))}
-            label="pin_unresolved · pin 未解决告警"
-            hint={draft.message_type === 'app_feed_card' ? R4_APP_FEED_NOTE : R4_CARD_MESSAGE_CAVEAT}
-          />
-        </div>
-        {draft.message_type === 'card_message' ? (
-          <div className="callout mt-8">{R4_CARD_MESSAGE_CAVEAT}</div>
-        ) : (
-          <div className="callout info mt-8">{R4_APP_FEED_NOTE}</div>
-        )}
+        <div className="callout mt-8">{R4_CARD_MESSAGE_CAVEAT}</div>
       </Card>
 
       <Card title="投递策略" subtitle="对应 docs/business-rules.md §4 决策表">
@@ -507,7 +462,7 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
       <div className="row" style={{ justifyContent: 'flex-end' }}>
         {draft.card_template_id && selectedTemplate ? (
           <Badge tone="muted">
-            已选模板：{selectedTemplate.name}（{templateKindLabel(selectedTemplate)}）
+            已选模板：{selectedTemplate.name}
           </Badge>
         ) : null}
         <Button onClick={() => setDraft(policy ? draftFromPolicy(policy) : DEFAULT_DRAFT)} disabled={saving}>
@@ -523,9 +478,7 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
 
 function draftFromPolicy(policy: NotificationPolicy): Draft {
   return {
-    message_type: policy.message_type,
     card_template_id: policy.card_template_id ?? '',
-    pin_unresolved: policy.pin_unresolved,
     repeat_policy: policy.repeat_policy,
     resolved_policy: policy.resolved_policy,
     group_update_policy: policy.group_update_policy,

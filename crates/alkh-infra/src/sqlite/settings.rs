@@ -23,7 +23,6 @@ fn row_to_settings(row: &SqliteRow) -> PortResult<AppSettings> {
         lark_app_secret_enc: secret,
         lark_base_url: row.str_col("lark_base_url")?,
         public_base_url: row.opt_str_col("public_base_url")?,
-        default_app_feed_link: row.opt_str_col("default_app_feed_link")?,
         retention: RetentionPolicy {
             alert_group_days: row.u32_col("retention_alert_group_days")?,
             delivery_days: row.u32_col("retention_delivery_days")?,
@@ -69,16 +68,15 @@ impl SettingsRepository for SqliteSettingsRepository {
         sqlx::query(
             "INSERT INTO app_settings \
              (id, lark_app_id, lark_app_secret_nonce, lark_app_secret_ciphertext, lark_base_url, \
-              public_base_url, default_app_feed_link, retention_alert_group_days, \
+              public_base_url, retention_alert_group_days, \
               retention_delivery_days, retention_audit_days, updated_at) \
-             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(id) DO UPDATE SET \
               lark_app_id = excluded.lark_app_id, \
               lark_app_secret_nonce = excluded.lark_app_secret_nonce, \
               lark_app_secret_ciphertext = excluded.lark_app_secret_ciphertext, \
               lark_base_url = excluded.lark_base_url, \
               public_base_url = excluded.public_base_url, \
-              default_app_feed_link = excluded.default_app_feed_link, \
               retention_alert_group_days = excluded.retention_alert_group_days, \
               retention_delivery_days = excluded.retention_delivery_days, \
               retention_audit_days = excluded.retention_audit_days, \
@@ -89,7 +87,6 @@ impl SettingsRepository for SqliteSettingsRepository {
         .bind(ciphertext)
         .bind(&settings.lark_base_url)
         .bind(settings.public_base_url.as_deref())
-        .bind(settings.default_app_feed_link.as_deref())
         .bind(i64::from(settings.retention.alert_group_days))
         .bind(i64::from(settings.retention.delivery_days))
         .bind(i64::from(settings.retention.audit_days))
@@ -136,7 +133,6 @@ mod tests {
                 ciphertext: "Y2lwaGVy".into(),
             }),
             public_base_url: Some("https://alkh.example.com".into()),
-            default_app_feed_link: Some("https://alkh.example.com/feed".into()),
             retention: RetentionPolicy {
                 alert_group_days: 7,
                 delivery_days: 8,
@@ -158,10 +154,6 @@ mod tests {
         assert_eq!(
             got.public_base_url.as_deref(),
             Some("https://alkh.example.com")
-        );
-        assert_eq!(
-            got.default_app_feed_link.as_deref(),
-            Some("https://alkh.example.com/feed")
         );
         assert_eq!(
             got.retention,

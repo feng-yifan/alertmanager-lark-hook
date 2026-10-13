@@ -24,17 +24,10 @@ pub struct VariableMeta {
 #[derive(Debug, Clone, Serialize)]
 pub struct Meta {
     pub version: &'static str,
-    pub message_types: Vec<EnumOption>,
     pub repeat_policies: Vec<EnumOption>,
     pub resolved_policies: Vec<EnumOption>,
     pub group_update_policies: Vec<EnumOption>,
     pub match_ops: Vec<EnumOption>,
-    pub status_label_types: Vec<EnumOption>,
-    /// 应用消息流卡片按钮类型（`default` / `primary` / `success`）。
-    /// 与 `status_label_types` 是**不同**的枚举，前端不要复用。
-    pub feed_button_types: Vec<EnumOption>,
-    /// `app_feed_card.biz_id` 的生成策略。
-    pub biz_id_sources: Vec<EnumOption>,
     pub card_sources: Vec<EnumOption>,
     pub channel_kinds: Vec<EnumOption>,
     pub receive_id_types: Vec<EnumOption>,
@@ -46,8 +39,6 @@ pub struct Meta {
     pub card_presets: &'static [CardPreset],
     /// 严重级别 → 卡片 header 颜色（对象映射，便于前端直接查表）。
     pub severity_colors: BTreeMap<&'static str, &'static str>,
-    /// 应用消息流卡片 `pin_unresolved` 的有效性提示（R4）。
-    pub pin_supported_message_types: Vec<&'static str>,
     pub token_prefix: &'static str,
     pub hook_path_template: &'static str,
 }
@@ -56,13 +47,6 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 macro_rules! opts {
     ($(($v:literal, $l:literal)),* $(,)?) => { vec![$(EnumOption { value: $v, label: $l }),*] };
-}
-
-pub fn message_types() -> Vec<EnumOption> {
-    opts![
-        ("card_message", "卡片消息"),
-        ("app_feed_card", "应用消息流消息")
-    ]
 }
 
 pub fn repeat_policies() -> Vec<EnumOption> {
@@ -98,36 +82,10 @@ pub fn match_ops() -> Vec<EnumOption> {
     ]
 }
 
-pub fn status_label_types() -> Vec<EnumOption> {
-    opts![
-        ("primary", "主类型"),
-        ("secondary", "次要类型"),
-        ("success", "成功类型"),
-        ("danger", "危险类型"),
-    ]
-}
-
 pub fn card_sources() -> Vec<EnumOption> {
     opts![
         ("builder_json", "卡片搭建工具 JSON（JSON 2.0）"),
         ("builder_template", "卡片搭建工具模板（template_id）"),
-    ]
-}
-
-/// 应用消息流卡片的按钮类型（飞书 `button_type`）。
-pub fn feed_button_types() -> Vec<EnumOption> {
-    opts![
-        ("default", "默认"),
-        ("primary", "主要"),
-        ("success", "成功")
-    ]
-}
-
-/// 应用消息流卡片的 `biz_id` 生成策略。
-pub fn biz_id_sources() -> Vec<EnumOption> {
-    opts![
-        ("alert_group", "按告警分组（同分组复用同一张卡片，默认）"),
-        ("hook", "按 Hook + 告警分组")
     ]
 }
 
@@ -395,14 +353,10 @@ pub fn render_variable_names() -> Vec<String> {
 pub fn meta() -> Meta {
     Meta {
         version: VERSION,
-        message_types: message_types(),
         repeat_policies: repeat_policies(),
         resolved_policies: resolved_policies(),
         group_update_policies: group_update_policies(),
         match_ops: match_ops(),
-        status_label_types: status_label_types(),
-        feed_button_types: feed_button_types(),
-        biz_id_sources: biz_id_sources(),
         card_sources: card_sources(),
         channel_kinds: channel_kinds(),
         receive_id_types: receive_id_types(),
@@ -417,8 +371,6 @@ pub fn meta() -> Meta {
         ]
         .into_iter()
         .collect(),
-        // R4：只有应用消息流卡片支持 time_sensitive 即时提醒。
-        pin_supported_message_types: vec!["app_feed_card"],
         token_prefix: alkh_domain::hook::TOKEN_PREFIX,
         hook_path_template: "/api/v1/hooks/alertmanager/{token}",
     }
@@ -527,13 +479,10 @@ mod tests {
 
     #[test]
     fn meta_serializes() {
-        let m = meta();
-        let v = serde_json::to_value(&m).unwrap();
-        assert!(v["message_types"].as_array().unwrap().len() == 2);
+        let v = serde_json::to_value(meta()).unwrap();
         assert!(v["variables"].as_array().unwrap().len() > 20);
-        assert_eq!(v["pin_supported_message_types"][0], "app_feed_card");
-        assert_eq!(v["feed_button_types"].as_array().unwrap().len(), 3);
-        assert_eq!(v["biz_id_sources"].as_array().unwrap().len(), 2);
+        assert!(v["card_components"].as_array().unwrap().len() >= 5);
+        assert!(v["card_presets"].as_array().unwrap().len() >= 5);
     }
 
     /// 回归：前端曾因把 `status_label_types` 当成字符串数组而渲染出重复的
@@ -543,14 +492,10 @@ mod tests {
         let v = serde_json::to_value(meta()).unwrap();
 
         for field in [
-            "message_types",
             "repeat_policies",
             "resolved_policies",
             "group_update_policies",
             "match_ops",
-            "status_label_types",
-            "feed_button_types",
-            "biz_id_sources",
             "card_sources",
             "channel_kinds",
             "receive_id_types",
@@ -595,26 +540,12 @@ mod tests {
     }
 
     #[test]
-    fn feed_button_types_differ_from_status_label_types() {
-        let feed: Vec<&str> = feed_button_types().iter().map(|o| o.value).collect();
-        let status: Vec<&str> = status_label_types().iter().map(|o| o.value).collect();
-        assert_eq!(feed, vec!["default", "primary", "success"]);
-        assert!(status.contains(&"danger"));
-        assert!(!feed.contains(&"danger"), "按钮类型没有 danger");
-        assert!(!feed.contains(&"secondary"), "按钮类型没有 secondary");
-    }
-
-    #[test]
     fn all_enum_values_are_unique() {
         for set in [
-            message_types(),
             repeat_policies(),
             resolved_policies(),
             group_update_policies(),
             match_ops(),
-            status_label_types(),
-            feed_button_types(),
-            biz_id_sources(),
         ] {
             let mut values: Vec<&str> = set.iter().map(|o| o.value).collect();
             let len = values.len();

@@ -55,7 +55,6 @@ pub fn default_card_json() -> Value {
 
 /// 默认模板名。
 pub const DEFAULT_CARD_TEMPLATE_NAME: &str = "默认告警卡片";
-pub const DEFAULT_APP_FEED_TEMPLATE_NAME: &str = "默认应用消息流卡片";
 
 #[cfg(test)]
 mod tests {

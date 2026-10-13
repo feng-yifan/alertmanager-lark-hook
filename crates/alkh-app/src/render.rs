@@ -4,8 +4,7 @@ use alkh_domain::alert::{AlertGroup, AlertInstance};
 use alkh_domain::channel::Channel;
 use alkh_domain::policy::NotificationPolicy;
 use alkh_domain::template::{
-    render_json, CardMessageSpec, CardSource, RenderContext, RenderedAppFeedCard,
-    CARD_JSON_MAX_BYTES,
+    render_json, CardMessageSpec, CardSource, RenderContext, CARD_JSON_MAX_BYTES,
 };
 use alkh_domain::Timestamp;
 use serde_json::{json, Map, Value};
@@ -215,15 +214,6 @@ fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
         end = i + c.len_utf8();
     }
     &s[..end]
-}
-
-/// 渲染「应用消息流卡片」模板。
-pub fn render_app_feed_card(
-    spec: &alkh_domain::template::AppFeedCardSpec,
-    ctx: &RenderContext,
-    is_firing: bool,
-) -> RenderedAppFeedCard {
-    spec.render(ctx, is_firing)
 }
 
 /// 严重级别 → 卡片 header 颜色（飞书 `header.template` 合法值）。

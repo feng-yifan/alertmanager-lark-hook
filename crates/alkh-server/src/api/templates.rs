@@ -10,17 +10,10 @@ use alkh_app::channels::TestSample;
 use alkh_app::mock::{MockBaseline, MockSpec};
 use alkh_app::templates::{CardTemplateView, PreviewReport, TemplateInput, ValidationReport};
 use alkh_domain::ids::{AlertGroupId, CardTemplateId, ChannelId};
-use alkh_domain::template::TemplateKind;
 
 use crate::api::auth::Admin;
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(default)]
-pub struct ListQuery {
-    pub kind: Option<TemplateKind>,
-}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -38,9 +31,7 @@ impl Default for PreviewRequest {
         Self {
             template: TemplateInput {
                 name: String::new(),
-                kind: TemplateKind::CardMessage,
                 card_message: None,
-                app_feed_spec: None,
                 is_default: false,
             },
             sample: None,
@@ -101,11 +92,8 @@ pub struct DraftSendTestRequest {
 pub async fn list(
     State(state): State<AppState>,
     _admin: Admin,
-    Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Vec<CardTemplateView>>> {
-    Ok(Json(
-        state.templates.list(q.kind).await.map_err(ApiError::from)?,
-    ))
+    Ok(Json(state.templates.list().await.map_err(ApiError::from)?))
 }
 
 /// 内置默认模板内容：卡片编辑器用作「起步卡片」与旧来源转换的落点。
@@ -221,17 +209,11 @@ pub async fn send_test(
     Json(req): Json<SendTestRequest>,
 ) -> ApiResult<Json<alkh_domain::alert::Delivery>> {
     let actor = admin.actor();
-    let template = state.templates.get(&id).await.map_err(ApiError::from)?;
-    let message_type = match template.template.kind {
-        TemplateKind::CardMessage => alkh_domain::policy::MessageType::CardMessage,
-        TemplateKind::AppFeedCard => alkh_domain::policy::MessageType::AppFeedCard,
-    };
     Ok(Json(
         state
             .channels
             .send_test(
                 &req.channel_id,
-                Some(message_type),
                 Some(id),
                 req.sample.unwrap_or_default(),
                 &req.mock,

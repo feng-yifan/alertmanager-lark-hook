@@ -59,8 +59,6 @@ pub struct AppSettings {
     pub lark_base_url: String,
     /// 生成 hook 绝对地址用的对外基址。
     pub public_base_url: Option<String>,
-    /// 应用消息流卡片 `link` 的兜底链接（AlertManager externalURL 为空时使用）。
-    pub default_app_feed_link: Option<String>,
     pub retention: RetentionPolicy,
     pub updated_at: Timestamp,
 }
@@ -72,7 +70,6 @@ impl Default for AppSettings {
             lark_app_secret_enc: None,
             lark_base_url: "https://open.feishu.cn".into(),
             public_base_url: None,
-            default_app_feed_link: None,
             retention: RetentionPolicy::default(),
             updated_at: crate::now(),
         }
@@ -101,14 +98,6 @@ impl AppSettings {
             if !p.is_empty() && !p.starts_with("http://") && !p.starts_with("https://") {
                 return Err(DomainError::validation(
                     "public_base_url 必须以 http(s):// 开头",
-                ));
-            }
-        }
-        if let Some(l) = self.default_app_feed_link.as_deref() {
-            let l = l.trim();
-            if !l.is_empty() && !l.starts_with("https://") {
-                return Err(DomainError::validation(
-                    "default_app_feed_link 必须是 https（飞书要求）",
                 ));
             }
         }
@@ -150,20 +139,6 @@ mod tests {
         assert!(bad.validate().is_err());
         let good = AppSettings {
             lark_base_url: "https://open.feishu.cn".into(),
-            ..Default::default()
-        };
-        assert!(good.validate().is_ok());
-    }
-
-    #[test]
-    fn app_feed_link_must_be_https() {
-        let bad = AppSettings {
-            default_app_feed_link: Some("http://x".into()),
-            ..Default::default()
-        };
-        assert!(bad.validate().is_err());
-        let good = AppSettings {
-            default_app_feed_link: Some("https://x".into()),
             ..Default::default()
         };
         assert!(good.validate().is_ok());

@@ -3,16 +3,15 @@
  *
  * Display-only fallbacks for values that are **not** served by `GET /api/v1/meta`
  * (e.g. delivery states in the audit/delivery lists). Anything that `/meta` does
- * serve — message types, policies, status label types, button types, biz_id sources,
- * match ops — must be read from `meta` instead of being duplicated here, otherwise
- * the two copies drift and the UI renders stale (or malformed) option lists.
+ * serve — policies, match ops, channel kinds — must be read from `meta` instead of
+ * being duplicated here, otherwise the two copies drift and the UI renders stale
+ * (or malformed) option lists.
  */
 import type {
   ChannelKind,
   ChannelSource,
   DeliveryKind,
   DeliveryState,
-  MessageType,
   ReceiveIdType,
 } from './types';
 
@@ -34,10 +33,6 @@ export const DELIVERY_KIND_LABEL: Record<string, string> = {
   test: '测试消息',
 };
 
-export const MESSAGE_TYPE_LABEL: Record<string, string> = {
-  card_message: '卡片消息',
-  app_feed_card: '应用消息流消息',
-};
 
 export const GROUP_STATUS_LABEL: Record<string, string> = {
   firing: '未解决',
@@ -102,7 +97,6 @@ export const DELIVERY_KIND_VALUES: DeliveryKind[] = [
   'resolved',
   'test',
 ];
-export const MESSAGE_TYPE_VALUES: MessageType[] = ['card_message', 'app_feed_card'];
 
 /**
  * `docs/business-rules.md` §4 decision table, rendered read-only in the policy editor
@@ -135,16 +129,9 @@ export const DECISION_TABLE: DecisionRow[] = [
   { event: 'Resolved', field: 'resolved_policy', value: 'update_previous', valueLabel: '更新旧告警', action: 'UpdateInPlace：把旧卡片原地更新为已恢复，旧 → Resolved' },
 ];
 
-/**
- * R4: `pin_unresolved` only maps to the app-feed-card `time_sensitive` field, and only
- * for messages containing at least one firing alert. It is a no-op for card messages.
- */
+/** R4：卡片消息（`im/v1/messages`）没有官方的置顶/即时提醒字段。 */
 export const R4_CARD_MESSAGE_CAVEAT =
-  'R4：卡片消息（im/v1/messages）没有官方的置顶/即时提醒字段，该开关对卡片消息是 no-op。' +
-  '只有「应用消息流消息」才会把它翻译为 time_sensitive = true，且仅当本次消息包含至少一条 firing 告警；恢复消息始终为 false。';
-
-export const R4_APP_FEED_NOTE =
-  'R4：pin 仅对应用消息流卡片生效（time_sensitive = true），且仅当本次消息包含至少一条 firing 告警；恢复消息始终为 false。';
+  'R4：卡片消息（im/v1/messages）没有官方的置顶/即时提醒字段，因此本项目不提供「即时提醒」开关。';
 
 export const R5_MUTE_NOTE =
   'R5：mute_until 未过期时抑制所有发送类动作，但事件分类与分组状态照常推进——解除静默后不会补发历史消息，只反映最新状态。';

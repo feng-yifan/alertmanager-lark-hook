@@ -7,9 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use alkh_domain::channel::ReceiveIdType;
 use alkh_domain::error::{LarkError, PortError};
-use alkh_domain::ports::{
-    feed_card_failure, AppFeedCardPayload, LarkChat, LarkFailedCard, LarkGateway, LarkSendOutcome,
-};
+use alkh_domain::ports::{LarkChat, LarkGateway, LarkSendOutcome};
 use alkh_server::config::Config;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -34,19 +32,14 @@ struct FakeState {
     card_entities: Vec<Value>,
     card_entity_templates: Vec<Value>,
     messages: Vec<SentMessage>,
-    feed_cards: Vec<AppFeedCardPayload>,
     updated_card_entities: Vec<(String, Value, i64)>,
     updated_messages: Vec<(String, Value)>,
     recalled: Vec<String>,
-    deleted_feed_cards: Vec<String>,
     seq: u64,
     /// 注入故障：接下来 `fail_send_times` 次「发送」直接返回 `fail_send_code`。
     /// 用于覆盖发送失败路径（默认 0 = 不注入）。
     fail_send_times: usize,
     fail_send_code: i64,
-    /// 注入故障：应用消息流卡片**更新**返回 `failed_cards[].reason = 该值`
-    /// （例如 `NOT_CREATED`），用于覆盖 R1 对 app feed 的降级路径。
-    fail_feed_update_reason: Option<String>,
 }
 
 #[derive(Default)]
@@ -99,11 +92,6 @@ impl FakeLark {
         let mut s = self.snapshot();
         s.fail_send_times = times;
         s.fail_send_code = code;
-    }
-
-    /// 让下一次应用消息流卡片**更新**以 `failed_cards` 形式失败，reason 由调用方指定。
-    fn inject_app_feed_update_reason(&self, reason: Option<&str>) {
-        self.snapshot().fail_feed_update_reason = reason.map(str::to_string);
     }
 
     fn take_injected_send_failure(&self) -> Option<PortError> {
@@ -168,8 +156,6 @@ impl LarkGateway for FakeLark {
         });
         Ok(LarkSendOutcome {
             message_id: Some(self.next_id("om")),
-            app_feed_biz_id: None,
-            failed_cards: vec![],
         })
     }
 
@@ -191,8 +177,6 @@ impl LarkGateway for FakeLark {
         });
         Ok(LarkSendOutcome {
             message_id: Some(self.next_id("om")),
-            app_feed_biz_id: None,
-            failed_cards: vec![],
         })
     }
 
@@ -224,53 +208,6 @@ impl LarkGateway for FakeLark {
 
     async fn recall_message(&self, message_id: &str) -> alkh_domain::PortResult<()> {
         self.snapshot().recalled.push(message_id.to_string());
-        Ok(())
-    }
-
-    async fn send_app_feed_card(
-        &self,
-        _user_id: &str,
-        _user_id_type: ReceiveIdType,
-        payload: &AppFeedCardPayload,
-    ) -> alkh_domain::PortResult<LarkSendOutcome> {
-        self.snapshot().feed_cards.push(payload.clone());
-        Ok(LarkSendOutcome {
-            message_id: None,
-            app_feed_biz_id: payload.biz_id.clone(),
-            failed_cards: vec![],
-        })
-    }
-
-    async fn update_app_feed_card(
-        &self,
-        _user_id: &str,
-        _user_id_type: ReceiveIdType,
-        payload: &AppFeedCardPayload,
-    ) -> alkh_domain::PortResult<()> {
-        // 真实网关在 `failed_cards` 非空时用同一套归一化生成错误，这里保持一致，
-        // 否则假网关会掩盖 R1 对 app feed 的降级行为。
-        let injected = self.snapshot().fail_feed_update_reason.clone();
-        if let Some(reason) = injected {
-            return Err(PortError::Lark(feed_card_failure(
-                "更新应用消息流卡片失败",
-                &[LarkFailedCard {
-                    biz_id: payload.biz_id.clone(),
-                    user_id: None,
-                    reason: Some(reason),
-                }],
-            )));
-        }
-        self.snapshot().feed_cards.push(payload.clone());
-        Ok(())
-    }
-
-    async fn delete_app_feed_card(
-        &self,
-        _user_id: &str,
-        _user_id_type: ReceiveIdType,
-        biz_id: &str,
-    ) -> alkh_domain::PortResult<()> {
-        self.snapshot().deleted_feed_cards.push(biz_id.to_string());
         Ok(())
     }
 }
@@ -594,15 +531,11 @@ async fn meta_endpoint_pins_the_wire_format() {
     let (status, meta) = h.get("/api/v1/meta").await;
     assert_eq!(status, 200);
 
-    const ENUM_FIELDS: [&str; 11] = [
-        "message_types",
+    const ENUM_FIELDS: [&str; 7] = [
         "repeat_policies",
         "resolved_policies",
         "group_update_policies",
         "match_ops",
-        "status_label_types",
-        "feed_button_types",
-        "biz_id_sources",
         "card_sources",
         "channel_kinds",
         "receive_id_types",
@@ -624,24 +557,6 @@ async fn meta_endpoint_pins_the_wire_format() {
         }
     }
 
-    // 按钮类型与状态标签类型是两个不同的枚举，不能互相复用
-    let feed: Vec<&str> = meta["feed_button_types"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|o| o["value"].as_str().unwrap())
-        .collect();
-    assert_eq!(feed, vec!["default", "primary", "success"]);
-    let status_types: Vec<&str> = meta["status_label_types"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|o| o["value"].as_str().unwrap())
-        .collect();
-    assert!(status_types.contains(&"danger"));
-    assert!(!feed.contains(&"danger"));
-    assert!(!feed.contains(&"secondary"));
-
     // 变量序列化为 `type`，不能泄露 Rust 字段名 `ty`
     let variable = &meta["variables"][0];
     assert!(variable["type"].is_string(), "变量应有 `type`: {variable}");
@@ -661,7 +576,6 @@ async fn meta_endpoint_pins_the_wire_format() {
         meta["hook_path_template"],
         "/api/v1/hooks/alertmanager/{token}"
     );
-    assert_eq!(meta["pin_supported_message_types"][0], "app_feed_card");
 
     // 组件目录（本地卡片构建工具的契约来源）：驱动面板 + 校验。
     let components = meta["card_components"]
@@ -735,8 +649,8 @@ async fn meta_and_settings_expose_no_secrets() {
     let h = start().await;
     let (status, meta) = h.get("/api/v1/meta").await;
     assert_eq!(status, 200);
-    assert_eq!(meta["message_types"].as_array().unwrap().len(), 2);
     assert!(meta["variables"].as_array().unwrap().len() > 20);
+    assert!(meta["card_components"].as_array().unwrap().len() >= 5);
 
     let (status, settings) = h.get("/api/v1/settings").await;
     assert_eq!(status, 200);
@@ -791,7 +705,6 @@ async fn channel_sync_imports_feishu_chats_and_masks_tokens() {
         .find(|c| c["receive_id"] == "oc_test_group")
         .unwrap();
     assert_eq!(normal["enabled"], true);
-    assert_eq!(normal["policy"]["message_type"], "card_message");
     assert_eq!(normal["policy"]["repeat_policy"], "suppress");
     assert_eq!(normal["policy"]["resolved_policy"], "send");
 
@@ -946,9 +859,7 @@ async fn repeat_policy_send_and_revoke_previous_recalls_old_message() {
     let mut policy = policy;
     policy["repeat_policy"] = json!("send_and_revoke_previous");
     policy["resolved_policy"] = json!("send_and_delete_previous");
-    policy["pin_unresolved"] = json!(true);
 
-    // 用户级渠道才能用应用消息流卡片；这里保持卡片消息，pin 应被忽略（R4）
     let resp = h
         .http
         .put(h.url(&format!("/api/v1/channels/{channel_id}/policy")))
@@ -990,12 +901,11 @@ async fn failed_intake_stays_retryable_instead_of_being_deduped() {
     // 故障注入：把内置默认卡片模板的 card_message 置空。
     // 这会让 `Sender::prepare` 走到 `AppError::internal("卡片消息模板缺少 card_message")`
     // ⇒ webhook 返回 500（AM 会重试），模拟运行期模板数据损坏这类内部错误。
-    let template_id: String = sqlx::query_scalar(
-        "SELECT id FROM card_templates WHERE kind = 'card_message' AND is_default = 1",
-    )
-    .fetch_one(&h.pool)
-    .await
-    .expect("应存在内置默认卡片模板");
+    let template_id: String =
+        sqlx::query_scalar("SELECT id FROM card_templates WHERE is_default = 1")
+            .fetch_one(&h.pool)
+            .await
+            .expect("应存在内置默认卡片模板");
     sqlx::query("UPDATE card_templates SET card_message = NULL WHERE id = ?")
         .bind(&template_id)
         .execute(&h.pool)
@@ -1104,15 +1014,14 @@ async fn previously_dead_counters_are_actually_incremented() {
     // ---- 1) 渲染失败 → render_failures_total ----
     // 卡片内容序列化在 card_message 里，其中 card_json 换成非对象
     // （绕过保存时的校验，直接用 SQL 造脏数据）
-    let original: String = sqlx::query_scalar(
-        "SELECT card_message FROM card_templates WHERE is_default = 1 AND kind = 'card_message'",
-    )
-    .fetch_one(&h.pool)
-    .await
-    .unwrap();
+    let original: String =
+        sqlx::query_scalar("SELECT card_message FROM card_templates WHERE is_default = 1")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
     sqlx::query(
         "UPDATE card_templates SET card_message = json_set(card_message, '$.card_json', json('[1,2]')) \
-         WHERE is_default = 1 AND kind = 'card_message'",
+         WHERE is_default = 1",
     )
     .execute(&h.pool)
     .await
@@ -1126,13 +1035,11 @@ async fn previously_dead_counters_are_actually_incremented() {
         metric(&h, "alkh_render_failures_total").await >= 1,
         "渲染失败必须被计数"
     );
-    sqlx::query(
-        "UPDATE card_templates SET card_message = ? WHERE is_default = 1 AND kind = 'card_message'",
-    )
-    .bind(&original)
-    .execute(&h.pool)
-    .await
-    .unwrap();
+    sqlx::query("UPDATE card_templates SET card_message = ? WHERE is_default = 1")
+        .bind(&original)
+        .execute(&h.pool)
+        .await
+        .unwrap();
 
     // ---- 2) 飞书报错 → lark_api_errors_total ----
     h.fake.inject_send_failure(1, LarkError::CODE_RATE_LIMITED);
@@ -1266,8 +1173,6 @@ async fn failed_aggregate_flush_is_requeued_and_eventually_delivered() {
         .put(h.url(&format!("/api/v1/channels/{channel_id}/policy")))
         .bearer_auth(&h.token)
         .json(&json!({
-            "message_type": "card_message",
-            "pin_unresolved": false,
             "repeat_policy": "suppress",
             "resolved_policy": "send",
             "group_update_policy": "update_previous",
@@ -1283,14 +1188,13 @@ async fn failed_aggregate_flush_is_requeued_and_eventually_delivered() {
     assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
 
     // 让冲刷必定失败：把默认卡片模板的内容清空（prepare 会直接报 internal）
-    let original: Option<String> = sqlx::query_scalar(
-        "SELECT card_message FROM card_templates WHERE is_default = 1 AND kind = 'card_message'",
-    )
-    .fetch_one(&h.pool)
-    .await
-    .unwrap();
+    let original: Option<String> =
+        sqlx::query_scalar("SELECT card_message FROM card_templates WHERE is_default = 1")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
     assert!(original.is_some(), "应存在默认卡片模板");
-    sqlx::query("UPDATE card_templates SET card_message = NULL WHERE is_default = 1 AND kind = 'card_message'")
+    sqlx::query("UPDATE card_templates SET card_message = NULL WHERE is_default = 1")
         .execute(&h.pool)
         .await
         .unwrap();
@@ -1312,13 +1216,11 @@ async fn failed_aggregate_flush_is_requeued_and_eventually_delivered() {
     );
 
     // 修复模板 ⇒ 退避重试应当把这条事件补投出去
-    sqlx::query(
-        "UPDATE card_templates SET card_message = ? WHERE is_default = 1 AND kind = 'card_message'",
-    )
-    .bind(original.unwrap())
-    .execute(&h.pool)
-    .await
-    .unwrap();
+    sqlx::query("UPDATE card_templates SET card_message = ? WHERE is_default = 1")
+        .bind(original.unwrap())
+        .execute(&h.pool)
+        .await
+        .unwrap();
 
     let flushed = wait_for_metric(&h, "alkh_aggregator_flushed_total", 1, 25).await;
     assert!(
@@ -1446,86 +1348,6 @@ async fn repeated_login_failures_are_throttled_and_do_not_leak_usernames() {
     assert_eq!(status, reqwest::StatusCode::TOO_MANY_REQUESTS);
 }
 
-/// 回归：应用消息流卡片的「卡片已不存在」必须触发 R1 降级（改发新消息）。
-///
-/// 飞书该接口的 `failed_cards` 只有 `reason` 枚举、没有数字错误码，而原实现一律
-/// 合成 `-1`：既不满足 `is_update_unavailable`、也不可重试，于是 app feed 的原地
-/// 更新一旦失效就直接标 Failed —— R1 对应用消息流卡片完全失效，用户再也收不到更新。
-#[tokio::test]
-async fn app_feed_update_not_created_degrades_to_new_message() {
-    let mut h = start().await;
-
-    // 用户级渠道（app_feed_card 只支持 open_id / user_id）
-    let (status, body) = h
-        .post(
-            "/api/v1/channels",
-            json!({
-                "name": "值班同学",
-                "receive_id": "ou_feed_user",
-                "receive_id_type": "open_id"
-            }),
-        )
-        .await;
-    assert_eq!(status, 201, "{body}");
-    let channel_id = body["id"].as_str().unwrap().to_string();
-    h.hook_token = Some(body["hook_token"].as_str().unwrap().to_string());
-    h.channel_id = Some(channel_id.clone());
-
-    let resp = h
-        .http
-        .put(h.url(&format!("/api/v1/channels/{channel_id}/policy")))
-        .bearer_auth(&h.token)
-        .json(&json!({
-            "message_type": "app_feed_card",
-            "pin_unresolved": false,
-            "repeat_policy": "suppress",
-            "resolved_policy": "send",
-            "group_update_policy": "update_previous",
-            "label_matchers": [],
-            "aggregation_window_secs": 0,
-            "min_send_interval_secs": 0,
-            "max_alerts_per_message": 20,
-            "mute_until": null
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-
-    // 1) 首次告警 → 正常发出
-    let (_, body) = h.push(firing_payload(1)).await;
-    assert_eq!(body["action"], "send_new");
-    assert_eq!(body["delivery_state"], "active");
-    let sent_before = h.fake.snapshot().feed_cards.len();
-
-    // 2) 让后续更新以 failed_cards(reason=NOT_CREATED) 失败 —— 卡片已不存在
-    h.fake.inject_app_feed_update_reason(Some("NOT_CREATED"));
-
-    // 3) 内容变化 → 原地更新不可用 → 必须降级为新消息
-    // 注意：必须让**渲染结果**变化，否则 R3「内容未变化则跳过更新」会提前返回，
-    // 根本不会去调更新接口（默认 app feed 模板只渲染 alertname/summary 等，
-    // 单纯增加告警条数不会改变渲染结果）。
-    let mut evolved = firing_payload(2);
-    evolved["commonAnnotations"] = json!({"summary": "CPU 过高（已升级）"});
-    for alert in evolved["alerts"].as_array_mut().unwrap() {
-        alert["annotations"] = json!({"summary": "CPU 过高（已升级）"});
-    }
-    let (_, body) = h.push(evolved).await;
-    assert_eq!(body["action"], "update_in_place", "{body}");
-    assert!(
-        h.fake.snapshot().feed_cards.len() > sent_before,
-        "卡片不存在时应降级改发新消息（R1）：feed_cards {} -> {}（修复前一律合成 -1，\
-         既不触发降级也不可重试，会直接标 Failed）: {body}",
-        sent_before,
-        h.fake.snapshot().feed_cards.len()
-    );
-}
-
-/// 安全回归：告警的 `generatorURL` / `externalURL` 由发送方完全控制，
-/// 非 http(s) 的值（尤其 `javascript:`）必须在入库前被丢弃。
-///
-/// 原样入库时前端会把它放进 `<a href>`，而 React 18 不拦 `javascript:`，
-/// 于是「持有 hook token 发一条告警」就升级成「管理员点一下 = 后台被接管」。
 #[tokio::test]
 async fn javascript_urls_are_stripped_before_persisting() {
     let mut h = start().await;
@@ -1670,8 +1492,6 @@ async fn label_matchers_filter_alerts() {
         .put(h.url(&format!("/api/v1/channels/{channel_id}/policy")))
         .bearer_auth(&h.token)
         .json(&json!({
-            "message_type": "card_message",
-            "pin_unresolved": false,
             "repeat_policy": "suppress",
             "resolved_policy": "send",
             "group_update_policy": "update_previous",
@@ -1698,8 +1518,6 @@ async fn label_matchers_filter_alerts() {
         .put(h.url(&format!("/api/v1/channels/{channel_id}/policy")))
         .bearer_auth(&h.token)
         .json(&json!({
-            "message_type": "card_message",
-            "pin_unresolved": false,
             "repeat_policy": "suppress",
             "resolved_policy": "send",
             "group_update_policy": "update_previous",
@@ -1713,92 +1531,6 @@ async fn label_matchers_filter_alerts() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 400);
-}
-
-#[tokio::test]
-async fn app_feed_card_is_rejected_for_group_channel() {
-    let mut h = start().await;
-    let _ = h.create_channel().await;
-    let channel_id = h.channel_id.clone().unwrap();
-
-    // R15：群渠道不能用应用消息流卡片（飞书该接口没有群维度）
-    let resp = h
-        .http
-        .put(h.url(&format!("/api/v1/channels/{channel_id}/policy")))
-        .bearer_auth(&h.token)
-        .json(&json!({
-            "message_type": "app_feed_card",
-            "pin_unresolved": true,
-            "repeat_policy": "suppress",
-            "resolved_policy": "send",
-            "group_update_policy": "update_previous",
-            "label_matchers": [],
-            "aggregation_window_secs": 0,
-            "min_send_interval_secs": 0,
-            "max_alerts_per_message": 20,
-            "mute_until": null
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 400, "应拒绝群渠道 + 应用消息流卡片");
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "validation_failed");
-}
-
-#[tokio::test]
-async fn user_channel_app_feed_card_delivers_with_documented_payload() {
-    let mut h = start().await;
-
-    // 用户级渠道（open_id）
-    let (status, body) = h
-        .post(
-            "/api/v1/channels",
-            json!({
-                "name": "值班同学",
-                "receive_id": "ou_test_user",
-                "receive_id_type": "open_id"
-            }),
-        )
-        .await;
-    assert_eq!(status, 201, "{body}");
-    let channel_id = body["id"].as_str().unwrap().to_string();
-    let token = body["hook_token"].as_str().unwrap().to_string();
-    h.hook_token = Some(token);
-    h.channel_id = Some(channel_id.clone());
-
-    let resp = h
-        .http
-        .put(h.url(&format!("/api/v1/channels/{channel_id}/policy")))
-        .bearer_auth(&h.token)
-        .json(&json!({
-            "message_type": "app_feed_card",
-            "pin_unresolved": true,
-            "repeat_policy": "suppress",
-            "resolved_policy": "send",
-            "group_update_policy": "update_previous",
-            "label_matchers": [],
-            "aggregation_window_secs": 0,
-            "min_send_interval_secs": 0,
-            "max_alerts_per_message": 20,
-            "mute_until": null
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-
-    let (status, body) = h.push(firing_payload(1)).await;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(body["action"], "send_new");
-
-    let s = h.fake.snapshot();
-    assert_eq!(s.feed_cards.len(), 1);
-    let card = &s.feed_cards[0];
-    assert!(card.biz_id.as_deref().unwrap().starts_with("alkh-"));
-    assert!(card.title.contains("HighCPU"), "标题应渲染: {}", card.title);
-    // R4：未解决告警 + pin 开关 ⇒ 即时提醒
-    assert!(card.time_sensitive, "firing 告警应设置 time_sensitive");
 }
 
 #[tokio::test]
@@ -1850,8 +1582,8 @@ async fn card_template_import_validate_preview_and_crud() {
     assert_eq!(status, 200);
     assert_eq!(
         templates.as_array().unwrap().len(),
-        2,
-        "应有两个内置默认模板"
+        1,
+        "应有一个内置默认卡片模板"
     );
 
     // 校验：非法 schema 应失败
@@ -1918,16 +1650,8 @@ async fn card_template_import_validate_preview_and_crud() {
     let id = created["id"].as_str().unwrap().to_string();
     assert!(created["detected_variables"].as_array().unwrap().len() >= 3);
 
-    let (_, card_only) = h.get("/api/v1/card-templates?kind=card_message").await;
-    assert_eq!(
-        card_only.as_array().unwrap().len(),
-        2,
-        "默认卡片消息模板 + 新建的"
-    );
-    let (_, feed_only) = h.get("/api/v1/card-templates?kind=app_feed_card").await;
-    assert_eq!(feed_only.as_array().unwrap().len(), 1);
     let (_, all) = h.get("/api/v1/card-templates").await;
-    assert_eq!(all.as_array().unwrap().len(), 3);
+    assert_eq!(all.as_array().unwrap().len(), 2, "默认模板 + 新建的");
 
     let resp = h
         .http

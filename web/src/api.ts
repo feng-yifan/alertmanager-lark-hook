@@ -19,7 +19,6 @@ import type {
   CardTemplate,
   CardTemplateCreate,
   CardTemplateDefaults,
-  CardTemplateKind,
   CardTemplatePatch,
   CardTemplateSendTestRequest,
   ChangePasswordRequest,
@@ -297,14 +296,8 @@ export function deleteHook(id: string): Promise<void> {
 /* 5. card templates                                                   */
 /* ------------------------------------------------------------------ */
 
-export async function listCardTemplates(
-  params: { kind?: CardTemplateKind | '' } = {},
-  signal?: AbortSignal,
-): Promise<CardTemplate[]> {
-  const payload = await request<unknown>('/card-templates', {
-    query: { kind: params.kind ? params.kind : undefined },
-    signal,
-  });
+export async function listCardTemplates(signal?: AbortSignal): Promise<CardTemplate[]> {
+  const payload = await request<unknown>('/card-templates', { signal });
   return normalizeList<CardTemplate>(payload);
 }
 

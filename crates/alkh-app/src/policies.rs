@@ -3,9 +3,8 @@
 use alkh_domain::audit::{action as audit_action, AuditActor, AuditLog};
 use alkh_domain::ids::{CardTemplateId, ChannelId};
 use alkh_domain::policy::{
-    GroupUpdatePolicy, LabelMatcher, MessageType, NotificationPolicy, RepeatPolicy, ResolvedPolicy,
+    GroupUpdatePolicy, LabelMatcher, NotificationPolicy, RepeatPolicy, ResolvedPolicy,
 };
-use alkh_domain::template::TemplateKind;
 use alkh_domain::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -17,9 +16,7 @@ use crate::error::{AppError, AppResult};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PolicyInput {
-    pub message_type: MessageType,
     pub card_template_id: Option<CardTemplateId>,
-    pub pin_unresolved: bool,
     pub repeat_policy: RepeatPolicy,
     pub resolved_policy: ResolvedPolicy,
     pub group_update_policy: GroupUpdatePolicy,
@@ -34,9 +31,7 @@ impl Default for PolicyInput {
     fn default() -> Self {
         let d = NotificationPolicy::default_for(ChannelId::default());
         Self {
-            message_type: d.message_type,
             card_template_id: d.card_template_id,
-            pin_unresolved: d.pin_unresolved,
             repeat_policy: d.repeat_policy,
             resolved_policy: d.resolved_policy,
             group_update_policy: d.group_update_policy,
@@ -53,9 +48,7 @@ impl PolicyInput {
     pub fn into_policy(self, channel_id: ChannelId, updated_at: Timestamp) -> NotificationPolicy {
         NotificationPolicy {
             channel_id,
-            message_type: self.message_type,
             card_template_id: self.card_template_id,
-            pin_unresolved: self.pin_unresolved,
             repeat_policy: self.repeat_policy,
             resolved_policy: self.resolved_policy,
             group_update_policy: self.group_update_policy,
@@ -107,29 +100,15 @@ impl PolicyService {
         let mut policy = input.into_policy(channel_id.clone(), self.deps.now());
         policy.channel_id = channel_id.clone();
         policy.updated_at = self.deps.now();
-        // R15：应用消息流卡片只能投递给用户级渠道。
         policy.validate(&channel)?;
 
-        // 交叉校验模板类型与消息类型
+        // 交叉校验：策略引用的模板必须存在（R12）。
         if let Some(tid) = policy.card_template_id.clone() {
-            let template = self
-                .deps
+            self.deps
                 .templates
                 .get(&tid)
                 .await?
                 .ok_or_else(|| AppError::not_found("卡片模板不存在"))?;
-            let want = match policy.message_type {
-                MessageType::CardMessage => TemplateKind::CardMessage,
-                MessageType::AppFeedCard => TemplateKind::AppFeedCard,
-            };
-            if template.kind != want {
-                return Err(AppError::validation(format!(
-                    "模板「{}」类型为 {}，与所选消息类型 {} 不匹配",
-                    template.name,
-                    template.kind.as_str(),
-                    policy.message_type.as_str()
-                )));
-            }
         }
 
         self.deps.policies.upsert(&policy).await?;
@@ -137,9 +116,7 @@ impl PolicyService {
         let log = AuditLog::ok(actor.clone(), audit_action::POLICY_UPDATED, self.deps.now())
             .target(channel.id.to_string())
             .detail(json!({
-                "message_type": policy.message_type.as_str(),
                 "card_template_id": policy.card_template_id.as_ref().map(|t| t.to_string()),
-                "pin_unresolved": policy.pin_unresolved,
                 "repeat_policy": format!("{:?}", policy.repeat_policy),
                 "resolved_policy": format!("{:?}", policy.resolved_policy),
                 "group_update_policy": format!("{:?}", policy.group_update_policy),

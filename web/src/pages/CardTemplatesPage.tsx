@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { deleteCardTemplate, errorMessage, listCardTemplates, patchCardTemplate } from '../api';
 import {
   Badge,
@@ -10,17 +10,14 @@ import {
   ErrorState,
   Loading,
   PageHeader,
-  Select,
-  StatusBadge,
 } from '../components/ui';
 import { useAsync } from '../hooks';
-import { CARD_SOURCE_LABEL, MESSAGE_TYPE_LABEL } from '../labels';
+import { CARD_SOURCE_LABEL } from '../labels';
 import { useToast } from '../toast';
-import type { CardTemplate, CardTemplateInput, CardTemplateKind } from '../types';
+import type { CardTemplate, CardTemplateInput } from '../types';
 import { formatDateTime, shortId } from '../utils';
 
 function sourceLabel(template: CardTemplate): string {
-  if (template.kind !== 'card_message') return '—';
   const source = template.card_message?.source;
   return source ? CARD_SOURCE_LABEL[source] ?? source : '—';
 }
@@ -30,28 +27,19 @@ function sourceLabel(template: CardTemplate): string {
  * 回传模板现有内容，否则后端会用内置默认卡片覆盖用户内容。
  */
 function templateToInput(template: CardTemplate, isDefault: boolean): CardTemplateInput {
-  if (template.kind === 'card_message') {
-    const spec = template.card_message;
-    return {
-      name: template.name,
-      kind: 'card_message',
-      is_default: isDefault,
-      card_message: spec
-        ? {
-            source: spec.source,
-            card_json: spec.card_json,
-            template_id: spec.template_id,
-            template_version_name: spec.template_version_name,
-            variables: spec.variables,
-          }
-        : null,
-    };
-  }
+  const spec = template.card_message;
   return {
     name: template.name,
-    kind: 'app_feed_card',
     is_default: isDefault,
-    app_feed_spec: template.app_feed_spec,
+    card_message: spec
+      ? {
+          source: spec.source,
+          card_json: spec.card_json,
+          template_id: spec.template_id,
+          template_version_name: spec.template_version_name,
+          variables: spec.variables,
+        }
+      : null,
   };
 }
 
@@ -62,15 +50,10 @@ function templateReferencedHint(): string {
 export default function CardTemplatesPage(): JSX.Element {
   const toast = useToast();
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
 
-  const kindParam = searchParams.get('kind') ?? '';
-  const kind = (kindParam === 'card_message' || kindParam === 'app_feed_card' ? kindParam : '') as
-    | CardTemplateKind
-    | '';
   const { data, loading, error, reload, refreshing } = useAsync(
-    (signal) => listCardTemplates({ kind }, signal),
-    [kind],
+    (signal) => listCardTemplates(signal),
+    [],
   );
 
   const [deleteTarget, setDeleteTarget] = useState<CardTemplate | null>(null);
@@ -108,20 +91,14 @@ export default function CardTemplatesPage(): JSX.Element {
     }
   };
 
-  const setKindFilter = (next: string) => {
-    if (next) setSearchParams({ kind: next });
-    else setSearchParams({});
-  };
-
   return (
     <>
       <PageHeader
         title="卡片模板"
-        subtitle="卡片消息（CardKit JSON 2.0 / 搭建工具模板）与应用消息流卡片模板"
+        subtitle="飞书卡片 JSON 2.0：可视化拖拽或直接编辑 JSON"
         actions={
           <>
-            <Button onClick={() => navigate('/card-templates/new?kind=card_message')}>新建卡片消息模板</Button>
-            <Button onClick={() => navigate('/card-templates/new?kind=app_feed_card')}>新建应用消息流模板</Button>
+            <Button onClick={() => navigate('/card-templates/new')}>新建卡片模板</Button>
             <Button onClick={reload} loading={refreshing}>
               刷新
             </Button>
@@ -133,13 +110,6 @@ export default function CardTemplatesPage(): JSX.Element {
         tight
         title="模板列表"
         subtitle={`共 ${data?.length ?? 0} 个模板`}
-        actions={
-          <Select value={kind} onChange={(event) => setKindFilter(event.target.value)} style={{ width: 190 }}>
-            <option value="">全部类型</option>
-            <option value="card_message">{MESSAGE_TYPE_LABEL.card_message}</option>
-            <option value="app_feed_card">{MESSAGE_TYPE_LABEL.app_feed_card}</option>
-          </Select>
-        }
       >
         {loading && !data ? (
           <Loading />
@@ -152,7 +122,6 @@ export default function CardTemplatesPage(): JSX.Element {
                 <thead>
                   <tr>
                     <th>名称</th>
-                    <th>类型</th>
                     <th>来源</th>
                     <th>变量</th>
                     <th>默认</th>
@@ -163,9 +132,9 @@ export default function CardTemplatesPage(): JSX.Element {
                 <tbody>
                   {items.length === 0 ? (
                     <EmptyRow
-                      colSpan={7}
+                      colSpan={6}
                       title="暂无模板"
-                      description="新建一个卡片消息模板（可导入卡片搭建工具导出的 JSON），或新建应用消息流模板。"
+                      description="新建一个卡片模板：从告警积木拖起，或粘贴搭建工具导出的 JSON。"
                     />
                   ) : (
                     items.map((template) => (
@@ -174,15 +143,12 @@ export default function CardTemplatesPage(): JSX.Element {
                           <Link to={`/card-templates/${template.id}`}>{template.name}</Link>
                           <div className="faint small mono">{shortId(template.id)}</div>
                         </td>
-                        <td>
-                          <StatusBadge kind="message_type" value={template.kind} />
-                        </td>
                         <td className="small">{sourceLabel(template)}</td>
                         <td>
                           <span title={(template.detected_variables ?? []).join(', ')}>
                             {(template.detected_variables ?? []).length} 个
                           </span>
-                          {template.kind === 'card_message' && (template.card_message?.variables.length ?? 0) > 0 ? (
+                          {(template.card_message?.variables.length ?? 0) > 0 ? (
                             <span className="faint small"> · 声明 {template.card_message?.variables.length ?? 0}</span>
                           ) : null}
                         </td>
@@ -227,7 +193,7 @@ export default function CardTemplatesPage(): JSX.Element {
           <>
             将删除模板「{deleteTarget?.name}」。{templateReferencedHint()}
             {deleteTarget?.is_default ? (
-              <div className="callout mt-8">这是 {MESSAGE_TYPE_LABEL[deleteTarget.kind]} 的默认模板，删除后该类型可能没有可用默认模板。</div>
+              <div className="callout mt-8">这是当前默认模板，删除后渠道策略会回退到内置默认卡片。</div>
             ) : null}
           </>
         }

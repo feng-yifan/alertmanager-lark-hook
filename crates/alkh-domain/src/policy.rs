@@ -1,29 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::channel::{Channel, ChannelKind, ReceiveIdType};
+use crate::channel::Channel;
 use crate::error::{DomainError, DomainResult};
 use crate::ids::{CardTemplateId, ChannelId};
 use crate::{Labels, Timestamp};
-
-/// 消息类型：卡片消息 / 应用消息流消息。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum MessageType {
-    /// 交互式卡片消息（`im/v1/messages` + `msg_type=interactive`）。
-    #[default]
-    CardMessage,
-    /// 应用消息流卡片（`im/v2/app_feed_card`）。只能发给用户，见 R15。
-    AppFeedCard,
-}
-
-impl MessageType {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            MessageType::CardMessage => "card_message",
-            MessageType::AppFeedCard => "app_feed_card",
-        }
-    }
-}
 
 /// 重复告警（AlertManager 按 repeat_interval 的重复通知）处理方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -146,11 +126,7 @@ impl LabelMatcher {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationPolicy {
     pub channel_id: ChannelId,
-    pub message_type: MessageType,
     pub card_template_id: Option<CardTemplateId>,
-    /// 「pin 未解决告警」：对包含 firing 告警的消息设置即时提醒（`time_sensitive`）。
-    /// 仅对应用消息流卡片有效；卡片消息无官方对应能力（R4）。
-    pub pin_unresolved: bool,
     pub repeat_policy: RepeatPolicy,
     pub resolved_policy: ResolvedPolicy,
     pub group_update_policy: GroupUpdatePolicy,
@@ -174,9 +150,7 @@ impl NotificationPolicy {
     pub fn default_for(channel_id: ChannelId) -> Self {
         Self {
             channel_id,
-            message_type: MessageType::CardMessage,
             card_template_id: None,
-            pin_unresolved: false,
             repeat_policy: RepeatPolicy::Suppress,
             resolved_policy: ResolvedPolicy::Send,
             group_update_policy: GroupUpdatePolicy::UpdatePrevious,
@@ -189,8 +163,8 @@ impl NotificationPolicy {
         }
     }
 
-    /// 校验策略。`channel` 用于交叉校验消息类型与渠道形态（R15）。
-    pub fn validate(&self, channel: &Channel) -> DomainResult<()> {
+    /// 校验策略。`channel` 目前只用于将来的渠道级交叉校验，保留参数以稳定调用点。
+    pub fn validate(&self, _channel: &Channel) -> DomainResult<()> {
         for m in &self.label_matchers {
             m.validate()?;
         }
@@ -213,19 +187,6 @@ impl NotificationPolicy {
                 Self::MAX_ALERTS_LIMIT
             )));
         }
-        if self.message_type == MessageType::AppFeedCard {
-            // R15：`im/v2/app_feed_card` 只接受 user_ids，没有群维度。
-            let user_level = channel.kind == ChannelKind::P2pUser
-                && matches!(
-                    channel.receive_id_type,
-                    ReceiveIdType::OpenId | ReceiveIdType::UserId
-                );
-            if !user_level {
-                return Err(DomainError::validation(
-                    "应用消息流卡片只能投递给用户级渠道（open_id / user_id）；飞书该接口没有群维度",
-                ));
-            }
-        }
         Ok(())
     }
 
@@ -247,28 +208,15 @@ impl NotificationPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channel::ChannelSource;
-
-    fn user_channel() -> Channel {
-        Channel::new(
-            "u",
-            "ou_1",
-            ReceiveIdType::OpenId,
-            ChannelKind::P2pUser,
-            ChannelSource::Manual,
-        )
-    }
 
     fn group_channel() -> Channel {
         Channel::from_chat("oc_1", "g", None, false)
     }
 
     #[test]
-    fn app_feed_card_requires_user_channel() {
-        let mut p = NotificationPolicy::default_for(group_channel().id.clone());
-        p.message_type = MessageType::AppFeedCard;
-        assert!(p.validate(&group_channel()).is_err());
-        assert!(p.validate(&user_channel()).is_ok());
+    fn defaults_are_sane_for_a_group_channel() {
+        let p = NotificationPolicy::default_for(group_channel().id.clone());
+        assert!(p.validate(&group_channel()).is_ok());
     }
 
     #[test]

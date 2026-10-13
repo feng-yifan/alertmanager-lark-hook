@@ -27,14 +27,12 @@
 ```json
 {
   "version": "0.1.0",
-  "message_types": [{"value":"card_message","label":"卡片消息"},{"value":"app_feed_card","label":"应用消息流消息"}],
   "repeat_policies": [{"value":"suppress","label":"不发送"},{"value":"send","label":"发送"},{"value":"send_and_revoke_previous","label":"发送并移除旧告警"}],
   "resolved_policies": [{"value":"send","label":"发送"},{"value":"send_and_delete_previous","label":"发送并删除旧告警"},{"value":"update_previous","label":"更新旧告警"}],
   "group_update_policies": [{"value":"update_previous","label":"更新旧告警"},{"value":"send","label":"发送新消息"},{"value":"suppress","label":"不发送"}],
   "match_ops": [{"value":"=","label":"等于"},{"value":"!=","label":"不等于"},{"value":"=~","label":"正则匹配"},{"value":"!~","label":"正则不匹配"}],
   "status_label_types": [{"value":"primary","label":"主类型"},{"value":"secondary","label":"次要类型"},{"value":"success","label":"成功类型"},{"value":"danger","label":"危险类型"}],
   "feed_button_types": [{"value":"default","label":"默认"},{"value":"primary","label":"主要"},{"value":"success","label":"成功"}],
-  "biz_id_sources": [{"value":"alert_group","label":"按告警分组（同分组复用同一张卡片，默认）"},{"value":"hook","label":"按 Hook + 告警分组"}],
   "card_sources": [{"value":"builder_json","label":"卡片搭建工具 JSON（JSON 2.0）"},{"value":"builder_template","label":"卡片搭建工具模板（template_id）"}],
   "channel_kinds": [{"value":"group","label":"群聊"},{"value":"p2p_user","label":"单聊用户"}],
   "receive_id_types": [{"value":"chat_id","label":"群 chat_id"},{"value":"open_id","label":"用户 open_id"},{"value":"user_id","label":"用户 user_id"},{"value":"email","label":"用户邮箱"}],
@@ -45,7 +43,6 @@
     {"name":"alerts_table","group":"block","type":"markdown","description":"预渲染告警表格"}
   ],
   "severity_colors": {"critical":"red","warning":"orange","info":"blue","default":"grey"},
-  "pin_supported_message_types": ["app_feed_card"],
   "token_prefix": "alkh_",
   "hook_path_template": "/api/v1/hooks/alertmanager/{token}"
 }
@@ -59,8 +56,6 @@
 | `variables[].type` | `string` / `number` / `bool` / `datetime` / `url` / `json` / `markdown` |
 | `variables[].group` | `alert` / `group` / `block` / `dynamic` |
 | `severity_colors` | **对象映射**（`severity → 卡片 header 颜色`），不是枚举数组 |
-| `feed_button_types` | 应用消息流卡片按钮类型，与 `status_label_types` **不是**同一个枚举 |
-| `pin_supported_message_types` | `pin_unresolved` 真正生效的消息类型（R4：仅 `app_feed_card`） |
 | `card_components` | 飞书卡片 JSON 2.0 **组件目录**：驱动本地卡片构建工具的面板/属性面板，也是保存时结构校验的依据 |
 | `card_presets` | **告警积木**：`{id,label,description,nodes_json}`，`nodes_json` 是可直接插入 `body.elements` 的节点数组 |
 
@@ -155,15 +150,13 @@
 | POST | `/channels/sync` | body `{create_missing:true,"import_names":true}` → `{"discovered":12,"created":3,"updated":9,"skipped":0}` |
 | GET | `/channels/:id/policy` | 返回 NotificationPolicy |
 | PUT | `/channels/:id/policy` | 全量替换策略（校验见 business-rules §6） |
-| POST | `/channels/:id/test-message` | body `{message_type?,card_template_id?,sample?:"firing"|"resolved"}` → 发送测试消息，返回 **`Delivery`**（看 `state`，没有 `ok` 字段） |
+| POST | `/channels/:id/test-message` | body `{card_template_id?,sample?:"firing"|"resolved",mock?}` → 发送测试消息，返回 **`Delivery`**（看 `state`，没有 `ok` 字段） |
 
 `NotificationPolicy` 表示：
 
 ```json
 {
-  "message_type": "card_message",
   "card_template_id": "b1d2...",
-  "pin_unresolved": false,
   "repeat_policy": "suppress",
   "resolved_policy": "send",
   "group_update_policy": "update_previous",
@@ -216,10 +209,9 @@
 > 这些形状由 `crates/alkh-server/tests/e2e.rs` 钉住，改动必须同步 e2e 与本文件。
 
 ```json
-// kind = card_message
+// 卡片模板
 {
   "id": "b1d2...",
-  "kind": "card_message",
   "name": "告警卡片-默认",
   "is_default": true,
   "card_message": {
@@ -229,50 +221,28 @@
     "template_version_name": null,
     "variables": [{"name":"status_text","ty":"string","default":"","builtin":true}]
   },
-  "app_feed_spec": null,
   "detected_variables": ["alertname","alerts_table"],
   "unknown_variables": [],
   "created_at": "...",
   "updated_at": "..."
 }
 
-// kind = app_feed_card（app_feed_spec 在顶层，card_message 为 null）
-{
-  "id": "c9f8...",
-  "kind": "app_feed_card",
-  "name": "应用消息流-默认",
-  "is_default": true,
-  "card_message": null,
-  "app_feed_spec": {
-    "title": "${alertname} ${status_text}",
-    "preview": "${summary}",
-    "status_label": {"text":"${severity_text}","type_firing":"danger","type_resolved":"success"},
-    "link": {"enabled": true, "url": "${external_url}"},
-    "buttons": [{"text":"查看详情","url":"${external_url}","button_type":"primary"}],
-    "close_notify": false,
-    "biz_id_source": "alert_group"
-  },
-  "detected_variables": ["alertname","status_text","summary","severity_text","external_url"],
-  "unknown_variables": [],
-  "created_at": "...",
-  "updated_at": "..."
-}
 ```
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/card-templates?kind=` | 列表，返回**裸数组**（不是分页信封） |
-| POST | `/card-templates` | 创建。body `{name,kind,card_message?,app_feed_spec?,is_default?}`，`name` 与 `kind` 必填；`kind=card_message` 时必须给 `card_message` |
+| GET | `/card-templates` | 列表，返回**裸数组**（不是分页信封） |
+| POST | `/card-templates` | 创建。body `{name,card_message?,is_default?}`，`name` 必填；缺 `card_message` 时回退内置默认卡片 |
 | GET | `/card-templates/:id` | 详情 |
 | PATCH | `/card-templates/:id` | 更新 |
 | DELETE | `/card-templates/:id` | 被策略引用时 `409 conflict`（**没有细分 code**） |
-| POST | `/card-templates/validate` | body `{name,kind,card_message?,app_feed_spec?,is_default?}`（**`name` 必填，缺了是 422**）→ `{valid,errors:[],warnings:[],detected_variables:[],unknown_variables:[]}`；errors 含**组件目录**的结构错误（废弃组件、`column` 不在 `column_set` 内、`element_id` 重复/非法、超 200 组件…），warnings 含未知组件/未知属性 |
-| GET | `/card-templates/default` | 内置默认模板内容 `{card_message,app_feed_spec}`；卡片编辑器用它作「起步卡片」和旧来源转换的落点（**唯一事实来源在后端**） |
-| POST | `/card-templates/preview` | body `{name,kind,card_message?,app_feed_spec?,sample:"firing"\|"resolved",channel_id?,mock?,is_default?}` → `{kind,rendered_card_json,rendered_app_feed_spec,card_content,variables:{...}}` |
+| POST | `/card-templates/validate` | body `{name,card_message?,is_default?}`（**`name` 必填，缺了是 422**）→ `{valid,errors:[],warnings:[],detected_variables:[],unknown_variables:[]}`；errors 含**组件目录**的结构错误（废弃组件、`column` 不在 `column_set` 内、`element_id` 重复/非法、超 200 组件…），warnings 含未知组件/未知属性 |
+| GET | `/card-templates/default` | 内置默认模板内容 `{card_message}`；卡片编辑器用它作「起步卡片」和旧来源转换的落点（**唯一事实来源在后端**） |
+| POST | `/card-templates/preview` | body `{name,card_message?,sample:"firing"\|"resolved",channel_id?,mock?,is_default?}` → `{rendered_card_json,variables:{...},card_content}` |
 | GET | `/card-templates/mock?channel_id=&sample=&alert_group_id=` | mock 基线：返回该数据源渲染出的**全部**变量，供编辑器 mock 面板列出（P1） |
-| POST | `/card-templates/send-test` | **草稿**测试发送（不落库）：body `{channel_id,name,kind,card_message?,app_feed_spec?,sample?,mock?}` → 真实发送一次，返回 **`Delivery`** |
+| POST | `/card-templates/send-test` | **草稿**测试发送（不落库）：body `{channel_id,name,card_message?,sample?,mock?}` → 真实发送一次，返回 **`Delivery`** |
 | POST | `/card-templates/:id/send-test` | body `{channel_id,sample?,mock?}` → 用已保存模板真实发送一次，返回 **`Delivery`** |
-| POST | `/channels/:id/test-message` | body `{message_type?,card_template_id?,sample?,mock?}` → 渠道级测试消息 |
+| POST | `/channels/:id/test-message` | body `{card_template_id?,sample?,mock?}` → 渠道级测试消息 |
 
 > **`source = builder_template` 已停用**（P2）：新建 / 更新时返回 `400 validation`
 > （「已停用来源 builder_template…」）。历史模板仍可 `GET` / `preview` 读取，
@@ -303,7 +273,7 @@
 规则：
 
 - `mock` 只影响**渲染**。历史分组**只作数据源、绝不回写**；测试消息仍归属该渠道的「测试分组」，因此照样可更新 / 可撤回。
-- 指定 `alert_group_id` 时以该分组状态为准（`firing` / `resolved`），保证 `app_feed_card` 的状态标签与数据一致。
+- 指定 `alert_group_id` 时以该分组状态为准（`firing` / `resolved`）。
 - `POST /card-templates/preview` 返回的 `variables` 是**覆盖后**的有效上下文。
 - 草稿测试（`/card-templates/send-test`）不落库模板，`Delivery.card_template_id` 为 `null`。
 - 规模上限：`variables` 最多 200 项、单个值最多 4000 字符、单个 key 最多 128 字符，超限 `400 validation`。
@@ -346,9 +316,9 @@
 // Delivery
 {
   "id": "...", "alert_group_id": "...", "kind": "firing_created",
-  "message_type": "card_message", "state": "active",
+  "state": "active",
   "card_template_id": "...", "lark_message_id": "om_...", "card_entity_id": "7355...",
-  "app_feed_biz_id": null, "attempt": 1, "last_error": null,
+  "attempt": 1, "last_error": null,
   "created_at": "...", "updated_at": "..."
 }
 ```

@@ -6,9 +6,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{DomainError, DomainResult};
 use crate::ids::{AlertGroupId, CardTemplateId, ChannelId, DeliveryId, HookId};
-use crate::policy::{
-    GroupUpdatePolicy, MessageType, NotificationPolicy, RepeatPolicy, ResolvedPolicy,
-};
+use crate::policy::{GroupUpdatePolicy, NotificationPolicy, RepeatPolicy, ResolvedPolicy};
 use crate::{Annotations, Labels, Timestamp};
 
 // ---------------------------------------------------------------------------
@@ -695,15 +693,12 @@ pub struct Delivery {
     pub alert_group_id: AlertGroupId,
     pub channel_id: ChannelId,
     pub kind: DeliveryKind,
-    pub message_type: MessageType,
     pub state: DeliveryState,
     pub card_template_id: Option<CardTemplateId>,
     /// 卡片消息的 `message_id`（`om_…`）。
     pub lark_message_id: Option<String>,
     /// CardKit 卡片实体 ID（`card_json` 来源用于原地更新）。
     pub card_entity_id: Option<String>,
-    /// 应用消息流卡片 biz_id。
-    pub app_feed_biz_id: Option<String>,
     /// CardKit 原地更新的 `sequence`，必须严格递增。
     pub card_sequence: i64,
     /// 渲染后内容摘要：相同则跳过原地更新（R3）。
@@ -724,7 +719,6 @@ impl Delivery {
         alert_group_id: AlertGroupId,
         channel_id: ChannelId,
         kind: DeliveryKind,
-        message_type: MessageType,
         card_template_id: Option<CardTemplateId>,
         rendered_digest: impl Into<String>,
         now: Timestamp,
@@ -734,12 +728,10 @@ impl Delivery {
             alert_group_id,
             channel_id,
             kind,
-            message_type,
             state: DeliveryState::Pending,
             card_template_id,
             lark_message_id: None,
             card_entity_id: None,
-            app_feed_biz_id: None,
             card_sequence: 0,
             rendered_digest: rendered_digest.into(),
             attempt: 0,
@@ -802,7 +794,7 @@ impl Delivery {
 
     /// 是否有可被原地更新 / 撤回的飞书消息引用。
     pub fn has_message_ref(&self) -> bool {
-        self.lark_message_id.is_some() || self.app_feed_biz_id.is_some()
+        self.lark_message_id.is_some()
     }
 
     pub fn is_active(&self) -> bool {
@@ -976,9 +968,8 @@ mod tests {
 
     #[test]
     fn decision_table_matches_spec() {
-        use crate::policy::{MessageType, NotificationPolicy};
+        use crate::policy::NotificationPolicy;
         let mut p = NotificationPolicy::default_for(ChannelId::new());
-        p.message_type = MessageType::CardMessage;
 
         assert_eq!(
             decide(EventKind::NewFiring, &p, false),
@@ -1067,7 +1058,6 @@ mod tests {
             AlertGroupId::new(),
             ChannelId::new(),
             DeliveryKind::FiringCreated,
-            MessageType::CardMessage,
             None,
             "digest",
             now,

@@ -614,10 +614,8 @@ impl IntakeService {
             // format!("{:?}") 会把 Rust 变体名（Pending/Active）写进审计。
             "delivery_state": serde_json::to_value(d.state)
                 .unwrap_or(serde_json::Value::Null),
-            "message_type": d.message_type.as_str(),
             "message_id": d.lark_message_id,
             "card_entity_id": d.card_entity_id,
-            "app_feed_biz_id": d.app_feed_biz_id,
             "fell_back_to_send_new": result.fell_back_to_send_new,
         }));
         self.write_audit(log).await;

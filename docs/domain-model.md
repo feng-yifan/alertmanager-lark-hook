@@ -8,11 +8,8 @@
 | 解决告警 | **resolved alert** | AlertManager 中 `status = "resolved"` 的告警 |
 | 重复告警 | **repeated notification**（重复通知） | AlertManager 按 `repeat_interval` 对同一分组再次投递 |
 | 发送并移除旧告警 | **send + revoke previous**（撤回旧消息） | 撤回/删除上一条已发送消息 |
-| 发送并删除旧告警 | **send + delete previous** | 同撤回语义，针对应用消息流卡片为 delete |
-| 更新旧告警 | **update previous in place**（原地更新卡片） | 通过 CardKit `card_id` / 应用消息流卡片原地更新 |
-| pin 未解决告警 | **即时提醒 `time_sensitive`** | 飞书应用消息流卡片字段；卡片消息无对应官方能力 |
+| 更新旧告警 | **update previous in place**（原地更新卡片） | 通过 CardKit `card_id` 全量更新（或 `PATCH /im/v1/messages/:id`）|
 | 消息渠道 | **channel** | 机器人可触达的群聊（`chat_id`）或单聊用户（`open_id`） |
-| 应用流消息 | **app feed card**（应用消息流卡片） | `im/v2/app_feed_card` |
 | 卡片消息 | **card message**（交互式卡片消息） | `im/v1/messages` + `msg_type=interactive` |
 
 ## 1. 聚合与实体总览
@@ -80,54 +77,32 @@ pub struct Hook {
 
 ## 4. CardTemplate（卡片模板，聚合根）
 
-两种形态，用枚举区分（对应两种消息类型）：
+只有**一种**形态：卡片模板（本地 CardKit JSON 2.0）。
 
 ```rust
-pub enum CardTemplate {
-    CardMessage {
-        id: CardTemplateId,
-        name: String,
-        source: CardSource,               // BuilderJson | BuilderTemplate
-        card_json: Option<serde_json::Value>, // source=BuilderJson：卡片搭建工具导出的 JSON 2.0
-        template_id: Option<String>,      // source=BuilderTemplate：搭建工具「发布」后的模板 ID
-        template_version_name: Option<String>, // 固定版本，避免线上被工具改版影响
-        variables: Vec<TemplateVariable>, // 声明的变量（名称/类型/默认值/内置来源）
-        is_default: bool,
-        created_at: Timestamp,
-        updated_at: Timestamp,
-    },
-    AppFeedCard {
-        id: CardTemplateId,
-        name: String,
-        spec: AppFeedCardSpec,            // 见下
-        is_default: bool,
-        created_at: Timestamp,
-        updated_at: Timestamp,
-    },
-}
-```
-
-`AppFeedCardSpec`（受飞书 `open_app_feed_card` 字段约束裁剪后的**强类型**模型，发送时翻译）：
-
-```rust
-pub struct AppFeedCardSpec {
-    pub title: String,                            // ≤60 字符，模板化
-    pub preview: String,                          // ≤120 字符，模板化
-    pub status_label: StatusLabelSpec,            // { text, type_firing, type_resolved }
-    pub link: LinkSpec,                           // { enabled, url } —— 创建应用消息流卡片时必填
-    pub buttons: Vec<FeedButtonSpec>,             // 最多 2 个：{ text(≤30), url, button_type }
-    pub close_notify: bool,
-    pub biz_id_source: BizIdSource,               // AlertGroupId（默认）| HookId | Custom
+pub struct CardTemplate {
+    pub id: CardTemplateId,
+    pub name: String,
+    pub card_message: CardMessageSpec,
+    pub is_default: bool,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
-pub enum StatusLabelType { Primary, Secondary, Success, Danger }
+pub struct CardMessageSpec {
+    pub source: CardSource,                   // BuilderJson | BuilderTemplate
+    pub card_json: Option<serde_json::Value>, // source=BuilderJson：卡片 JSON 2.0
+    pub template_id: Option<String>,          // source=BuilderTemplate：搭建工具模板 ID（已停用）
+    pub template_version_name: Option<String>,
+    pub variables: Vec<TemplateVariable>,     // 声明的变量（名称/类型/默认值/内置来源）
+}
 ```
 
 不变量：
-- `CardMessage` 的 `card_json` 必须 `schema == "2.0"`（CardKit 创建卡片实体的硬性要求）。
-- `AppFeedCard` 的 `link.url` 渲染后必须非空且为 `https`（飞书要求创建时 `link` 必填）。
-- `buttons.len() <= 2`；`title.len() <= 60`；`preview.len() <= 120`；按钮文案 ≤30 字符。
-- 每种 `kind` 至多一个 `is_default = true`。
+- `card_json` 必须 `schema == "2.0"`，且 `config.update_multi` 强制为 `true`（CardKit 原地更新的前提）。
+- 组件结构必须通过**组件目录**校验（`card_catalog`：废弃组件、`column` 越级、`element_id` 重复等）。
+- `source = BuilderTemplate` 已停用：新建/更新返回 `400`，历史模板只读可预览。
+- 全局至多一个 `is_default = true`。
 - 删除被策略引用的模板 → 拒绝（`TemplateInUse`）。
 
 ## 5. NotificationPolicy（通知策略，Channel 聚合内实体）
@@ -135,9 +110,7 @@ pub enum StatusLabelType { Primary, Secondary, Success, Danger }
 ```rust
 pub struct NotificationPolicy {
     pub channel_id: ChannelId,
-    pub card_template_id: Option<CardTemplateId>,     // message_type=CardMessage 时生效
-    pub message_type: MessageType,                    // CardMessage | AppFeedCard
-    pub pin_unresolved: bool,                         // 「pin 未解决告警」开关
+    pub card_template_id: Option<CardTemplateId>,     // 空时回退内置默认卡片（R12）
     pub repeat_policy: RepeatPolicy,                   // 重复告警
     pub resolved_policy: ResolvedPolicy,               // 解决告警
     pub group_update_policy: GroupUpdatePolicy,        // 分组内容变化（新增/部分恢复）
@@ -148,8 +121,6 @@ pub struct NotificationPolicy {
     pub mute_until: Option<Timestamp>,                 // 静默期，到点自动解除
     pub updated_at: Timestamp,
 }
-
-pub enum MessageType { CardMessage, AppFeedCard }
 
 pub enum RepeatPolicy {
     Send,                     // 发送：重复通知照发
@@ -174,11 +145,7 @@ pub enum MatchOp { Eq, Neq, Regex, NotRegex }   // = != =~ !~
 ```
 
 不变量：
-- `message_type == CardMessage` ⇒ `card_template_id` 指向的模板 `kind` 必须是 `CardMessage`；
-  `AppFeedCard` 同理（交叉校验，类型安全）。
-- `message_type == AppFeedCard` ⇒ 渠道必须是**用户级**渠道（`kind == P2pUser` 且
-  `receive_id_type ∈ {open_id, user_id}`）。飞书 `im/v2/app_feed_card` 只接受 `user_ids`，
-  **没有群维度**，因此应用消息流卡片无法投递到群聊。
+- `card_template_id` 非空时，保存前校验引用的模板存在（R12）。
 - `LabelMatcher` 的正则在保存时编译校验，非法正则拒绝。
 - `mute_until` 过期后读取时视为 `None`。
 
@@ -262,12 +229,10 @@ pub struct Delivery {
     pub alert_group_id: AlertGroupId,
     pub channel_id: ChannelId,
     pub kind: DeliveryKind,        // FiringCreated | Repeated | Updated | Resolved | Test
-    pub message_type: MessageType,
     pub state: DeliveryState,
     pub card_template_id: Option<CardTemplateId>,
     pub lark_message_id: Option<String>,   // om_xxx
     pub card_entity_id: Option<String>,    // CardKit card_id（用于原地更新）
-    pub app_feed_biz_id: Option<String>,   // 应用消息流卡片 biz_id
     pub card_sequence: i64,                // CardKit 卡片实体的更新序号（严格递增，见 Adapter 说明）
     pub rendered_digest: String,           // 渲染后卡片内容摘要，用于判断"是否需要真的更新"
     pub attempt: u32,
@@ -303,7 +268,6 @@ pub struct AppSettings {
     pub lark_app_secret_enc: Option<EncryptedSecret>, // AES-256-GCM
     pub lark_base_url: String,
     pub public_base_url: Option<String>,
-    pub default_app_feed_link: Option<String>,
     pub retention: RetentionPolicy,   // alert_group_days / delivery_days / audit_days
     pub updated_at: Timestamp,
 }
@@ -361,12 +325,11 @@ channels(id PK, name, receive_id, receive_id_type, kind, avatar_url, external,
 hooks(id PK, channel_id FK, name, token_hash UNIQUE, token_prefix, enabled,
       last_called_at, call_count, created_at, rotated_at)
 
-card_templates(id PK, kind, name, source, card_json, template_id,
-               template_version_name, app_feed_spec, variables,
-               is_default, created_at, updated_at)
+card_templates(id PK, name, card_message JSON, is_default,
+               created_at, updated_at)
 
-notification_policies(channel_id PK FK, message_type, card_template_id,
-                      pin_unresolved, repeat_policy, resolved_policy,
+notification_policies(channel_id PK FK, card_template_id,
+                      repeat_policy, resolved_policy,
                       group_update_policy, label_matchers,
                       aggregation_window_secs, min_send_interval_secs,
                       max_alerts_per_message, mute_until, updated_at)
@@ -379,8 +342,8 @@ alert_groups(id PK, hook_id FK, channel_id FK, group_key, receiver, status,
              active_delivery_id, UNIQUE(hook_id, group_key))
   + INDEX(status), INDEX(channel_id, last_seen_at)
 
-deliveries(id PK, alert_group_id FK, channel_id FK, kind, message_type, state,
-           card_template_id, lark_message_id, card_entity_id, app_feed_biz_id,
+deliveries(id PK, alert_group_id FK, channel_id FK, kind, state,
+           card_template_id, lark_message_id, card_entity_id, card_sequence,
            rendered_digest, attempt, last_error, created_at, updated_at)
   + INDEX(alert_group_id), INDEX(state)
 
@@ -395,5 +358,5 @@ audit_logs(id INTEGER PK AUTOINCREMENT, at, actor, action, target, outcome, deta
 event_dedup(event_hash PK, hook_id, seen_at)   -- 幂等去重窗口
 ```
 
-JSON 列（`group_labels`、`alerts`、`app_feed_spec`、`label_matchers`、`detail`）以 `TEXT` 存储
+JSON 列（`group_labels`、`alerts`、`card_message`、`label_matchers`、`detail`）以 `TEXT` 存储
 序列化 JSON；仓储层负责编解码，领域层只见值对象。

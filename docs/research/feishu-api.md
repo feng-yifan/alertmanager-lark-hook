@@ -853,6 +853,10 @@ Source: <https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/upda
 
 ## 7. App feed card (应用消息流卡片, `im/v2`)
 
+> ⛔ **本项目已不再使用这组接口**（2026-10 移除「应用消息流消息」形态，见
+> `migrations/0002_remove_app_feed_card.sql`）。本节仅作为 API 调研记录保留。
+> 需要恢复该形态时，注意它只能投递给用户（无群维度）且字段结构与卡片 JSON 完全不通用。
+
 All three endpoints share scope 创建、更新、删除应用消息流卡片(`im:app_feed_card:write`) and the
 same `failed_cards` response shape. Client support: 飞书客户端 V7.6 及以上.
 

@@ -301,7 +301,6 @@ export default function AlertGroupDetailPage(): JSX.Element {
                     <span className="tl-time">{formatDateTime(delivery.created_at)}</span>
                     <StatusBadge kind="delivery" value={delivery.state} />
                     <StatusBadge kind="delivery_kind" value={delivery.kind} />
-                    <StatusBadge kind="message_type" value={delivery.message_type} />
                     <span className="faint small">尝试 {delivery.attempt} 次</span>
                     <div className="spacer" />
                     <Button
@@ -330,11 +329,6 @@ export default function AlertGroupDetailPage(): JSX.Element {
                     {delivery.card_entity_id ? (
                       <>
                         {' · '}card_entity_id <span className="mono">{delivery.card_entity_id}</span>
-                      </>
-                    ) : null}
-                    {delivery.app_feed_biz_id ? (
-                      <>
-                        {' · '}app_feed_biz_id <span className="mono">{delivery.app_feed_biz_id}</span>
                       </>
                     ) : null}
                     {' · '}更新于 {formatDateTime(delivery.updated_at)}

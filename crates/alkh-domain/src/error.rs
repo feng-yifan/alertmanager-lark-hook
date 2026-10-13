@@ -71,13 +71,6 @@ impl LarkError {
     pub const CODE_RATE_LIMITED: i64 = 230020;
     /// 通用参数错误。
     pub const CODE_INVALID_PARAM: i64 = 230001;
-    /// **本适配器合成**：应用消息流卡片的 `failed_cards[].reason` 表示「卡片不存在 / 未创建」。
-    ///
-    /// 飞书该接口不返回数字错误码，只有 `reason` 枚举（`0` 未知 / `1` 无权限 /
-    /// `2` 未创建 / `3` 频率限制 / `4` 重复，也常以 `NOT_CREATED` / `NO_PERMISSION` /
-    /// `RATE_LIMITED` / `DUPLICATE` 出现）。归一成稳定码后，R1「原地更新不可用 ⇒
-    /// 降级发新消息」才能对应用消息流卡片生效。
-    pub const CODE_FEED_CARD_NOT_FOUND: i64 = -1001;
 }
 
 /// 端口错误：基础设施层的失败。应用层负责翻译成 HTTP。
