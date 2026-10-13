@@ -95,11 +95,55 @@ impl IntakeOutcome {
     }
 }
 
+/// 按 key 串行化的异步锁。
+///
+/// 用途：`(hook, group_key)` 上的「读取分组 → 推进状态 → 落库 → 发消息」必须整体
+/// 串行，否则两个并发事件各自读到同一份快照，后写者覆盖前者，前者的状态推进
+/// （`resolved_count` / `last_seen_at` / `event_count`）静默丢失，甚至两边都判定
+/// 「需要发新消息」而出现重复卡片。
+///
+/// **只在进程内有效**：本项目明确单副本部署（嵌入式 SQLite 单写者 + 内存态聚合器 /
+/// 限流器 / 卡片序号），与 README 及 `deploy/kubernetes.yaml` 的 `replicas: 1` 约束一致。
+#[derive(Default)]
+pub struct KeyedLocks {
+    inner:
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl KeyedLocks {
+    /// 取得某个 key 的独占锁；返回值 drop 时自动释放。
+    pub async fn lock(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let entry = {
+            let mut guard = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // 顺手回收无人持有的条目（map 自己算一个引用），避免 key 空间无限增长。
+            guard.retain(|_, v| std::sync::Arc::strong_count(v) > 1);
+            guard
+                .entry(key.to_string())
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        entry.lock_owned().await
+    }
+
+    /// 当前仍在跟踪的 key 数量（测试用）。
+    pub fn tracked(&self) -> usize {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+    }
+}
+
 pub struct IntakeService {
     deps: Deps,
     sender: NotificationSender,
     aggregator: Aggregator,
     limiter: RateLimiter,
+    /// 同一 `(hook, group_key)` 的读改写串行化，见 [`KeyedLocks`]。
+    group_locks: KeyedLocks,
 }
 
 impl IntakeService {
@@ -109,6 +153,7 @@ impl IntakeService {
             deps,
             sender,
             aggregator: Aggregator::default(),
+            group_locks: KeyedLocks::default(),
             limiter: RateLimiter::default(),
         }
     }
@@ -398,6 +443,13 @@ impl IntakeService {
         hash: String,
         now: Timestamp,
     ) -> AppResult<IntakeOutcome> {
+        // 同一 `(hook, group_key)` 必须整体串行：下面的 `find → apply_event → upsert`
+        // 是典型的读改写，两个并发事件会互相覆盖；发消息与状态推进也要在同一临界区，
+        // 否则会各自判定「需要发新消息」而产生重复卡片。
+        // 注意锁的粒度是「一个分组」，不同分组之间完全并行。
+        let lock_key = format!("{}|{}", hook.id, event.group_key);
+        let _group_guard = self.group_locks.lock(&lock_key).await;
+
         // R7 最小发送间隔：未满足则推迟而不是丢弃。
         let min_interval = Duration::from_secs(policy.min_send_interval_secs as u64);
         if let Some(until) = self.limiter.ready_at(&channel.id, min_interval) {
@@ -589,6 +641,55 @@ async fn classify_pending(deps: &Deps, hook: &Hook, event: &NormalizedEvent) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 同一个 key 必须互斥；不同 key 不能互相阻塞。
+    #[tokio::test]
+    async fn keyed_locks_serialize_same_key_only() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let locks = Arc::new(KeyedLocks::default());
+        let concurrent = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+
+        // 同一个 key 上并发 8 次，临界区内计数不应被叠加
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let locks = locks.clone();
+            let concurrent = concurrent.clone();
+            let max_seen = max_seen.clone();
+            tasks.push(tokio::spawn(async move {
+                let _guard = locks.lock("same").await;
+                let now = concurrent.fetch_add(1, Ordering::SeqCst) + 1;
+                max_seen.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                concurrent.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert_eq!(
+            max_seen.load(Ordering::SeqCst),
+            1,
+            "同一 key 的临界区发生了重叠"
+        );
+
+        // 不同 key 可以并行
+        let a = locks.lock("a").await;
+        let b = locks.lock("b").await;
+        drop((a, b));
+
+        // 回收是**惰性**的：在下一次取锁时顺带清掉无人持有的条目，避免 key 空间
+        // 无限增长（每个事件都会产生一个新 key）。
+        let held = locks.lock("c").await;
+        assert_eq!(
+            locks.tracked(),
+            1,
+            "取锁时应顺带回收空闲 key，只留当前持有的"
+        );
+        drop(held);
+    }
 
     #[test]
     fn outcome_serializes_without_none_fields() {

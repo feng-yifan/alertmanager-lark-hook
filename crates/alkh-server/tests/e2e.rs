@@ -972,6 +972,57 @@ async fn failed_intake_stays_retryable_instead_of_being_deduped() {
     );
 }
 
+/// 数据丢失回归：同一分组的并发事件不得互相覆盖。
+///
+/// `process_event` 是「读取分组 → 推进状态 → 落库 → 发消息」的读改写，此前没有任何
+/// 互斥：两个并发事件各自读到同一份快照，后写者覆盖前者，前者的 `event_count` /
+/// `resolved_count` / `last_seen_at` 推进静默丢失，甚至两边都判「需要发新消息」
+/// 而产生重复卡片。
+#[tokio::test]
+async fn concurrent_events_for_same_group_do_not_lose_updates() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+
+    const N: usize = 8;
+    let token = h.hook_token.clone().expect("尚未创建 hook");
+    let url = h.url(&format!("/api/v1/hooks/alertmanager/{token}"));
+    let client = h.http.clone();
+
+    // N 条内容各不相同的事件（幂等键不同、不会被去重），全部落在同一个分组
+    let mut tasks = Vec::new();
+    for i in 0..N {
+        // ⚠️ 幂等键 `event_hash` 只由 fingerprint / status / startsAt 组成，
+        // 改 summary 不会改变它 —— 那样 7 条会被正确判为 duplicate。必须换 fingerprint。
+        let mut payload = firing_payload(1);
+        payload["alerts"][0]["fingerprint"] = json!(format!("concurrent-{i}"));
+        payload["alerts"][0]["annotations"] = json!({"summary": format!("并发事件 {i}")});
+        let client = client.clone();
+        let url = url.clone();
+        tasks.push(tokio::spawn(async move {
+            client
+                .post(&url)
+                .json(&payload)
+                .send()
+                .await
+                .expect("webhook 请求失败")
+                .status()
+        }));
+    }
+    for task in tasks {
+        assert_eq!(task.await.unwrap(), reqwest::StatusCode::OK);
+    }
+
+    let (_, groups) = h.get("/api/v1/alert-groups?limit=5").await;
+    let items = groups["items"].as_array().expect("应返回分组列表");
+    assert_eq!(items.len(), 1, "N 个事件应聚成同一个分组: {groups}");
+    assert_eq!(
+        items[0]["event_count"].as_u64().unwrap_or(0),
+        N as u64,
+        "并发事件发生丢更新（读改写未串行），只有部分被计入: {}",
+        items[0]
+    );
+}
+
 /// 数据丢失回归：聚合桶冲刷失败必须放回队列重试，而不是静默丢弃。
 ///
 /// 聚合桶只在进程内存里，AM 又已经收到 200（不会再重发），因此冲刷失败时丢掉桶
