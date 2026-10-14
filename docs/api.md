@@ -55,7 +55,7 @@
 |---|---|
 | 枚举列表 | 一律为 `[{"value":"…","label":"…"}]`；`value` 是**字符串**，可直接用作 `<option value>` / React `key` |
 | `variables[].type` | `string` / `number` / `bool` / `datetime` / `url` / `json` / `markdown` |
-| `variables[].group` | `alert` / `group` / `block` / `dynamic` |
+| `variables[].group` | `alert` / `group` / `block` / `dynamic` / `item`（`item` = 只在「循环」指令内可用） |
 | `severity_colors` | **对象映射**（`severity → 卡片 header 颜色`），不是枚举数组 |
 | `card_components` | 飞书卡片 JSON 2.0 **组件目录**：驱动本地卡片构建工具的面板/属性面板，也是保存时结构校验的依据 |
 | `card_presets` | **告警积木**：`{id,label,description,nodes_json}`，`nodes_json` 是可直接插入 `body.elements` 的节点数组 |
@@ -66,7 +66,7 @@
 {
   "tag": "markdown",
   "label": "富文本",
-  "group": "display",              // container | display | interactive | element | deprecated
+  "group": "display",              // container | display | interactive | element | directive | deprecated
   "description": "…",
   "children_key": null,            // 子节点所在字段：'elements' | 'columns' | null（叶组件）
   "children": [],                  // 允许的子 tag；空数组 = 任意
@@ -77,10 +77,14 @@
   "props": [
     { "name": "content", "label": "内容（Markdown）", "type": "markdown",
       "path": "content", "accessor": "field", "values": [], "max_chars": null,
-      "placeholder": "${alerts_list}", "hint": "…" }
+      "placeholder": "${alerts_summary}", "hint": "…" }
   ]
 }
 ```
+
+> `group = "directive"` 的 `repeat`（循环）/ `if`（条件）不是飞书组件，而是**本地指令**：
+> 保存进卡片 JSON 后由服务端在预览/发送时展开成真实组件
+> （见 [`business-rules.md`](business-rules.md) §5.3）。
 
 约定：`props[].type` ∈ `text|markdown|number|bool|enum|px|url`；`props[].accessor` ∈ `field|button_url`
 （`button_url` 表示该字段读写 `behaviors[{type:"open_url",default_url}]`）；`path` 是点号路径
@@ -211,6 +215,10 @@
 
 > ⚠️ **卡片内容嵌在 `card_message` 子对象里，不是顶层扁平字段**；声明变量的类型字段名是 `ty`（不是 `type`）。
 > 写成扁平字段时后端会因为 `card_message` 缺失而**静默回退成内置默认卡片**，用户的内容被丢弃。
+>
+> `card_message.builder_meta` 是**编辑器元数据**（目前只有 `labels`：`element_id → 节点名称`）：
+> 与 `card_json` 平级、随模板落库、原样回传，但**不参与渲染**也**不会发给飞书**；
+> 它只为「画布上给组件起个名字」服务。不带该字段时表示清空（旧客户端不受影响）。
 > 这些形状由 `crates/alkh-server/tests/e2e.rs` 钉住，改动必须同步 e2e 与本文件。
 
 ```json
@@ -224,7 +232,8 @@
     "card_json": {"schema":"2.0","config":{},"header":{},"body":{"elements":[]}},
     "template_id": null,
     "template_version_name": null,
-    "variables": [{"name":"status_text","ty":"string","default":"","builtin":true}]
+    "variables": [{"name":"status_text","ty":"string","default":"","builtin":true}],
+    "builder_meta": {"labels": {"summary": "总体状态"}}
   },
   "detected_variables": ["alertname","alerts_table"],
   "unknown_variables": [],
@@ -245,9 +254,9 @@
 | GET | `/card-templates/default` | 内置默认模板内容 `{card_message}`；卡片编辑器用它作「起步卡片」和旧来源转换的落点（**唯一事实来源在后端**） |
 | POST | `/card-templates/preview` | body `{name,card_message?,sample:"firing"\|"resolved",channel_id?,mock?,is_default?}` → `{rendered_card_json,variables:{...},card_content}` |
 | GET | `/card-templates/mock?channel_id=&sample=&alert_group_id=` | mock 基线：返回该数据源渲染出的**全部**变量，供编辑器 mock 面板列出（P1） |
-| POST | `/card-templates/send-test` | **草稿**测试发送（不落库）：body `{channel_id,name,card_message?,sample?,mock?}` → 真实发送一次，返回 **`Delivery`** |
-| POST | `/card-templates/:id/send-test` | body `{channel_id,sample?,mock?}` → 用已保存模板真实发送一次，返回 **`Delivery`** |
-| POST | `/channels/:id/test-message` | body `{card_template_id?,sample?,mock?}` → 渠道级测试消息 |
+| POST | `/card-templates/send-test` | **样式验证发送**（模板与投递都**不落库**）：body `{channel_id,name,card_message?,sample?,mock?}` → 真实发送一次，返回**内存回执** `Delivery`（`alert_group_id` 是合成值，不对应数据库行；无重试 / 撤回） |
+| POST | `/card-templates/:id/send-test` | body `{channel_id,sample?,mock?}` → 用已保存模板做样式验证发送，同样**不写 alert_groups / deliveries** |
+| POST | `/channels/:id/test-message` | body `{card_template_id?,sample?,mock?}` → 渠道级测试消息：**走完整链路并落库**（写「测试分组」+ `kind=test` 投递，可重试 / 撤回） |
 
 > **`source = builder_template` 已停用**（P2）：新建 / 更新时返回 `400 validation`
 > （「已停用来源 builder_template…」）。历史模板仍可 `GET` / `preview` 读取，
@@ -277,10 +286,15 @@
 
 规则：
 
-- `mock` 只影响**渲染**。历史分组**只作数据源、绝不回写**；测试消息仍归属该渠道的「测试分组」，因此照样可更新 / 可撤回。
+- `mock` 只影响**渲染**。历史分组**只作数据源、绝不回写**。
+- 两种测试发送的落库语义不同：
+  - **卡片编辑器**（`/card-templates/send-test`、`/card-templates/:id/send-test`）是**样式验证**：
+    只发送，不写 `alert_groups` / `deliveries`，返回的 `Delivery` 只是内存回执（无重试 / 撤回）；
+    因此可以反复发送检查卡片长什么样，也不会撞 `alert_groups(hook_id, group_key)` 的唯一索引。
+  - **渠道页**（`/channels/:id/test-message`）走**完整链路并落库**：消息归属该渠道的「测试分组」，
+    投递记录里是 `kind=test`，可重试 / 撤回。
 - 指定 `alert_group_id` 时以该分组状态为准（`firing` / `resolved`）。
 - `POST /card-templates/preview` 返回的 `variables` 是**覆盖后**的有效上下文。
-- 草稿测试（`/card-templates/send-test`）不落库模板，`Delivery.card_template_id` 为 `null`。
 - 规模上限：`variables` 最多 200 项、单个值最多 4000 字符、单个 key 最多 128 字符，超限 `400 validation`。
 
 `GET /card-templates/mock` → 

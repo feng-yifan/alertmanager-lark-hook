@@ -185,8 +185,10 @@ POST /api/v1/hooks/alertmanager/{token}
 - 未知变量渲染为空串，并在 `validate` 接口以 warning 返回（不阻塞保存）。
 - 代表告警语义：`starts_at` / `ends_at` / `summary` / `description` / `instance` /
   `fingerprint` / `generator_url` / `alert_status` 取自**一条代表告警**（优先第一条
-  firing，否则第一条），而不是整组。这与 AlertManager 中「必须写在 `{{ range .Alerts }}`
-  内」的语义不同，是「一张卡片装一组告警」的必要扁平化。
+  firing，否则第一条），而不是整组。**整组逐条展示请用「循环」指令 + `${item.*}`**，
+  见 §5.3。
+- 循环内变量：`item.*`（`item.title` / `item.alertname` / `item.summary` …）只在
+  `repeat` 指令的子组件里有值；标签/注解用 `${item.label:x}` / `${item.labels.x}` 取。
 - 时间变量统一为 `%Y-%m-%d %H:%M:%S UTC` 字符串。
 - 严重级别映射：`critical|fatal|emergency`→`red`/`严重`，`warning|warn|major`→`orange`/`警告`，
   `info|informational|notice`→`blue`/`提示`，其余→`grey`/`未知`。
@@ -207,11 +209,16 @@ POST /api/v1/hooks/alertmanager/{token}
 2. **覆盖**：`variables` 逐项覆盖，支持 `label:` / `annotation:` 动态 key；
 3. 覆盖项里的未知 key 也会写入上下文（便于试写新标签），不报错。
 
-- mock 只影响**渲染**：历史分组只作数据源、**绝不回写**；测试消息仍写入该渠道的
-  「测试分组」行，因此依旧可更新 / 可撤回，且不污染真实告警数据。
+- mock 只影响**渲染**：历史分组只作数据源、**绝不回写**。
+- **两种测试发送的落库语义不同**：
+  - 卡片编辑器的「发送测试」（`POST /card-templates/send-test`、`POST /card-templates/{id}/send-test`）
+    是**样式验证**：只把卡片发出去，**不写 `alert_groups` / `deliveries`**，返回的内存回执没有
+    重试 / 撤回语义。可以反复发送检查样式，也不会撞 `alert_groups(hook_id, group_key)` 唯一索引。
+  - 渠道页的「发送测试消息」（`POST /channels/{id}/test-message`）走**完整投递链路并落库**：
+    消息写入该渠道的「测试分组」行（按自然键复用，重复发送不会冲突），投递记录为 `kind=test`，
+    可重试 / 撤回；它验证的是整条链路，不只是卡片样式。
 - 指定 `alert_group_id` 时以其状态为准（`firing` / `resolved`）。
-- 草稿测试（`POST /card-templates/send-test`）不落库模板，
-  `Delivery.card_template_id` 为 `null`，投递记录仍为 `kind=test` 并写审计。
+- 两类测试发送都会写审计（`TEST_MESSAGE`）。
 - 规模上限：`variables` ≤ 200 项、值 ≤ 4000 字符、key ≤ 128 字符。
 
 ### 5.2 本地卡片构建工具与组件目录（P0 / P2）
@@ -237,6 +244,45 @@ POST /api/v1/hooks/alertmanager/{token}
   （`alkh-app::meta::alert_presets_use_only_builtin_variables`）。
 - **P2：停用 `builder_template`**。新建/更新一律拒绝（`400 validation`）；
   历史模板仍可读取与预览，编辑器提供「转换为本地卡片」。
+
+### 5.3 本地指令：循环（`repeat`）与条件（`if`）
+
+飞书 JSON 2.0 **没有**循环容器（搭建工具的循环容器不能嵌套、JSON 导入也不支持），
+所以「一组告警逐条渲染」由本工具的**本地指令**实现：卡片模板里保存的是指令本身，
+只有在**预览与真实发送时**才由 `alkh_app::render::expand_card_json` 展开成飞书认识的
+组件（展开结果里不会残留指令 tag）。
+
+> ⚠️ `repeat` / `if` 是 `card_catalog` 里 `group = "directive"` 的目录项，因此结构校验
+> 不会把它们当未知组件。但任何**绕过 `render_card_message` 直接发送 card_json 的路径**
+> 都会把指令原样发给飞书并报错。
+
+| 指令 | 语义 |
+|---|---|
+| `repeat` | 对 `source`（目前只有 `alerts`）里的每一项渲染一遍 `elements`；`max_items` 是上限，`empty_content` 在数据为空时渲染一段 markdown |
+| `if` | `when` 渲染后为空 / `false` / `0` / `no` / `off` 视为假（`equals` 改为精确相等，`negate` 反转）；为真才渲染 `elements` |
+
+- 两者可任意嵌套（循环里放条件、容器里放循环），未识别的位置按普通对象递归展开。
+- **循环次数**：`min(数据条数, 策略 max_alerts_per_message, max_items)`。
+- **组件总数收口**：展开全程共享一个 200 的名额预算（容器也占名额），每渲染出一个
+  组件就扣一个名额；名额耗尽后**按文档顺序**丢弃剩余组件。这样即使卡片里有多个循环，
+  展开结果也一定是飞书能接受的组件数。取舍与体积截断一致：**宁可少显示，也不让整条
+  告警因超限而丢失**；代价是靠后的组件（脚注、按钮）可能被前面的长循环挤掉，
+  编辑器顶部的「展开约 N」会提示量级。
+- `empty_content` 只在**一次都没有循环**（数据为空 / 策略上限为 0）时渲染；
+  循环跑过但条件全部不成立时不会谎报「无告警」。
+- **`element_id` 与循环**：同一段模板会被复制 N 份，模板里的 id 必然重复，而飞书对
+  重复 id 返回 `300301` 并拒收整张卡片。因此：编辑器**不会给循环体内的节点分配 id**
+  （拖进循环体时即剥掉，复制循环时也会清掉副本内的 id）；服务端展开循环副本时再统一
+  剥一次 `element_id`（`strip_element_ids`），循环体外的 id 保留。
+  这也是「循环体里写 `element_id` 没有意义」的原因——它无法按条定位。
+- **体积**：渲染后再由 `shrink_json_to_bytes` 按字节截断字符串叶子，覆盖绝大多数
+  超限场景（例如 200 个组件、每个 2KB 文本 → 407KB 压到 30KB）；但它的策略是
+  「砍最长的字符串」，无法压缩**结构本身**就超限的 JSON，所以 30KB 不是绝对保证。
+- 循环体上下文 = 分组级变量 + 当前告警的 `item.*`（`item.index` 从 1 开始，
+  标签/注解可用 `${item.label:x}` / `${item.labels.x}`）。
+- 兼容性：旧的 `${alerts_list}` / `${alerts_table}` 变量与「服务端拍平」逻辑**保留**，
+  老模板不需要迁移；新模板与内置默认卡片改用结构化循环。
+
 
 > **已修复的历史缺陷**：内置默认卡片原先使用 `note` 组件——这是 JSON 1.0 的组件，
 > **2.0 已废弃**（官方「卡片 JSON 2.0 版本更新说明」的「废弃备注组件 & 交互模块」）。

@@ -280,7 +280,9 @@ receivers:
 `*.card`/JSON（两个页签编辑的是**同一份文档**，来回切换不会丢改动）。
 
 > ⚠️ 必须是 **卡片 JSON 2.0 结构**（顶层 `"schema": "2.0"`、组件放在 `body.elements` 下）。
-> JSON 2.0 **不支持** `note` / `action` 这类 1.0 组件，也不支持循环容器——本工具会在校验阶段直接拦住并给出替代写法。
+> JSON 2.0 **不支持** `note` / `action` 这类 1.0 组件——本工具会在校验阶段直接拦住并给出替代写法。
+> 需要「按告警循环」时，用本工具提供的 **`repeat`（循环）/ `if`（条件）本地指令**（见下），
+> 它们保存的是指令本身，服务端渲染时才展开成飞书认识的组件。
 
 > 早期版本支持「引用搭建工具发布的 `template_id`」这一来源，现已**停用**：
 > 搭建工具模板无法在本地校验、预览与版本化，容易"预览通过、发送失败"。
@@ -300,14 +302,33 @@ receivers:
   "body": {
     "elements": [
       { "tag": "markdown", "content": "${alerts_summary}" },
-      { "tag": "markdown", "content": "${alerts_list}" },
+      {
+        "tag": "repeat",
+        "source": "alerts",
+        "max_items": 20,
+        "empty_content": "无告警",
+        "elements": [
+          { "tag": "markdown", "content": "**${item.title}**（${item.status_text}）" },
+          { "tag": "if", "when": "${item.summary}",
+            "elements": [{ "tag": "markdown", "content": "　‣ 概要：${item.summary}" }] }
+        ]
+      },
       { "tag": "markdown", "content": "**实例**：${instance}\n**开始**：${starts_at}" }
     ]
   }
 }
 ```
 
-支持三种写法：
+**本地指令：循环（`repeat`）与条件（`if`）**
+
+| 指令 | 作用 | 关键字段 |
+|---|---|---|
+| `repeat` | 对告警数组逐条渲染 `elements` 里的子组件 | `source`（目前为 `alerts`）、`max_items`（最多循环几次，还受渠道策略限制）、`empty_content`（没有告警时显示的 Markdown） |
+| `if` | 条件成立时才渲染 `elements` | `when`（渲染结果为空 / `false` / `0` / `no` / `off` 视为「否」）、`equals`（可选的精确相等判断）、`negate`（反转） |
+
+两者都可以**自由嵌套**（循环里放条件，容器里放循环……），循环体内用 `${item.*}` 取当前这条告警。
+
+支持以下几种写法：
 
 | 写法 | 含义 |
 |---|---|
@@ -373,8 +394,34 @@ receivers:
 | 变量 | 渲染成什么 | 适用场景 |
 |---|---|---|
 | `${alerts_summary}` | 一行汇总，如 `🔥 2 条未解决 · ✅ 1 条已恢复` | 卡片顶部 |
-| `${alerts_list}` | 逐条列出状态、告警名、实例、概要、时间（**推荐**） | 卡片主体 |
+| `${alerts_list}` | 逐条列出状态、告警名、实例、概要、时间（**兼容保留**，新模板请用「循环」组件） | 卡片主体 |
 | `${alerts_table}` | 把告警排成 Markdown 表格 | 想紧凑展示时 |
+| `${has_alerts}` | 本次分组是否有告警，`true` / `false` | 配合「条件」组件做空列表兜底 |
+
+**循环内**（只有放进「循环」组件的**子组件**里才有值；取的是**当前这一条**告警）
+
+| 变量 | 含义 | 示例值 |
+|---|---|---|
+| `${item.index}` | 当前告警序号（从 1 开始） | `1` |
+| `${item.title}` | 「名称 · 实例」 | `HighCPU · 10.0.0.1:9100` |
+| `${item.alertname}` | 当前告警的名称 | `HighCPU` |
+| `${item.instance}` | 当前告警的实例 | `10.0.0.1:9100` |
+| `${item.job}` | 当前告警的 job | `node-exporter` |
+| `${item.fingerprint}` | 当前告警的指纹 | `a1b2c3d4e5f6a7b8` |
+| `${item.status}` | 当前告警状态 | `firing` / `resolved` |
+| `${item.alert_status}` | 同上（与代表告警的 `${alert_status}` 对齐，便于迁移） | `firing` / `resolved` |
+| `${item.status_text}` | 当前告警状态（中文） | `未解决` / `已恢复` |
+| `${item.status_icon}` | 当前告警状态图标 | `🔥` / `✅` |
+| `${item.is_firing}` | 当前告警是否未解决 | `true` / `false` |
+| `${item.status_color}` | 当前告警状态对应颜色 | `red` / `green` |
+| `${item.severity}` | 当前告警严重级别原值 | `critical` |
+| `${item.severity_text}` | 当前告警严重级别（中文） | `严重` / `警告` / `提示` |
+| `${item.severity_color}` | 当前告警严重级别对应颜色 | `red` / `orange` / `blue` / `grey` |
+| `${item.summary}` | 当前告警的概要注解 | `CPU 使用率 92%` |
+| `${item.description}` | 当前告警的详情注解 | `持续 5 分钟` |
+| `${item.starts_at}` | 当前告警的开始时间 | `2026-10-13 00:00:00 UTC` |
+| `${item.ends_at}` | 当前告警的结束时间（未结束为空） | — |
+| `${item.generator_url}` | 当前告警的来源链接 | `http://prom:9090/graph?...` |
 
 <!-- variable-table:end -->
 
@@ -385,14 +432,19 @@ receivers:
 | `${label:名称}` | 取任意标签，如 `${label:team}` |
 | `${annotation:名称}` | 取任意注解，如 `${annotation:runbook_url}` |
 | `${名称}` | 直接用标签 / 注解原名，如告警标签里有 `team` 就可以写 `${team}` |
+| `${item.label:名称}` | **循环内**取当前告警的任意标签，如 `${item.label:team}` |
+| `${item.annotation:名称}` | **循环内**取当前告警的任意注解，如 `${item.annotation:runbook}` |
+| `${item.labels.名称}` | 同上，点号写法，如 `${item.labels.team}` |
 
-### 3.4 三个必须知道的注意事项
+### 3.4 四个必须知道的注意事项
 
-1. **`${starts_at}` / `${summary}` / `${instance}` 只代表一条告警。** AlertManager 里这些字段必须写在 `{{ range .Alerts }}` 循环里逐条访问；本项目为了「一张卡片装下一组告警」做了扁平化，所以它们取自**代表告警**。要展示全部告警请用 `${alerts_list}`（它已经帮你循环好了）。
+1. **`${starts_at}` / `${summary}` / `${instance}` 只代表一条告警。** AlertManager 里这些字段必须写在 `{{ range .Alerts }}` 循环里逐条访问；本项目为了「一张卡片装下一组告警」做了扁平化，所以它们取自**代表告警**。要逐条展示全部告警，请把内容放进「循环」组件的子组件里并改用 `${item.*}`（旧的 `${alerts_list}` 变量仍然可用，但看不清结构、也没法逐项改）。
 
 2. **内置变量会盖住同名标签。** 如果你的告警里正好有一个叫 `status` 或 `summary` 的**标签**，`${status}` 拿到的是内置值，不是你的标签值。这时请用显式写法 `${label:status}`。
 
 3. **JSON 2.0 会拒绝它不认识的字段。** 1.0 时代多余的属性会被忽略，2.0 会**直接报错**（例如 `note`、`action` 这两个 1.0 组件已废弃）。本工具在保存前就用组件目录拦下这些问题并给出替代写法，别等飞书返回错误码。另外目前不支持 `{{ }}` 这类 AlertManager 写法。
+
+4. **「循环 / 条件」是本工具的本地指令，不是飞书组件。** 保存的卡片里存的是 `repeat` / `if`，服务端发送与预览时才展开；展开后仍受飞书两条硬限制约束：单卡 ≤200 个组件、≤30KB。循环次数先由 `max_items` 与渠道策略的「单条消息最多展示告警数」压住，展开时再共享一份 200 组件预算：名额用完后**按文档顺序**丢弃剩余组件（靠后的脚注/按钮可能被长循环挤掉，编辑器顶部的「展开约 N」给出量级提示）。体积超限时会自动截断最长的文本字段；但截断只压缩文本、无法压缩 JSON 结构本身，所以 30KB 是尽力而为而不是绝对保证——把内容堆到几百个组件仍有被飞书拒收的可能。
 
 ### 3.5 校验、预览与 mock 数据
 
@@ -488,6 +540,7 @@ cardkit:card:write
 | [`docs/architecture.md`](docs/architecture.md) | 分层架构、限界上下文、关键设计决策、部署拓扑 |
 | [`docs/domain-model.md`](docs/domain-model.md) | 聚合 / 实体 / 值对象、状态机、数据库 schema |
 | [`docs/business-rules.md`](docs/business-rules.md) | 接收流水线、事件分类、**投递决策表**、R1–R18 补充规则 |
+| [`docs/card-builder-model.md`](docs/card-builder-model.md) | **卡片编辑器的建模分析**：本质、现状模型、目标模型（AST / 绑定 / 身份 / 代价）与改进路线 |
 | [`docs/api.md`](docs/api.md) | 全部 REST 接口契约（请求 / 响应 / 枚举 / 错误码） |
 | [`docs/research/feishu-api.md`](docs/research/feishu-api.md) | 逐条核对的飞书开放平台接口（URL、字段、权限、示例） |
 
@@ -501,7 +554,7 @@ cardkit:card:write
 - **消息撤回时限由企业管理员策略决定**，不是固定值。超出时限的撤回会失败（本项目会记录下来但不阻塞主流程）。
 - 飞书**没有按名称精确查找群**的接口（只有关键词搜索），所以渠道同步只能列出机器人所在的全部群。
 - 卡片实体有效期 **14 天**，且每个卡片实体**只能发送一次**。超过 14 天的旧卡片无法原地更新，此时本项目会自动降级为「发新消息」而不是报错。
-- **卡片里没有循环容器**（飞书：循环容器仅搭建工具可用，且不能再嵌一层；JSON 导入的卡片完全不支持）。所以本项目把「一组告警」在**服务端拍平**成 markdown —— 用 `${alerts_list}` / `${alerts_table}` 即可，不需要（也无法）在卡片里循环。
+- **飞书 JSON 2.0 没有循环容器**（循环容器仅搭建工具可用，且不能再嵌一层；JSON 导入的卡片完全不支持）。所以「按告警循环」由本工具的 **`repeat` / `if` 本地指令**实现：保存的是指令，**服务端渲染时才展开**成飞书认识的组件（见 §3.2）；展开结果同样受 200 组件 / 30KB 限制。旧的 `${alerts_list}` / `${alerts_table}` 变量继续可用（服务端把一组告警拍平成 markdown），但不再推荐用于新模板。
 
 其他行为约定：
 
