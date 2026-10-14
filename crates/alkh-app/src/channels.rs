@@ -140,6 +140,18 @@ pub struct SyncReport {
     pub skipped: usize,
 }
 
+/// 测试发送的输入（目标渠道由 `send_*` 的 `id` 参数单独给出）。
+///
+/// 打包成结构体是为了让「落库」与「不落库」两条路径共用同一段实现，
+/// 同时避免私有实现的参数表无限增长。
+pub struct TestSendInput<'a> {
+    pub card_template_id: Option<alkh_domain::ids::CardTemplateId>,
+    /// 未保存的草稿模板；`Some` 时忽略策略里的模板引用。
+    pub draft: Option<&'a alkh_domain::template::CardTemplate>,
+    pub sample: TestSample,
+    pub mock: &'a crate::mock::MockSpec,
+}
+
 pub struct ChannelService {
     deps: Deps,
 }
@@ -431,7 +443,9 @@ impl ChannelService {
         Ok(report)
     }
 
-    /// 向该渠道发送一条测试消息。
+    /// 向该渠道发送一条测试消息（**落库**：写入「测试分组」与投递记录，可重试 / 可撤回）。
+    ///
+    /// 用于渠道页的连通性测试：它走完整投递链路，投递记录里能看到 `kind=test`。
     pub async fn send_test(
         &self,
         id: &ChannelId,
@@ -440,27 +454,26 @@ impl ChannelService {
         mock: &crate::mock::MockSpec,
         actor: &AuditActor,
     ) -> AppResult<alkh_domain::alert::Delivery> {
-        self.send_test_inner(id, card_template_id, None, sample, mock, actor)
-            .await
+        self.send_test_inner(
+            id,
+            TestSendInput {
+                card_template_id,
+                draft: None,
+                sample,
+                mock,
+            },
+            actor,
+            true,
+        )
+        .await
     }
 
-    /// 用**未保存的草稿模板** + mock 数据发送一条测试消息（管理端卡片编辑器 P1）。
+    /// 卡片编辑器的「发送测试」：**只把卡片发出去，什么都不落库**。
     ///
-    /// 草稿不会落库，也不写进 `Delivery.card_template_id`；消息本身仍归属该渠道的
-    /// 「测试分组」，因此测试消息依旧可更新 / 可撤回。
-    pub async fn send_test_draft(
-        &self,
-        id: &ChannelId,
-        template: &alkh_domain::template::CardTemplate,
-        sample: TestSample,
-        mock: &crate::mock::MockSpec,
-        actor: &AuditActor,
-    ) -> AppResult<alkh_domain::alert::Delivery> {
-        self.send_test_inner(id, None, Some(template), sample, mock, actor)
-            .await
-    }
-
-    async fn send_test_inner(
+    /// 用途是验证卡片样式：不写 `alert_groups`、不写 `deliveries`，所以反复发送
+    /// 既不会污染告警分组 / 投递记录，也不会撞 `alert_groups(hook_id, group_key)` 的唯一索引。
+    /// 返回的是内存回执（state / message_id / 摘要），**没有重试与撤回语义**。
+    pub async fn send_card_test(
         &self,
         id: &ChannelId,
         card_template_id: Option<alkh_domain::ids::CardTemplateId>,
@@ -469,6 +482,33 @@ impl ChannelService {
         mock: &crate::mock::MockSpec,
         actor: &AuditActor,
     ) -> AppResult<alkh_domain::alert::Delivery> {
+        self.send_test_inner(
+            id,
+            TestSendInput {
+                card_template_id,
+                draft,
+                sample,
+                mock,
+            },
+            actor,
+            false,
+        )
+        .await
+    }
+
+    async fn send_test_inner(
+        &self,
+        id: &ChannelId,
+        input: TestSendInput<'_>,
+        actor: &AuditActor,
+        record: bool,
+    ) -> AppResult<alkh_domain::alert::Delivery> {
+        let TestSendInput {
+            card_template_id,
+            draft,
+            sample,
+            mock,
+        } = input;
         mock.validate()?;
         let channel = self
             .deps
@@ -528,13 +568,30 @@ impl ChannelService {
         } else {
             sample.is_resolved()
         };
-        let group = if mock.alert_group_id.is_some() {
+        let mut group = if mock.alert_group_id.is_some() {
             crate::query::sample_alert_group(&channel, hook_id, resolved, self.deps.now())
         } else {
             mock_source.clone()
         };
-        // 必须在发送前落库：Delivery 引用该分组，撤回/重试都需要它存在。
-        self.deps.groups.upsert(&group).await?;
+        if record {
+            // 「测试分组」在库里只能有一行：`alert_groups(hook_id, group_key)` 上有唯一索引。
+            // 每次测试都拿新 id 直接 INSERT，第二次测试发送就会撞唯一索引并报
+            // `UNIQUE constraint failed: alert_groups.hook_id, alert_groups.group_key`。
+            // 这里复用已有行的 id（与真实 intake 的 `find → apply_event → upsert` 同语义），
+            // Delivery 引用的分组 id 始终稳定，测试消息依旧可更新 / 可撤回。
+            if let Some(existing) = self
+                .deps
+                .groups
+                .find(&group.hook_id, &group.group_key)
+                .await?
+            {
+                group.id = existing.id.clone();
+                group.first_seen_at = existing.first_seen_at;
+                group.event_count = existing.event_count.saturating_add(1);
+            }
+            // 必须在发送前落库：Delivery 引用该分组，撤回/重试都需要它存在。
+            self.deps.groups.upsert(&group).await?;
+        }
 
         let mut ctx =
             crate::render::build_context(&mock_source, &channel, &policy, self.deps.now());
@@ -544,30 +601,38 @@ impl ChannelService {
         let prepared = sender
             .prepare_with_context(&group, &channel, &policy, draft, Some(&ctx))
             .await?;
-        let result = sender
-            .deliver(
-                &prepared,
-                alkh_domain::alert::DeliveryKind::Test,
-                alkh_domain::alert::DeliveryAction::SendNew,
-                None,
-                None,
-            )
-            .await?;
+        let delivery = if record {
+            sender
+                .deliver(
+                    &prepared,
+                    alkh_domain::alert::DeliveryKind::Test,
+                    alkh_domain::alert::DeliveryAction::SendNew,
+                    None,
+                    None,
+                )
+                .await?
+                .current
+        } else {
+            // 卡片编辑器的样式验证：只发送，不落库
+            sender.send_ephemeral_test(&prepared).await?
+        };
 
         self.audit(
             actor,
             audit_action::TEST_MESSAGE,
             channel.id.as_ref(),
             json!({
-                "delivery_id": result.current.id.to_string(),
-                "state": format!("{:?}", result.current.state),
+                "persisted": record,
+                "delivery_id": delivery.id.to_string(),
+                "lark_message_id": delivery.lark_message_id.clone(),
+                "state": format!("{:?}", delivery.state),
                 "draft": draft.map(|t| t.name.clone()),
                 "mock_variables": mock.variables.len(),
                 "mock_alert_group_id": mock.alert_group_id.as_ref().map(|g| g.to_string()),
             }),
         )
         .await;
-        Ok(result.current)
+        Ok(delivery)
     }
 
     async fn audit(

@@ -202,6 +202,10 @@ pub async fn mock_baseline(
     ))
 }
 
+/// 用**已保存的模板**发送一条样式验证消息。
+///
+/// 与渠道页的「测试消息」不同：这里**什么都不落库**（不写 alert_groups / deliveries），
+/// 只是把卡片按当前模板渲染后发到渠道，用于确认卡片长什么样。
 pub async fn send_test(
     State(state): State<AppState>,
     admin: Admin,
@@ -212,9 +216,10 @@ pub async fn send_test(
     Ok(Json(
         state
             .channels
-            .send_test(
+            .send_card_test(
                 &req.channel_id,
                 Some(id),
+                None,
                 req.sample.unwrap_or_default(),
                 &req.mock,
                 &actor,
@@ -224,7 +229,7 @@ pub async fn send_test(
     ))
 }
 
-/// 用请求体里的**草稿**模板发送测试消息：不落库、不污染模板列表。
+/// 用请求体里的**草稿**模板发送样式验证消息：不落库模板，也不写分组 / 投递记录。
 pub async fn send_test_draft(
     State(state): State<AppState>,
     admin: Admin,
@@ -238,9 +243,10 @@ pub async fn send_test_draft(
     Ok(Json(
         state
             .channels
-            .send_test_draft(
+            .send_card_test(
                 &req.channel_id,
-                &template,
+                None,
+                Some(&template),
                 req.sample.unwrap_or_default(),
                 &req.mock,
                 &actor,

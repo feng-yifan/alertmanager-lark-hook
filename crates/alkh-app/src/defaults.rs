@@ -1,56 +1,61 @@
 use std::sync::OnceLock;
 
-use serde_json::Value;
+use alkh_domain::card_catalog::ALERTS_LOOP_NODE;
+use serde_json::{json, Value};
 
-/// 内置默认「卡片消息」模板（卡片 JSON 2.0）。
+/// 构造内置默认「卡片消息」模板（卡片 JSON 2.0）。
 ///
 /// 变量来自 `alkh_app::render::build_context`，详见 `docs/business-rules.md` §5。
-const DEFAULT_CARD_JSON: &str = r#"{
-  "schema": "2.0",
-  "config": {
-    "update_multi": true,
-    "summary": { "content": "${status_text} · ${alertname}" }
-  },
-  "header": {
-    "template": "${status_color}",
-    "title": { "tag": "plain_text", "content": "【${status_text}】${alertname}" },
-    "subtitle": { "tag": "plain_text", "content": "渠道：${channel_name}" }
-  },
-  "body": {
-    "direction": "vertical",
-    "padding": "12px",
-    "elements": [
-      { "tag": "markdown", "element_id": "summary", "content": "${alerts_summary}" },
-      { "tag": "markdown", "element_id": "alerts", "content": "${alerts_list}" },
-      { "tag": "hr" },
-      {
-        "tag": "markdown",
-        "element_id": "meta",
-        "content": "**接收器**：${receiver}\n**分组**：${group_key}\n**首次出现**：${first_seen_at}\n**最后更新**：${last_seen_at}\n**告警总数**：${alert_count}"
-      },
-      {
-        "tag": "div",
-        "element_id": "footer",
-        "text": {
-          "tag": "plain_text",
-          "content": "由 alertmanager-lark-hook 投递",
-          "text_size": "notation",
-          "text_color": "grey"
+///
+/// 告警列表不是 `${alerts_list}` 变量，而是与「告警列表」积木**同一个**
+/// `ALERTS_LOOP_NODE`（循环 + 判断 + 文本），因此模板编辑器里能逐个子组件修改，
+/// 三处也不会漂移。
+fn build_default_card() -> Value {
+    let loop_node: Value =
+        serde_json::from_str(ALERTS_LOOP_NODE).expect("ALERTS_LOOP_NODE 必须是合法 JSON");
+    json!({
+        "schema": "2.0",
+        "config": {
+            "update_multi": true,
+            "summary": { "content": "${status_text} · ${alertname}" }
+        },
+        "header": {
+            "template": "${status_color}",
+            "title": { "tag": "plain_text", "content": "【${status_text}】${alertname}" },
+            "subtitle": { "tag": "plain_text", "content": "渠道：${channel_name}" }
+        },
+        "body": {
+            "direction": "vertical",
+            "padding": "12px",
+            "elements": [
+                { "tag": "markdown", "element_id": "summary", "content": "${alerts_summary}" },
+                loop_node,
+                { "tag": "hr" },
+                {
+                    "tag": "markdown",
+                    "element_id": "meta",
+                    "content": "**接收器**：${receiver}\n**分组**：${group_key}\n**首次出现**：${first_seen_at}\n**最后更新**：${last_seen_at}\n**告警总数**：${alert_count}"
+                },
+                {
+                    "tag": "div",
+                    "element_id": "footer",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": "由 alertmanager-lark-hook 投递",
+                        "text_size": "notation",
+                        "text_color": "grey"
+                    }
+                }
+            ]
         }
-      }
-    ]
-  }
-}"#;
+    })
+}
 
 static PARSED: OnceLock<Value> = OnceLock::new();
 
-/// 读取内置默认卡片 JSON（同一进程内只解析一次）。
+/// 读取内置默认卡片 JSON（同一进程内只解析、构造一次）。
 pub fn default_card_json() -> Value {
-    PARSED
-        .get_or_init(|| {
-            serde_json::from_str(DEFAULT_CARD_JSON).expect("内置默认卡片 JSON 必须合法")
-        })
-        .clone()
+    PARSED.get_or_init(build_default_card).clone()
 }
 
 /// 默认模板名。
@@ -82,7 +87,34 @@ mod tests {
         );
         assert_eq!(
             alkh_domain::card_catalog::collect_tags(&card),
-            vec!["markdown", "hr", "div"]
+            vec!["markdown", "repeat", "if", "hr", "div"]
+        );
+    }
+
+    /// 起步卡片必须直接演示「循环 + 判断 + 文本」，而不是用 `${alerts_list}` 变量——
+    /// 变量对用户是不透明的黑盒，结构化组件才能在画布上改。
+    #[test]
+    fn default_card_uses_structured_alert_loop() {
+        let card = default_card_json();
+        let text = serde_json::to_string(&card).unwrap();
+        assert!(
+            !text.contains("${alerts_list}"),
+            "起步卡片不应再使用 alerts_list 变量"
+        );
+        let loop_node = card["body"]["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["tag"] == "repeat")
+            .expect("起步卡片应包含循环组件");
+        assert_eq!(loop_node["source"], "alerts");
+        assert!(
+            loop_node["elements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["tag"] == "if"),
+            "循环体应包含条件组件: {loop_node}"
         );
     }
 

@@ -33,6 +33,7 @@ import {
 import ErrorBoundary from '../components/ErrorBoundary';
 import { MockPanel } from '../components/MockPanel';
 import { CardBuilder } from '../card-builder/Builder';
+import { selectableChannels } from '../channels';
 import { useAsync } from '../hooks';
 import { useMeta } from '../meta';
 import { useToast } from '../toast';
@@ -128,6 +129,8 @@ function CardTemplateForm(): JSX.Element {
   const [templateId, setTemplateId] = useState('');
   const [templateVersion, setTemplateVersion] = useState('');
   const [declaredVariables, setDeclaredVariables] = useState<Array<{ name: string; ty: string }>>([]);
+  /** 编辑器元数据：节点名称（key = element_id），随模板落库到 `card_message.builder_meta`。 */
+  const [builderLabels, setBuilderLabels] = useState<Record<string, string>>({});
 
   const [sample, setSample] = useState<'firing' | 'resolved'>('firing');
   const [previewChannelId, setPreviewChannelId] = useState('');
@@ -160,6 +163,8 @@ function CardTemplateForm(): JSX.Element {
     setTemplateVersion(cardSpec?.template_version_name ?? '');
     const variables = Array.isArray(cardSpec?.variables) ? cardSpec.variables : [];
     setDeclaredVariables(variables.map((variable) => ({ name: variable.name, ty: variable.ty })));
+    const meta = cardSpec?.builder_meta;
+    setBuilderLabels(meta && typeof meta === 'object' && meta.labels ? { ...meta.labels } : {});
   }, [loaded]);
 
   const cardTemplateVariables = useMemo(
@@ -237,6 +242,8 @@ function CardTemplateForm(): JSX.Element {
     template_id: source === 'builder_template' ? templateId.trim() || null : null,
     template_version_name: source === 'builder_template' ? templateVersion.trim() || null : null,
     ...(cardTemplateVariables.length > 0 ? { variables: cardTemplateVariables } : {}),
+    // 编辑器元数据（节点名称）：与 card_json 平级，不参与渲染、不会发给飞书
+    ...(Object.keys(builderLabels).length > 0 ? { builder_meta: { labels: builderLabels } } : {}),
   });
 
   /**
@@ -482,6 +489,8 @@ function CardTemplateForm(): JSX.Element {
                 card={cardJson}
                 meta={meta}
                 starter={defaults?.card_message.card_json ?? null}
+                labels={builderLabels}
+                onLabelsChange={setBuilderLabels}
                 onChange={applyCardJson}
               />
             ) : (
@@ -555,6 +564,8 @@ function CardTemplateForm(): JSX.Element {
         <div className="callout info mb-16">
           支持 <code>{'${a.b.c}'}</code> 点号取值与 <code>{'${label:foo}'}</code> /{' '}
           <code>{'${annotation:bar}'}</code> 显式取值；未知变量渲染为空串，并在校验结果的警告里列出。
+          <code>{'${item.*}'}</code> 是「循环」组件内的逐条变量，只在循环体中有效——
+          可视化画布的属性面板会按组件所处位置过滤变量列表。
         </div>
 
         <h3 className="mb-8">内置变量</h3>
@@ -643,10 +654,10 @@ function CardTemplateForm(): JSX.Element {
               onChange={setSample}
             />
           </Field>
-          <Field label="预览用渠道（可选）">
+          <Field label="预览用渠道（可选）" hint="只列可用渠道；已禁用的渠道不会出现">
             <Select value={previewChannelId} onChange={(event) => setPreviewChannelId(event.target.value)} style={{ width: 240 }}>
               <option value="">（不指定）</option>
-              {channels.map((channel) => (
+              {selectableChannels(channels).map((channel) => (
                 <option key={channel.id} value={channel.id}>
                   {channel.name}
                 </option>
@@ -712,13 +723,13 @@ function CardTemplateForm(): JSX.Element {
 
       <Card
         title="发送测试"
-        subtitle="草稿测试不落库；已保存的模板则用存储的内容发送。两者都会产生投递记录。"
+        subtitle="样式验证：只把卡片发到渠道，不写告警分组、不产生投递记录，可反复发送。"
       >
         <div className="form-inline">
-          <Field label="渠道" required>
+          <Field label="渠道" required hint="只列可用渠道；要在这里看到某渠道，请先到渠道页启用它">
             <Select value={testChannelId} onChange={(event) => setTestChannelId(event.target.value)} style={{ width: 260 }}>
               <option value="">（请选择渠道）</option>
-              {channels.map((channel) => (
+              {selectableChannels(channels).map((channel) => (
                 <option key={channel.id} value={channel.id}>
                   {channel.name}
                 </option>
@@ -741,7 +752,7 @@ function CardTemplateForm(): JSX.Element {
             disabled={!testChannelId}
             onClick={() => void sendDraftTest()}
           >
-            发送草稿测试
+            发送草稿测试（不记录）
           </Button>
           {isEdit && id ? (
             <Button
@@ -767,19 +778,19 @@ function CardTemplateForm(): JSX.Element {
                 })();
               }}
             >
-              用已保存模板发送
+              用已保存模板发送（不记录）
             </Button>
           ) : null}
         </div>
         <p className="faint small mt-8 mb-0">
-          草稿测试使用当前编辑器里的内容（含模拟值覆盖），无需先保存；投递记录里会标记为测试消息。
+          发送的是当前编辑器里的内容（含模拟值覆盖），无需先保存；两条路径都只发送、不落库，因此不会出现在告警分组与投递记录里（渠道页的「发送测试消息」才会留记录）。
         </p>
         {testResult ? (
           <div className="mt-16">
             <Banner tone={testResult.state === 'failed' ? 'error' : 'success'}>
               {testResult.state === 'failed'
                 ? `发送失败${testResult.last_error ? `：${testResult.last_error}` : ''}`
-                : `已提交发送（state=${testResult.state}）${
+                : `已发送（state=${testResult.state}，未写入告警分组 / 投递记录）${
                     testResult.lark_message_id ? ` · message_id ${testResult.lark_message_id}` : ''
                   }`}
             </Banner>

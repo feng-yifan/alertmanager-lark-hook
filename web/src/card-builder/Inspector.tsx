@@ -1,42 +1,128 @@
 /**
- * 属性面板：节点属性 + 卡片级设置（header / config / body）。
+ * 属性面板：节点属性 + 卡片级设置。
  *
- * 表单完全由服务端组件目录的 `props` 驱动（`type` / `values` / `hint`），
- * 因此新增飞书组件只需要改 Rust 侧的 `card_catalog`，前端无需另写规则。
+ * 面板内容由**选中项**决定（`Selection`）：
+ * - `header`：卡片标题（画布顶部那块独立组件）——标题不再和卡片设置混在一起；
+ * - `node`：组件属性，表单完全由服务端组件目录的 `props` 驱动；
+ * - `card`：卡片级设置（消息摘要 / 内容方向 / 内边距），有画布与工具栏两个明显入口。
+ *
+ * 变量下拉是**位置相关**的：只有位于「循环」组件内部的节点才能看到 `${item.*}`，
+ * 避免用户在不该用的地方插入取不到值的变量。
  */
 import { useRef } from 'react';
 import type { CardComponentMeta, CardJson, CardPropMeta, Meta, MetaVariable } from '../types';
 import {
   getPath,
+  isInsideLoop,
+  variableTokensInText,
   nodeAt,
   patchNode,
   readProp,
   setPath,
   writeProp,
   type Catalog,
-  type NodePath,
+  type Selection,
 } from './model';
 
 export interface InspectorProps {
   card: CardJson;
   catalog: Catalog;
   meta: Meta;
-  path: NodePath | null;
+  selection: Selection;
+  /** 编辑器元数据里的节点名称（key = element_id）。 */
+  labels?: Record<string, string>;
+  /** 给选中节点改名（会写进 `builder_meta.labels`，必要时先补一个 element_id）。 */
+  onRenameNode?: (name: string) => void;
   onChange: (card: CardJson, label: string) => void;
 }
 
-export function Inspector({ card, catalog, meta, path, onChange }: InspectorProps): JSX.Element {
-  const node = path ? nodeAt(card, path) : null;
+/** 按所在位置过滤变量：`item.*` 只在循环体内可用。 */
+export function variablesFor(variables: MetaVariable[], inLoop: boolean): MetaVariable[] {
+  if (inLoop) return variables;
+  return variables.filter((variable) => {
+    const itemScoped = variable.group === 'item' || variable.name.startsWith('item.');
+    return !itemScoped;
+  });
+}
 
-  if (!path || !node) {
-    return <CardSettings card={card} meta={meta} onChange={onChange} />;
+export function Inspector({
+  card,
+  catalog,
+  meta,
+  selection,
+  labels,
+  onRenameNode,
+  onChange,
+}: InspectorProps): JSX.Element {
+  if (selection.kind === 'header') {
+    return <HeaderSettings card={card} meta={meta} onChange={onChange} />;
   }
 
+  if (selection.kind === 'node') {
+    const node = nodeAt(card, selection.path);
+    if (node) {
+      return (
+        <NodeSettings
+          card={card}
+          catalog={catalog}
+          meta={meta}
+          path={selection.path}
+          node={node}
+          name={
+            typeof node.element_id === 'string'
+              ? (labels?.[node.element_id] ?? '')
+              : ''
+          }
+          canRename={!isInsideLoop(card, selection.path)}
+          onRenameNode={onRenameNode}
+          onChange={onChange}
+        />
+      );
+    }
+  }
+
+  return <CardSettings card={card} meta={meta} onChange={onChange} />;
+}
+
+/* ------------------------------------------------------------------ */
+/* 节点属性                                                            */
+/* ------------------------------------------------------------------ */
+
+function NodeSettings({
+  card,
+  catalog,
+  meta,
+  path,
+  node,
+  name,
+  canRename,
+  onRenameNode,
+  onChange,
+}: {
+  card: CardJson;
+  catalog: Catalog;
+  meta: Meta;
+  path: number[];
+  node: Record<string, unknown>;
+  name: string;
+  canRename: boolean;
+  onRenameNode?: (name: string) => void;
+  onChange: (card: CardJson, label: string) => void;
+}): JSX.Element {
   const tag = typeof node.tag === 'string' ? node.tag : '';
   const component: CardComponentMeta | null = catalog.get(tag);
-  const patch = (updater: (current: Record<string, unknown>) => Record<string, unknown>, label: string) => {
+  const inLoop = isInsideLoop(card, path);
+  // 下拉用「当前位置可用」的清单；判定（胶囊）用完整清单，否则 item.* 会被误判成未知
+  const variables = meta.variables;
+  const patch = (
+    updater: (current: Record<string, unknown>) => Record<string, unknown>,
+    label: string,
+  ) => {
     onChange(patchNode(card, catalog, path, updater), label);
   };
+  const hasItemVariables = meta.variables.some(
+    (variable) => variable.group === 'item' || variable.name.startsWith('item.'),
+  );
 
   return (
     <div className="cb-inspector">
@@ -44,10 +130,60 @@ export function Inspector({ card, catalog, meta, path, onChange }: InspectorProp
       <div className="row tight mb-8">
         <span className="cb-tag">{component?.label ?? tag}</span>
         <code className="faint small">{tag}</code>
+        {inLoop ? <span className="cb-block-badge">循环内</span> : null}
       </div>
       {component?.description ? <p className="faint small">{component.description}</p> : null}
 
-      <Field label="元素 ID" hint="全局唯一；局部更新与交互回调依赖它">
+      {onRenameNode ? (
+        <Field
+          label="节点名称"
+          hint={
+            canRename
+              ? '只影响画布上的叫法，随模板保存；留空则回退显示积木 / 组件名'
+              : '循环体内的组件会被复制多份，不能单独命名'
+          }
+        >
+          <input
+            // 切换选中节点时强制重挂载：否则 defaultValue 会留着上一个节点的名字
+            key={path.join('.')}
+            className="input"
+            placeholder={component?.label ?? tag}
+            defaultValue={name}
+            disabled={!canRename}
+            onBlur={(event) => onRenameNode(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') (event.target as HTMLInputElement).blur();
+            }}
+          />
+        </Field>
+      ) : null}
+
+      {component?.group === 'directive' ? (
+        <div className="callout info small">
+          这是<strong>本地指令</strong>：保存的是指令本身，预览与发送时才由服务端展开成飞书组件。
+        </div>
+      ) : null}
+
+      {inLoop ? (
+        <div className="callout info small">
+          当前位于「循环」内：用 <code>{'${item.xxx}'}</code> 取**当前这一条**告警
+          （如 <code>{'${item.alertname}'}</code>、<code>{'${item.summary}'}</code>）。
+          <code>{'${alertname}'}</code> 这类变量仍取自**代表告警**，逐条内容建议不要用。
+        </div>
+      ) : hasItemVariables ? (
+        <div className="callout info small">
+          <code>{'${item.*}'}</code> 变量只在「循环」组件的子组件里可用，这里不会出现在变量下拉中。
+        </div>
+      ) : null}
+
+      <Field
+        label="元素 ID"
+        hint={
+          inLoop
+            ? '循环体内填了也会在渲染时被剥掉：一份模板会变多份，id 无法唯一定位'
+            : '全局唯一；局部更新与交互回调依赖它'
+        }
+      >
         <input
           className="input mono"
           value={typeof node.element_id === 'string' ? node.element_id : ''}
@@ -69,7 +205,8 @@ export function Inspector({ card, catalog, meta, path, onChange }: InspectorProp
           key={prop.name}
           prop={prop}
           value={readProp(node, prop)}
-          variables={meta.variables}
+          variables={variables}
+          inLoop={inLoop}
           onChange={(value) => patch((current) => writeProp(current, prop, value), `修改${prop.label}`)}
         />
       ))}
@@ -90,10 +227,11 @@ interface FieldProps {
   prop: CardPropMeta;
   value: unknown;
   variables: MetaVariable[];
+  inLoop: boolean;
   onChange: (value: unknown) => void;
 }
 
-export function PropField({ prop, value, variables, onChange }: FieldProps): JSX.Element {
+export function PropField({ prop, value, variables, inLoop, onChange }: FieldProps): JSX.Element {
   const asText =
     typeof value === 'string' ? value : value === undefined || value === null ? '' : String(value);
 
@@ -148,6 +286,7 @@ export function PropField({ prop, value, variables, onChange }: FieldProps): JSX
       multiline={prop.type === 'markdown'}
       value={asText}
       variables={variables}
+      inLoop={inLoop}
       onChange={(next) => onChange(next)}
     />
   );
@@ -161,6 +300,7 @@ export function VartextField({
   multiline,
   value,
   variables,
+  inLoop = false,
   onChange,
 }: {
   label: string;
@@ -169,6 +309,8 @@ export function VartextField({
   multiline?: boolean;
   value: string;
   variables: MetaVariable[];
+  /** 当前字段所在位置是否在「循环」体内（决定 item.* 的可用性）。 */
+  inLoop?: boolean;
   onChange: (value: string) => void;
 }): JSX.Element {
   const ref = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
@@ -210,15 +352,15 @@ export function VartextField({
         <select
           className="cb-var-select"
           value=""
-          title="插入内置变量"
+          title="插入变量（清单与当前组件所处位置相关）"
           onChange={(event) => {
             if (event.target.value) insert(event.target.value);
             event.target.value = '';
           }}
         >
           <option value="">＋变量</option>
-          {variables.map((variable) => (
-            <option key={variable.name} value={variable.name}>
+          {variablesFor(variables, inLoop).map((variable) => (
+            <option key={`${variable.group}:${variable.name}`} value={variable.name}>
               {variable.name}
             </option>
           ))}
@@ -242,13 +384,43 @@ export function VartextField({
           {...common}
         />
       )}
+      <BindingChips value={value} variables={variables} inLoop={inLoop} />
       {hint ? <div className="hint">{hint}</div> : null}
     </div>
   );
 }
 
+/** 字段里已写入的变量：就地显示绑定状态（可用 / 越权 / 未知）。 */
+function BindingChips({
+  value,
+  variables,
+  inLoop,
+}: {
+  value: string;
+  variables: MetaVariable[];
+  inLoop: boolean;
+}): JSX.Element | null {
+  const tokens = variableTokensInText(value, variables, inLoop);
+  if (tokens.length === 0) return null;
+  return (
+    <div className="cb-binding-row">
+      {tokens.map((token) => (
+        <span
+          key={token.name}
+          className={`cb-binding cb-binding-${token.state}`}
+          title={token.description}
+        >
+          {'${'}
+          {token.name}
+          {'}'}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ */
-/* 卡片级设置（未选中节点时）                                          */
+/* 卡片标题（独立组件）                                                */
 /* ------------------------------------------------------------------ */
 
 const HEADER_TEMPLATES = [
@@ -270,7 +442,20 @@ const HEADER_TEMPLATES = [
 const STATUS_COLOR_TOKEN = '${status_color}';
 const SEVERITY_COLOR_TOKEN = '${severity_color}';
 
-function CardSettings({
+/** 卡片级读写（header / config / body 都是卡片对象上的字段）。 */
+function cardFieldOps(card: CardJson, onChange: (card: CardJson, label: string) => void) {
+  return {
+    set: (path: string, value: unknown, label: string) => {
+      onChange(setPath({ ...card }, path, value === '' ? undefined : value) as CardJson, label);
+    },
+    read: (path: string): string => {
+      const value = getPath(card, path);
+      return typeof value === 'string' ? value : '';
+    },
+  };
+}
+
+function HeaderSettings({
   card,
   meta,
   onChange,
@@ -279,32 +464,28 @@ function CardSettings({
   meta: Meta;
   onChange: (card: CardJson, label: string) => void;
 }): JSX.Element {
-  const set = (path: string, value: unknown, label: string) => {
-    onChange(setPath({ ...card }, path, value === '' ? undefined : value) as CardJson, label);
-  };
-  const read = (path: string): string => {
-    const value = getPath(card, path);
-    return typeof value === 'string' ? value : '';
-  };
+  const { set, read } = cardFieldOps(card, onChange);
+  // 传入完整清单：下拉在 VartextField 里按作用域过滤，胶囊判定需要完整清单
+  const variables = meta.variables;
 
   return (
     <div className="cb-inspector">
-      <div className="cb-panel-title">卡片设置</div>
+      <div className="cb-panel-title">卡片标题</div>
       <p className="faint small">
-        未选中组件时编辑卡片本身；点画布里的组件可编辑它的属性。
+        标题是独立的可配置组件（画布顶部那一块），不再和卡片设置混在一起。
       </p>
 
       <VartextField
         label="标题"
         hint="支持 ${变量}，例如「【${status_text}】${alertname}」"
         value={read('header.title.content')}
-        variables={meta.variables}
+        variables={variables}
         onChange={(value) => set('header.title.content', value, '修改标题')}
       />
       <VartextField
         label="副标题"
         value={read('header.subtitle.content')}
-        variables={meta.variables}
+        variables={variables}
         onChange={(value) => set('header.subtitle.content', value, '修改副标题')}
       />
       <Field
@@ -326,11 +507,44 @@ function CardSettings({
           ))}
         </select>
       </Field>
+
+      <details className="mt-8">
+        <summary className="faint small">header JSON</summary>
+        <pre className="cb-raw">{JSON.stringify(card.header ?? {}, null, 2)}</pre>
+      </details>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* 卡片级设置（未选中组件/标题时）                                     */
+/* ------------------------------------------------------------------ */
+
+function CardSettings({
+  card,
+  meta,
+  onChange,
+}: {
+  card: CardJson;
+  meta: Meta;
+  onChange: (card: CardJson, label: string) => void;
+}): JSX.Element {
+  const { set, read } = cardFieldOps(card, onChange);
+  // 传入完整清单：下拉在 VartextField 里按作用域过滤，胶囊判定需要完整清单
+  const variables = meta.variables;
+
+  return (
+    <div className="cb-inspector">
+      <div className="cb-panel-title">卡片设置</div>
+      <p className="faint small">
+        卡片级设置（标题请点画布顶部的「卡片标题」块）。
+      </p>
+
       <VartextField
         label="消息摘要"
         hint="聊天列表里显示的预览文案"
         value={read('config.summary.content')}
-        variables={meta.variables}
+        variables={variables}
         onChange={(value) => set('config.summary.content', value, '修改摘要')}
       />
       <div className="grid-2">
@@ -356,6 +570,9 @@ function CardSettings({
       </div>
       <div className="callout info small">
         卡片配置里的「多端同步更新」固定为开启：原地更新旧卡片依赖它，JSON 2.0 也只支持开启。
+      </div>
+      <div className="callout info small">
+        提示：标题在画布顶部的「卡片标题」块里单独编辑；循环 / 条件组件在左侧「本地指令」分组。
       </div>
     </div>
   );

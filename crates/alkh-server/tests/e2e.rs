@@ -395,6 +395,20 @@ impl Harness {
         (status, parsed)
     }
 
+    async fn patch(&self, path: &str, body: Value) -> (reqwest::StatusCode, Value) {
+        let resp = self
+            .http
+            .patch(self.url(path))
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await
+            .expect("PATCH 失败");
+        let status = resp.status();
+        let parsed = resp.json().await.unwrap_or(Value::Null);
+        (status, parsed)
+    }
+
     /// 创建一个群渠道并保存一次性 hook token。
     async fn create_channel(&mut self) -> String {
         let (status, body) = self
@@ -1811,6 +1825,113 @@ async fn card_template_import_validate_preview_and_crud() {
     assert_eq!(resp.status(), 204);
 }
 
+/// 编辑器元数据 `card_message.builder_meta`：随模板落库、原样回传，
+/// 但**不进入渲染**，也不会出现在发给飞书的卡片 JSON 里。
+#[tokio::test]
+async fn card_template_builder_meta_round_trips() {
+    let h = start().await;
+    let card_json = json!({
+        "schema": "2.0",
+        "config": {"update_multi": true},
+        "body": {"elements": [{"tag": "markdown", "element_id": "summary", "content": "${alerts_summary}"}]}
+    });
+    let meta = json!({"labels": {"summary": "总体状态"}});
+
+    // 创建时带上元数据
+    let (status, created) = h
+        .post(
+            "/api/v1/card-templates",
+            json!({
+                "name": "带元数据的模板",
+                "card_message": {
+                    "source": "builder_json",
+                    "card_json": card_json,
+                    "builder_meta": meta
+                }
+            }),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(
+        created["card_message"]["builder_meta"]["labels"]["summary"],
+        "总体状态"
+    );
+    // 元数据不属于卡片 JSON
+    assert!(
+        !created["card_message"]["card_json"]
+            .to_string()
+            .contains("builder_meta"),
+        "{created}"
+    );
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // 读回来还在
+    let (status, fetched) = h.get(&format!("/api/v1/card-templates/{id}")).await;
+    assert_eq!(status, 200, "{fetched}");
+    assert_eq!(
+        fetched["card_message"]["builder_meta"]["labels"]["summary"],
+        "总体状态"
+    );
+
+    // 预览不因元数据而改变渲染结果
+    let (status, preview) = h
+        .post(
+            "/api/v1/card-templates/preview",
+            json!({
+                "name": "带元数据的模板",
+                "card_message": {
+                    "source": "builder_json",
+                    "card_json": card_json,
+                    "builder_meta": meta
+                }
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{preview}");
+    assert!(
+        !preview["rendered_card_json"]
+            .to_string()
+            .contains("总体状态"),
+        "编辑器元数据不得进入渲染: {preview}"
+    );
+
+    // PATCH 也可以覆盖 / 清空
+    let (status, patched) = h
+        .patch(
+            &format!("/api/v1/card-templates/{id}"),
+            json!({
+                "name": "带元数据的模板",
+                "card_message": {
+                    "source": "builder_json",
+                    "card_json": card_json,
+                    "builder_meta": {"labels": {"summary": "新名字"}}
+                }
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{patched}");
+    assert_eq!(
+        patched["card_message"]["builder_meta"]["labels"]["summary"],
+        "新名字"
+    );
+
+    // 老客户端不带该字段：仍可保存，且不会再写出来
+    let (status, legacy) = h
+        .patch(
+            &format!("/api/v1/card-templates/{id}"),
+            json!({
+                "name": "带元数据的模板",
+                "card_message": {"source": "builder_json", "card_json": card_json}
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "{legacy}");
+    assert!(
+        legacy["card_message"]["builder_meta"].is_null(),
+        "不带元数据时应清空而不是保留旧值: {legacy}"
+    );
+}
+
 /// P1：mock 基线、带覆盖的预览、草稿测试发送。
 #[tokio::test]
 async fn card_template_mock_baseline_preview_and_draft_send_test() {
@@ -1895,9 +2016,14 @@ async fn card_template_mock_baseline_preview_and_draft_send_test() {
         .await;
     assert_eq!(status, 404, "{body}");
 
-    // --- 4. 草稿测试发送：不落库模板，消息内容反映 mock ---
+    // --- 4. 草稿测试发送：不落库模板，也不写告警分组 / 投递记录 ---
     let (_, before) = h.get("/api/v1/card-templates").await;
     let templates_before = before.as_array().unwrap().len();
+    // 记录发送前的分组 / 投递条数：样式验证消息不应该让它们变化
+    let (_, groups_before_body) = h.get("/api/v1/alert-groups").await;
+    let groups_before = groups_before_body["total"].as_u64().unwrap_or(0);
+    let (_, deliveries_before_body) = h.get("/api/v1/deliveries").await;
+    let deliveries_before = deliveries_before_body["total"].as_u64().unwrap_or(0);
 
     let (status, delivery) = h
         .post(
@@ -1930,6 +2056,68 @@ async fn card_template_mock_baseline_preview_and_draft_send_test() {
         after.as_array().unwrap().len(),
         templates_before,
         "草稿测试不得创建模板"
+    );
+
+    // --- 4b. 连续两次样式验证都必须成功，且什么都不记录 ---
+    // 曾经每次测试都用新 id 往 alert_groups INSERT，第二次就报
+    // `UNIQUE constraint failed: alert_groups.hook_id, alert_groups.group_key`。
+    // 现在卡片编辑器的测试发送完全不落库，冲突与污染都不存在。
+    let (status, second) = h
+        .post(
+            "/api/v1/card-templates/send-test",
+            json!({
+                "channel_id": channel_id,
+                "sample": "firing",
+                "mock": {"variables": {"summary": "草稿测试概要"}},
+                "name": "草稿模板",
+                "kind": "card_message",
+                "card_message": {"source": "builder_json", "card_json": card_json}
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "连续第二次测试发送不应报唯一约束：{second}");
+    assert_eq!(second["kind"], "test", "{second}");
+
+    let (_, groups_after_body) = h.get("/api/v1/alert-groups").await;
+    assert_eq!(
+        groups_after_body["total"].as_u64().unwrap_or(0),
+        groups_before,
+        "样式验证消息不得写入告警分组: {groups_after_body}"
+    );
+    let (_, deliveries_after_body) = h.get("/api/v1/deliveries").await;
+    assert_eq!(
+        deliveries_after_body["total"].as_u64().unwrap_or(0),
+        deliveries_before,
+        "样式验证消息不得写入投递记录: {deliveries_after_body}"
+    );
+
+    // --- 4c. 指定历史分组作为 mock 基线时同样不落库 ---
+    // 这是最容易漏的路径：mock 指向一条真实分组时，曾经会把样例分组写库。
+    let (status, historical) = h
+        .post(
+            "/api/v1/card-templates/send-test",
+            json!({
+                "channel_id": channel_id,
+                "sample": "firing",
+                "mock": {"alert_group_id": group_id},
+                "name": "草稿模板",
+                "kind": "card_message",
+                "card_message": {"source": "builder_json", "card_json": card_json}
+            }),
+        )
+        .await;
+    assert_eq!(status, 200, "历史分组基线也应能发送: {historical}");
+    let (_, groups_after_history) = h.get("/api/v1/alert-groups").await;
+    assert_eq!(
+        groups_after_history["total"].as_u64().unwrap_or(0),
+        groups_before,
+        "以历史分组为基线也不得写入告警分组: {groups_after_history}"
+    );
+    let (_, deliveries_after_history) = h.get("/api/v1/deliveries").await;
+    assert_eq!(
+        deliveries_after_history["total"].as_u64().unwrap_or(0),
+        deliveries_before,
+        "以历史分组为基线也不得写入投递记录: {deliveries_after_history}"
     );
 
     // 未选渠道 / 不存在的渠道
@@ -2211,6 +2399,33 @@ async fn manual_test_message_and_retry_endpoints() {
     assert_eq!(delivery["kind"], "test");
     assert_eq!(delivery["state"], "active");
     assert_eq!(h.fake.snapshot().messages.len(), 1);
+
+    // 渠道页的测试消息**走完整链路并落库**：连续两次必须都成功。
+    // 回归：测试分组 `alert_groups(hook_id, group_key)` 有唯一索引，第二次曾报
+    // `UNIQUE constraint failed`（现在按自然键复用同一行）。
+    let (status, second) = h
+        .post(
+            &format!("/api/v1/channels/{channel_id}/test-message"),
+            json!({"sample": "firing"}),
+        )
+        .await;
+    assert_eq!(status, 200, "渠道测试消息连续发送不应报唯一约束：{second}");
+    assert_ne!(
+        second["id"], delivery["id"],
+        "每次渠道测试消息仍应是独立的投递记录: {second}"
+    );
+    // 两次都归属同一个「测试分组」行
+    let (_, groups) = h.get("/api/v1/alert-groups").await;
+    let test_groups = groups["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|g| g["group_key"].as_str() == Some("{}:{alertname=~\"High.*|DiskSpaceLow\"}"))
+        .count();
+    assert_eq!(
+        test_groups, 1,
+        "同一渠道的测试消息应复用同一个分组: {groups}"
+    );
 
     // 活跃投递不允许重试
     let delivery_id = delivery["id"].as_str().unwrap();

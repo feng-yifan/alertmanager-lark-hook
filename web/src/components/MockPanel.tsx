@@ -11,6 +11,7 @@
 import { useMemo, useState } from 'react';
 import { getCardTemplateMock } from '../api';
 import { useAsync } from '../hooks';
+import { selectableChannels } from '../channels';
 import type { AlertGroup, Channel, Meta, MetaVariable, MockBaseline, MockSpec } from '../types';
 import { GROUP_STATUS_LABEL, label } from '../labels';
 import { Badge, Banner, Button, Card, Field, Input, Select } from './ui';
@@ -208,10 +209,10 @@ export function MockPanel({
             ))}
           </Select>
         </Field>
-        <Field label="基线渠道" hint="影响消息里的渠道名与渠道 ID；留空用内置样例渠道">
+        <Field label="基线渠道" hint="影响消息里的渠道名与渠道 ID；只列可用渠道，留空用内置样例渠道">
           <Select value={channelId} onChange={(event) => onChannelIdChange(event.target.value)}>
             <option value="">（内置样例渠道）</option>
-            {channels.map((channel) => (
+            {selectableChannels(channels).map((channel) => (
               <option key={channel.id} value={channel.id}>
                 {channel.name}
               </option>

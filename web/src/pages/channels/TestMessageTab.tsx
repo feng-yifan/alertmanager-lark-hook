@@ -44,7 +44,7 @@ export default function TestMessageTab({ channel }: Props): JSX.Element {
     <>
       <Card
         title="发送测试消息"
-        subtitle="用真实凭据向该渠道发送一条测试消息"
+        subtitle="走完整投递链路（会写入「测试分组」与投递记录，可重试 / 撤回）；只验证卡片样式请用卡片编辑器里的「发送测试」"
       >
         <div className="form-grid">
           <Field label="样例类型" required>

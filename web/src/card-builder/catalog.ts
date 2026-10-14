@@ -11,6 +11,7 @@ export const GROUP_TITLES: Array<{ group: CardComponentMeta['group']; title: str
   { group: 'display', title: '展示类' },
   { group: 'interactive', title: '交互类' },
   { group: 'container', title: '容器类' },
+  { group: 'directive', title: '本地指令（预览/发送时由服务端展开）' },
 ];
 
 /** 解析积木的节点数组（服务端用 JSON 文本传输，与 `default_json` 一致）。 */

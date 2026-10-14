@@ -255,7 +255,7 @@ samp {
 
 .content {
   padding: 20px 24px 48px;
-  max-width: 1280px;
+  /* 不限宽：大屏下卡片编辑器（三栏 + 画布）需要横向空间，1280px 会留下大片空白 */
   width: 100%;
 }
 
@@ -1459,12 +1459,16 @@ table.data th.num {
 .cb-children {
   display: flex;
   flex-direction: column;
+  /* 兄弟节点之间留出呼吸感：拖拽落点条出现时也不会「贴」在一起 */
+  gap: 6px;
+  min-height: 14px;
 }
 
 .cb-columns {
   display: flex;
   gap: 8px;
   align-items: stretch;
+  min-height: 14px;
 }
 
 .cb-columns > .cb-item {
@@ -1476,8 +1480,19 @@ table.data th.num {
   min-width: 0;
 }
 
+.cb-children-empty {
+  margin: 0;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-faint);
+  font-size: 11px;
+  padding: 6px 8px;
+  text-align: center;
+}
+
+/* 落点条：只在拖拽命中的位置出现（半透明浮层不会盖住它） */
 .cb-slot {
-  height: 6px;
+  height: 0;
   border-radius: 3px;
   margin: 1px 0;
   transition: background 0.12s ease;
@@ -1486,6 +1501,13 @@ table.data th.num {
 .cb-slot.active {
   background: var(--accent);
   height: 8px;
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.cb-columns > .cb-slot.active {
+  width: 8px;
+  height: auto;
+  align-self: stretch;
 }
 
 .cb-node {
@@ -1493,6 +1515,8 @@ table.data th.num {
   border-radius: var(--radius-sm);
   background: var(--bg-elevated);
   cursor: pointer;
+  /* 头部有条背景色：不裁剪会把节点的圆角边框盖掉（左上/右上看起来「缺角」） */
+  overflow: hidden;
 }
 
 .cb-node.selected {
@@ -1513,7 +1537,8 @@ table.data th.num {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 3px 6px;
+  min-height: 28px;
+  padding: 4px 8px;
   background: var(--bg-subtle);
   border-bottom: 1px solid var(--surface-border);
   cursor: grab;
@@ -1525,8 +1550,12 @@ table.data th.num {
 }
 
 .cb-element-id {
-  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--bg-hover);
   color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .cb-mini {
@@ -1552,7 +1581,7 @@ table.data th.num {
 }
 
 .cb-node-body {
-  padding: 6px;
+  padding: 8px;
 }
 
 .cb-add-column {
@@ -1573,7 +1602,8 @@ table.data th.num {
 }
 
 .cb-preview {
-  padding: 6px 8px;
+  /* 与 .cb-node-head 的左内边距对齐，标题和内容不会错开 */
+  padding: 8px;
   font-size: 12px;
   color: var(--text-muted);
   white-space: pre-wrap;
@@ -1622,6 +1652,320 @@ table.data th.num {
   margin: 4px 8px 8px;
   max-height: 220px;
   overflow: auto;
+}
+
+/* --- 卡片标题 / 卡片设置入口 / 积木徽标 --- */
+
+.cb-header-block {
+  margin-bottom: 8px;
+}
+
+.cb-header-preview {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+}
+
+.cb-header-swatch {
+  width: 4px;
+  align-self: stretch;
+  min-height: 28px;
+  border-radius: 2px;
+  background: var(--border-strong);
+}
+
+.cb-header-text {
+  min-width: 0;
+}
+
+.cb-header-title {
+  font-size: 14px;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.cb-header-sub {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+.cb-card-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cb-card-entry:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.cb-card-entry.selected {
+  border-style: solid;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.cb-card-entry-icon {
+  font-size: 14px;
+}
+
+.cb-block-badge {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.cb-tag-sub {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.cb-mini-wide {
+  width: auto;
+  padding: 0 6px;
+}
+
+.cb-chip-directive {
+  border-style: dashed;
+}
+
+.cb-chip-broken,
+.cb-block-broken {
+  opacity: 0.6;
+  border-style: dotted;
+  cursor: not-allowed;
+}
+
+.cb-block-broken .warn {
+  color: var(--warn);
+}
+
+/* 触屏上拖拽手柄不能触发页面滚动 */
+.cb-node-head,
+.cb-block,
+.cb-chip {
+  touch-action: none;
+}
+
+.cb-hint.directive {
+  margin: 0 0 8px;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+}
+
+.cb-node-head:active {
+  cursor: grabbing;
+}
+
+/* --- 拖拽 --- */
+
+.cb-block.dragging,
+.cb-chip.dragging {
+  opacity: 0.45;
+}
+
+.cb-drag-overlay {
+  cursor: grabbing;
+}
+
+/* 半透明的拖拽浮层：不会遮挡画布里的蓝色落点条 */
+.cb-drag-ghost {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-width: 260px;
+  padding: 6px 10px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+  opacity: 0.62;
+  pointer-events: none;
+}
+
+.cb-drag-ghost-label {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.cb-drag-ghost-hint {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+/* --- 结构大纲 --- */
+
+.cb-outline {
+  margin-bottom: 10px;
+}
+
+.cb-outline > summary {
+  cursor: pointer;
+}
+
+.cb-outline-list {
+  margin: 2px 0 0;
+  padding-left: 12px;
+  list-style: none;
+}
+
+.cb-outline-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cb-outline-row:hover {
+  background: var(--bg-hover);
+}
+
+.cb-outline-row.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.cb-outline-tag {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.cb-outline-preview {
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.cb-outline-empty {
+  padding: 2px 6px;
+}
+
+/* --- 诊断面板 --- */
+
+.cb-diagnostics {
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  padding: 8px 10px;
+}
+
+.cb-diagnostics-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.cb-diagnostics-head .cb-panel-title {
+  margin-bottom: 0;
+}
+
+.cb-diagnostics ul {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cb-diagnostics-item {
+  font-size: 12px;
+}
+
+.cb-diagnostics-item button {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cb-diagnostics-item button:hover {
+  text-decoration: underline;
+}
+
+.cb-diagnostics-item.warn {
+  color: var(--warn);
+}
+
+.cb-diagnostics-item.error {
+  color: var(--danger);
+}
+
+/* 循环展开超限的提示块 */
+.cb-hint.directive.danger {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+/* --- 变量绑定胶囊 --- */
+
+.cb-binding-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.cb-binding {
+  padding: 1px 6px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.cb-binding-ok {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.cb-binding-scope {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.cb-binding-unknown {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 /* --- 属性面板 --- */

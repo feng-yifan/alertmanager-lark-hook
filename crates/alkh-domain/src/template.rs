@@ -79,6 +79,12 @@ pub struct CardMessageSpec {
     pub template_version_name: Option<String>,
     #[serde(default)]
     pub variables: Vec<TemplateVariable>,
+    /// 编辑器元数据（节点名称等）。**不参与渲染、不会发给飞书**，随模板一起落库。
+    ///
+    /// 放在 `card_message` 的兄弟字段而不是 `card_json` 里：宿主对卡片 JSON 的未知字段
+    /// 会直接报错，把编辑器状态混进文档也会让「JSON 就是事实」变得不干净。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builder_meta: Option<Value>,
 }
 
 /// 飞书侧对卡片 JSON 的体积上限（发送卡片消息 30KB）。
@@ -92,6 +98,7 @@ impl CardMessageSpec {
             template_id: None,
             template_version_name: None,
             variables: Vec::new(),
+            builder_meta: None,
         }
     }
 
@@ -102,6 +109,7 @@ impl CardMessageSpec {
             template_id: Some(template_id.into()),
             template_version_name: version,
             variables: Vec::new(),
+            builder_meta: None,
         }
     }
 
@@ -242,9 +250,15 @@ pub static VARIABLE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\$\{([A-Za-z0-9_.:\-]+)\}").expect("VARIABLE_RE 必须可编译"));
 
 /// 渲染上下文：变量名 → 字符串值。
+///
+/// 除字符串变量外还有一个 `data` 通道，用来携带**非字符串的结构化数据**
+/// （如告警数组），供本地构建器指令（循环 / 条件）在渲染期展开使用。
+/// `data` 不参与 `as_template_variables`，也不会出现在预览的变量面板里。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RenderContext {
     vars: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    data: BTreeMap<String, Value>,
 }
 
 impl RenderContext {
@@ -259,6 +273,16 @@ impl RenderContext {
     pub fn with(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.set(key, value);
         self
+    }
+
+    /// 写入结构化数据（不参与变量插值）。
+    pub fn set_data(&mut self, key: impl Into<String>, value: Value) {
+        self.data.insert(key.into(), value);
+    }
+
+    /// 读取结构化数据。
+    pub fn data(&self, key: &str) -> Option<&Value> {
+        self.data.get(key)
     }
 
     pub fn lookup(&self, key: &str) -> Option<&str> {
@@ -457,5 +481,43 @@ mod tests {
         assert!(spec.normalize_and_validate().is_err());
         let mut spec = CardMessageSpec::builder_template("AAq123", Some("1.0.0".into()));
         assert!(spec.normalize_and_validate().is_ok());
+    }
+
+    #[test]
+    fn builder_meta_round_trips_and_stays_out_of_the_card() {
+        let mut spec =
+            CardMessageSpec::builder_json(json!({"schema": "2.0", "body": {"elements": []}}));
+        spec.builder_meta = Some(json!({"labels": {"summary": "总体状态"}}));
+        let text = serde_json::to_string(&spec).unwrap();
+        assert!(text.contains("总体状态"), "{text}");
+
+        let parsed: CardMessageSpec = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed.builder_meta, spec.builder_meta);
+        assert_eq!(parsed.builder_meta.clone(), spec.builder_meta.clone());
+        // 编辑器元数据不属于卡片 JSON
+        assert!(!parsed
+            .card_json
+            .clone()
+            .unwrap()
+            .to_string()
+            .contains("labels"));
+
+        // 老模板（没有该字段）仍可解析
+        let legacy: CardMessageSpec =
+            serde_json::from_str(r#"{"source":"builder_json","card_json":{"schema":"2.0"}}"#)
+                .unwrap();
+        assert!(legacy.builder_meta.is_none());
+
+        // 归一化 / 校验只看 card_json，元数据原样保留
+        let mut normalized = parsed;
+        normalized.normalize_and_validate().unwrap();
+        assert!(normalized.builder_meta.is_some());
+        let without_meta = CardMessageSpec::builder_json(json!({"schema": "2.0"}));
+        assert!(
+            !serde_json::to_string(&without_meta)
+                .unwrap()
+                .contains("builder_meta"),
+            "没有元数据时不应序列化出该字段"
+        );
     }
 }

@@ -247,6 +247,28 @@ impl NotificationSender {
         Ok(delivery)
     }
 
+    /// 测试发送：**只把卡片发到渠道，不落库**（不写 `alert_groups`、不写 `deliveries`）。
+    ///
+    /// 用途是「验证卡片样式」：测试消息不该出现在告警分组与投递记录里，也不该因为
+    /// 反复测试撞上 `alert_groups(hook_id, group_key)` 的唯一索引。
+    /// 返回的 `Delivery` 只是**内存中的回执**（state / message_id / 摘要），不对应任何数据库行，
+    /// 因此没有重试与撤回语义；发送失败会直接作为错误返回给调用方。
+    pub async fn send_ephemeral_test(&self, prepared: &PreparedSend) -> AppResult<Delivery> {
+        let now = self.deps.now();
+        let mut delivery = Delivery::new(
+            prepared.group.id.clone(),
+            prepared.channel.id.clone(),
+            DeliveryKind::Test,
+            prepared.template_id.clone(),
+            prepared.digest.clone(),
+            now,
+        );
+        let uuid = message_uuid(None);
+        self.perform_send(prepared, &mut delivery, &uuid).await?;
+        delivery.mark_active(self.deps.now());
+        Ok(delivery)
+    }
+
     /// 重试一条已存在的投递（后台重试任务 / 手动重试）。
     pub async fn retry(&self, delivery: &Delivery) -> AppResult<Delivery> {
         let group = self

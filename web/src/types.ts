@@ -301,7 +301,7 @@ export interface CardPropMeta {
 export interface CardComponentMeta {
   tag: string;
   label: string;
-  group: 'container' | 'display' | 'interactive' | 'element' | 'deprecated';
+  group: 'container' | 'display' | 'interactive' | 'element' | 'directive' | 'deprecated';
   description: string;
   /** 子节点所在字段（`elements` / `columns`）；叶组件为 null。 */
   children_key: string | null;
@@ -336,12 +336,22 @@ export interface CardPresetMeta {
 }
 
 /** 卡片消息内容：真实线格式是嵌在 `CardTemplate.card_message` 下的对象。 */
+/**
+ * 编辑器元数据：存在 `card_message.builder_meta`（与 `card_json` **平级**的兄弟字段），
+ * 不参与渲染、也不会发给飞书。
+ */
+export interface BuilderMeta {
+  /** 节点名称：key 是节点的 `element_id`，节点移动 / 复制后依然跟着它。 */
+  labels?: Record<string, string>;
+}
+
 export interface CardMessageSpec {
   source: CardSource;
   card_json: CardJson | null;
   template_id: string | null;
   template_version_name: string | null;
   variables: TemplateVariable[];
+  builder_meta?: BuilderMeta | null;
 }
 
 export interface CardTemplate {
@@ -362,6 +372,7 @@ export interface CardMessageInput {
   template_id?: string | null;
   template_version_name?: string | null;
   variables?: TemplateVariable[];
+  builder_meta?: BuilderMeta | null;
 }
 
 /** `POST`/`PATCH /card-templates` 的真实请求体；`name` 必填。 */

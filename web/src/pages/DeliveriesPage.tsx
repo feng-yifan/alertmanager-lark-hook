@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { channelOptionLabel } from '../channels';
 import { errorMessage, listChannels, listDeliveries, retryDelivery, revokeDelivery } from '../api';
 import {
   Button,
@@ -131,7 +132,7 @@ export default function DeliveriesPage(): JSX.Element {
               <option value="">全部渠道</option>
               {channels.map((channel) => (
                 <option key={channel.id} value={channel.id}>
-                  {channel.name}
+                  {channelOptionLabel(channel)}
                 </option>
               ))}
             </Select>

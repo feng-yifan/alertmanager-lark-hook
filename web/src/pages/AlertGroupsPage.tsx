@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { channelOptionLabel } from '../channels';
 import { deleteAlertGroup, errorMessage, listAlertGroups, listChannels } from '../api';
 import {
   Badge,
@@ -107,7 +108,7 @@ export default function AlertGroupsPage(): JSX.Element {
               <option value="">全部渠道</option>
               {channels.map((channel) => (
                 <option key={channel.id} value={channel.id}>
-                  {channel.name}
+                  {channelOptionLabel(channel)}
                 </option>
               ))}
             </Select>

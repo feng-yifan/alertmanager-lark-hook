@@ -10,6 +10,8 @@
 //! 「废弃备注组件 & 交互模块」），且 2.0 **传入不支持的属性会直接报错**——所以这里既要
 //! 拦住废弃组件，也要提示未在目录中的属性。
 
+use std::sync::LazyLock;
+
 use serde::Serialize;
 use serde_json::Value;
 
@@ -157,8 +159,8 @@ const MARKDOWN_PROPS: &[CardProp] = &[
         accessor: CardPropAccessor::Field,
         values: &[],
         max_chars: None,
-        placeholder: "${alerts_list}",
-        hint: "支持 ${变量}；服务端已把告警列表拍平成 markdown，直接引用 ${alerts_list} 即可",
+        placeholder: "${alerts_summary}",
+        hint: "支持 ${变量}；整组告警请用「循环」组件（子组件里写 ${item.alertname} 等），${alerts_list} 仍可用但已不推荐",
     },
     prop("text_size", "字号", CardPropType::Enum, TEXT_SIZE, ""),
     prop("text_align", "对齐", CardPropType::Enum, TEXT_ALIGN, ""),
@@ -345,6 +347,70 @@ const PLAIN_TEXT_ELEMENT_PROPS: &[CardProp] = &[
     ),
 ];
 
+// --- 本地构建器指令（服务端展开，不是飞书组件）-----------------------------
+
+const REPEAT_PROPS: &[CardProp] = &[
+    CardProp {
+        name: "source",
+        label: "循环数据源",
+        ty: CardPropType::Enum,
+        path: "source",
+        accessor: CardPropAccessor::Field,
+        values: &["alerts"],
+        max_chars: None,
+        placeholder: "",
+        hint: "对本次分组里的每一条告警各渲染一遍子组件",
+    },
+    CardProp {
+        name: "max_items",
+        label: "最多循环",
+        ty: CardPropType::Number,
+        path: "max_items",
+        accessor: CardPropAccessor::Field,
+        values: &[],
+        max_chars: None,
+        placeholder: "20",
+        hint: "还会受渠道策略里「单条消息最多展示告警数」限制；留空表示只受策略限制",
+    },
+    CardProp {
+        name: "empty_content",
+        label: "没有数据时显示",
+        ty: CardPropType::Markdown,
+        path: "empty_content",
+        accessor: CardPropAccessor::Field,
+        values: &[],
+        max_chars: None,
+        placeholder: "无告警",
+        hint: "告警为空时渲染这段 Markdown；留空则什么都不渲染",
+    },
+];
+
+const IF_PROPS: &[CardProp] = &[
+    CardProp {
+        name: "when",
+        label: "条件",
+        ty: CardPropType::Text,
+        path: "when",
+        accessor: CardPropAccessor::Field,
+        values: &[],
+        max_chars: None,
+        placeholder: "${item.summary}",
+        hint: "支持 ${变量}；渲染结果为空 / false / 0 / no / off 时视为「否」",
+    },
+    CardProp {
+        name: "equals",
+        label: "等于（可选）",
+        ty: CardPropType::Text,
+        path: "equals",
+        accessor: CardPropAccessor::Field,
+        values: &[],
+        max_chars: None,
+        placeholder: "firing",
+        hint: "填写后改为「条件渲染结果与它完全相等」才成立；留空则用上面的真假判断",
+    },
+    prop("negate", "反转条件", CardPropType::Bool, &[], ""),
+];
+
 /// 全部组件（顺序即面板顺序）。
 pub fn card_components() -> &'static [CardComponent] {
     &[
@@ -352,7 +418,7 @@ pub fn card_components() -> &'static [CardComponent] {
             tag: "markdown",
             label: "富文本",
             group: "display",
-            description: "Markdown 文本；告警列表就用它（${alerts_list}）",
+            description: "Markdown 文本；整组告警建议改用「循环」组件",
             children_key: None,
             children: &[],
             child_of: &[],
@@ -452,6 +518,35 @@ pub fn card_components() -> &'static [CardComponent] {
             default_json: r#"{"tag":"plain_text","content":"文本"}"#,
             props: PLAIN_TEXT_ELEMENT_PROPS,
         },
+        // --- 本地构建器指令：保存的是指令本身，服务端渲染时展开成真实组件 ---
+        // 飞书 JSON 2.0 没有循环容器（仅搭建工具可用且不能再嵌套），所以这里用
+        // 「本地指令 + 服务端展开」实现「循环 + 判断 + 文本」，用户可自由组合。
+        CardComponent {
+            tag: "repeat",
+            label: "循环",
+            group: "directive",
+            description: "对告警数组逐条渲染子组件；子组件里用 ${item.xxx} 取当前告警（保存后由服务端展开，不会发给飞书）",
+            children_key: Some("elements"),
+            children: &[],
+            child_of: &[],
+            palette: true,
+            deprecated: None,
+            default_json: r#"{"tag":"repeat","element_id":"alerts_loop","source":"alerts","max_items":20,"empty_content":"无告警","elements":[{"tag":"markdown","content":"${item.status_icon} **${item.title}**（${item.status_text}）"}]}"#,
+            props: REPEAT_PROPS,
+        },
+        CardComponent {
+            tag: "if",
+            label: "条件",
+            group: "directive",
+            description: "条件成立时才渲染子组件，例如「有概要才显示概要行」（保存后由服务端展开）",
+            children_key: Some("elements"),
+            children: &[],
+            child_of: &[],
+            palette: true,
+            deprecated: None,
+            default_json: r#"{"tag":"if","when":"${item.summary}","elements":[{"tag":"markdown","content":"　‣ 概要：${item.summary}"}]}"#,
+            props: IF_PROPS,
+        },
         // --- 2.0 已废弃：保留目录项只为给出**可操作的**报错 ---
         CardComponent {
             tag: "note",
@@ -497,73 +592,103 @@ pub struct CardPreset {
     pub label: &'static str,
     pub description: &'static str,
     /// 插入画布的节点数组（JSON 文本；可为 1 个或多个节点）。
-    pub nodes_json: &'static str,
+    pub nodes_json: String,
 }
 
-/// 告警积木：覆盖「一张告警卡需要什么」的全部高频块。
-pub fn alert_presets() -> &'static [CardPreset] {
-    &[
+/// 结构化「告警列表」的循环体节点：**循环 + 判断 + 文本**。
+///
+/// 这是 `${alerts_list}` 变量的替代品：用户能在画布上看到并修改每一个子组件，
+/// 而且可以继续嵌套。保存的卡片里存的就是这段指令，服务端渲染时才展开成
+/// 真正的飞书组件（见 `alkh_app::render::expand_card_json`）。
+///
+/// 默认卡片（`alkh_app::defaults`）与「告警列表 / 折叠详情」积木共用它，避免三处漂移。
+pub const ALERTS_LOOP_NODE: &str = r#"{
+  "tag": "repeat",
+  "element_id": "alerts_loop",
+  "source": "alerts",
+  "max_items": 20,
+  "empty_content": "无告警",
+  "elements": [
+    { "tag": "markdown", "content": "${item.status_icon} **${item.title}**（${item.status_text}）" },
+    { "tag": "if", "when": "${item.summary}", "elements": [{ "tag": "markdown", "content": "　‣ 概要：${item.summary}" }] },
+    { "tag": "if", "when": "${item.description}", "elements": [{ "tag": "markdown", "content": "　‣ 详情：${item.description}" }] },
+    { "tag": "if", "when": "${item.is_firing}", "elements": [{ "tag": "markdown", "content": "　‣ 开始：${item.starts_at}" }] },
+    { "tag": "if", "when": "${item.is_firing}", "negate": true, "elements": [{ "tag": "markdown", "content": "　‣ 恢复：${item.ends_at}" }] }
+  ]
+}"#;
+
+fn build_alert_presets() -> Vec<CardPreset> {
+    vec![
         CardPreset {
             id: "summary",
             label: "汇总行",
             description: "🔥 3 条未解决 · ✅ 1 条已恢复",
-            nodes_json: r#"[{"tag":"markdown","element_id":"summary","text_size":"normal","content":"${alerts_summary}"}]"#,
+            nodes_json: r#"[{"tag":"markdown","element_id":"summary","text_size":"normal","content":"${alerts_summary}"}]"#.into(),
         },
         CardPreset {
             id: "alerts_list",
             label: "告警列表",
-            description: "服务端已拍平好的多行列表（${alerts_list}）",
-            nodes_json: r#"[{"tag":"markdown","element_id":"alerts","content":"${alerts_list}"}]"#,
+            description: "循环每条告警（循环 + 判断 + 文本），字段可在画布上继续改",
+            nodes_json: format!("[{ALERTS_LOOP_NODE}]"),
         },
         CardPreset {
             id: "alerts_table",
             label: "告警表格",
             description: "Markdown 表格形式（${alerts_table}）",
-            nodes_json: r#"[{"tag":"markdown","element_id":"alerts_table","content":"${alerts_table}"}]"#,
+            nodes_json: r#"[{"tag":"markdown","element_id":"alerts_table","content":"${alerts_table}"}]"#.into(),
         },
         CardPreset {
             id: "meta",
             label: "元信息块",
             description: "接收器 / 分组 / 时间 / 数量",
-            nodes_json: r#"[{"tag":"markdown","element_id":"meta","content":"**接收器**：${receiver}\n**分组**：${group_key}\n**首次出现**：${first_seen_at}\n**最后更新**：${last_seen_at}\n**告警总数**：${alert_count}"}]"#,
+            nodes_json: r#"[{"tag":"markdown","element_id":"meta","content":"**接收器**：${receiver}\n**分组**：${group_key}\n**首次出现**：${first_seen_at}\n**最后更新**：${last_seen_at}\n**告警总数**：${alert_count}"}]"#.into(),
         },
         CardPreset {
             id: "severity_row",
             label: "级别 + 状态",
             description: "严重级别与恢复状态两列",
-            nodes_json: r#"[{"tag":"column_set","element_id":"severity_row","flex_mode":"bisect","columns":[{"tag":"column","width":"weighted","weight":1,"elements":[{"tag":"div","text":{"tag":"plain_text","content":"级别：${severity_text}","text_size":"normal"}}]},{"tag":"column","width":"weighted","weight":1,"elements":[{"tag":"div","text":{"tag":"plain_text","content":"状态：${status_text}","text_size":"normal","text_align":"right"}}]}]}]"#,
+            nodes_json: r#"[{"tag":"column_set","element_id":"severity_row","flex_mode":"bisect","columns":[{"tag":"column","width":"weighted","weight":1,"elements":[{"tag":"div","text":{"tag":"plain_text","content":"级别：${severity_text}","text_size":"normal"}}]},{"tag":"column","width":"weighted","weight":1,"elements":[{"tag":"div","text":{"tag":"plain_text","content":"状态：${status_text}","text_size":"normal","text_align":"right"}}]}]}]"#.into(),
         },
         CardPreset {
             id: "counters",
             label: "数量统计",
             description: "未解决 / 已恢复 两列数字",
-            nodes_json: r#"[{"tag":"column_set","element_id":"counters","flex_mode":"bisect","columns":[{"tag":"column","width":"weighted","weight":1,"background_style":"grey","padding":"8px","elements":[{"tag":"div","text":{"tag":"plain_text","content":"${firing_count}","text_size":"heading","text_align":"center"}},{"tag":"div","text":{"tag":"plain_text","content":"未解决","text_size":"notation","text_color":"grey","text_align":"center"}}]},{"tag":"column","width":"weighted","weight":1,"background_style":"grey","padding":"8px","elements":[{"tag":"div","text":{"tag":"plain_text","content":"${resolved_count}","text_size":"heading","text_align":"center"}},{"tag":"div","text":{"tag":"plain_text","content":"已恢复","text_size":"notation","text_color":"grey","text_align":"center"}}]}]}]"#,
+            nodes_json: r#"[{"tag":"column_set","element_id":"counters","flex_mode":"bisect","columns":[{"tag":"column","width":"weighted","weight":1,"background_style":"grey","padding":"8px","elements":[{"tag":"div","text":{"tag":"plain_text","content":"${firing_count}","text_size":"heading","text_align":"center"}},{"tag":"div","text":{"tag":"plain_text","content":"未解决","text_size":"notation","text_color":"grey","text_align":"center"}}]},{"tag":"column","width":"weighted","weight":1,"background_style":"grey","padding":"8px","elements":[{"tag":"div","text":{"tag":"plain_text","content":"${resolved_count}","text_size":"heading","text_align":"center"}},{"tag":"div","text":{"tag":"plain_text","content":"已恢复","text_size":"notation","text_color":"grey","text_align":"center"}}]}]}]"#.into(),
         },
         CardPreset {
             id: "detail_button",
             label: "详情按钮",
             description: "跳转 AlertManager（${external_url}）",
-            nodes_json: r#"[{"tag":"button","element_id":"detail_btn","text":{"tag":"plain_text","content":"查看详情"},"type":"primary","size":"medium","behaviors":[{"type":"open_url","default_url":"${external_url}","pc_url":"","ios_url":"","android_url":""}]}]"#,
+            nodes_json: r#"[{"tag":"button","element_id":"detail_btn","text":{"tag":"plain_text","content":"查看详情"},"type":"primary","size":"medium","behaviors":[{"type":"open_url","default_url":"${external_url}","pc_url":"","ios_url":"","android_url":""}]}]"#.into(),
         },
         CardPreset {
             id: "collapsible_detail",
             label: "折叠详情",
-            description: "默认收起，点开看完整列表",
-            nodes_json: r#"[{"tag":"collapsible_panel","element_id":"detail_panel","expanded":false,"header":{"title":{"tag":"plain_text","content":"详情"}},"elements":[{"tag":"markdown","content":"${alerts_list}"}]}]"#,
+            description: "默认收起，点开看完整列表（同样是可编辑的循环）",
+            nodes_json: format!(
+                r#"[{{"tag":"collapsible_panel","element_id":"detail_panel","expanded":false,"header":{{"title":{{"tag":"plain_text","content":"详情"}}}},"elements":[{ALERTS_LOOP_NODE}]}}]"#
+            ),
         },
         CardPreset {
             id: "footer",
             label: "脚注",
             description: "notation + grey 的灰色小字（替代已废弃的 note）",
-            nodes_json: r#"[{"tag":"div","element_id":"footer","text":{"tag":"plain_text","content":"由 alertmanager-lark-hook 投递","text_size":"notation","text_color":"grey"}}]"#,
+            nodes_json: r#"[{"tag":"div","element_id":"footer","text":{"tag":"plain_text","content":"由 alertmanager-lark-hook 投递","text_size":"notation","text_color":"grey"}}]"#.into(),
         },
         CardPreset {
             id: "divider",
             label: "分割线",
             description: "分隔内容区块",
-            nodes_json: r#"[{"tag":"hr"}]"#,
+            nodes_json: r#"[{"tag":"hr"}]"#.into(),
         },
     ]
+}
+
+static PRESETS: LazyLock<Vec<CardPreset>> = LazyLock::new(build_alert_presets);
+
+/// 告警积木：覆盖「一张告警卡需要什么」的全部高频块。
+pub fn alert_presets() -> &'static [CardPreset] {
+    PRESETS.as_slice()
 }
 
 /// 按 tag 查目录。
@@ -895,7 +1020,7 @@ mod tests {
     #[test]
     fn alert_presets_are_valid_cards() {
         for preset in alert_presets() {
-            let nodes: Value = serde_json::from_str(preset.nodes_json)
+            let nodes: Value = serde_json::from_str(&preset.nodes_json)
                 .unwrap_or_else(|e| panic!("积木「{}」不是合法 JSON: {e}", preset.label));
             let card =
                 json!({"schema":"2.0","config":{"update_multi":true},"body":{"elements":nodes}});
@@ -912,6 +1037,29 @@ mod tests {
                 preset.label,
                 report.warnings
             );
+        }
+    }
+
+    /// 结构化告警列表的循环体必须是合法卡片结构（零错误零警告）。
+    #[test]
+    fn alerts_loop_node_is_a_valid_structured_loop() {
+        let node: Value = serde_json::from_str(ALERTS_LOOP_NODE).expect("循环体必须是合法 JSON");
+        assert_eq!(node["tag"], "repeat");
+        let card =
+            json!({"schema":"2.0","config":{"update_multi":true},"body":{"elements":[node]}});
+        let report = validate_card_json(&card);
+        assert!(report.is_valid(), "{:?}", report.errors);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    }
+
+    /// 循环 / 条件必须作为「本地指令」出现在目录里，否则前端面板与校验都不认。
+    #[test]
+    fn directive_components_are_in_the_catalog() {
+        for tag in ["repeat", "if"] {
+            let component = find_component(tag).unwrap_or_else(|| panic!("目录缺少指令 {tag}"));
+            assert_eq!(component.group, "directive", "{tag}");
+            assert_eq!(component.children_key, Some("elements"), "{tag}");
+            assert!(component.palette, "{tag} 应出现在组件面板里");
         }
     }
 

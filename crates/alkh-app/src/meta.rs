@@ -325,6 +325,133 @@ pub fn render_variables() -> Vec<VariableMeta> {
             ty: "markdown",
             description: "告警 Markdown 表格",
         },
+        V {
+            name: "has_alerts",
+            group: "block",
+            ty: "bool",
+            description: "本次分组是否有告警（配合「条件」组件使用）",
+        },
+        // 循环内（`repeat` 组件的子组件里可用，取「当前这一条」告警）
+        V {
+            name: "item.index",
+            group: "item",
+            ty: "number",
+            description: "当前告警序号（从 1 开始）",
+        },
+        V {
+            name: "item.title",
+            group: "item",
+            ty: "string",
+            description: "当前告警的「名称 · 实例」",
+        },
+        V {
+            name: "item.alertname",
+            group: "item",
+            ty: "string",
+            description: "当前告警的名称",
+        },
+        V {
+            name: "item.instance",
+            group: "item",
+            ty: "string",
+            description: "当前告警的实例",
+        },
+        V {
+            name: "item.job",
+            group: "item",
+            ty: "string",
+            description: "当前告警的 job",
+        },
+        V {
+            name: "item.fingerprint",
+            group: "item",
+            ty: "string",
+            description: "当前告警的指纹",
+        },
+        V {
+            name: "item.status",
+            group: "item",
+            ty: "string",
+            description: "当前告警状态：firing / resolved",
+        },
+        V {
+            name: "item.alert_status",
+            group: "item",
+            ty: "string",
+            description: "同上（与代表告警的 `${alert_status}` 同名，便于迁移）",
+        },
+        V {
+            name: "item.status_text",
+            group: "item",
+            ty: "string",
+            description: "当前告警状态的中文：未解决 / 已恢复",
+        },
+        V {
+            name: "item.status_icon",
+            group: "item",
+            ty: "string",
+            description: "当前告警状态的图标：🔥 / ✅",
+        },
+        V {
+            name: "item.is_firing",
+            group: "item",
+            ty: "bool",
+            description: "当前告警是否未解决",
+        },
+        V {
+            name: "item.status_color",
+            group: "item",
+            ty: "string",
+            description: "当前告警状态对应的卡片颜色",
+        },
+        V {
+            name: "item.severity",
+            group: "item",
+            ty: "string",
+            description: "当前告警的严重级别原值",
+        },
+        V {
+            name: "item.severity_text",
+            group: "item",
+            ty: "string",
+            description: "当前告警严重级别的中文",
+        },
+        V {
+            name: "item.severity_color",
+            group: "item",
+            ty: "string",
+            description: "当前告警严重级别对应的卡片颜色",
+        },
+        V {
+            name: "item.summary",
+            group: "item",
+            ty: "string",
+            description: "当前告警的概要注解",
+        },
+        V {
+            name: "item.description",
+            group: "item",
+            ty: "string",
+            description: "当前告警的详情注解",
+        },
+        V {
+            name: "item.starts_at",
+            group: "item",
+            ty: "datetime",
+            description: "当前告警的开始时间",
+        },
+        V {
+            name: "item.ends_at",
+            group: "item",
+            ty: "datetime",
+            description: "当前告警的结束时间（未结束为空）",
+        },
+        V {
+            name: "item.generator_url",
+            group: "item",
+            ty: "url",
+            description: "当前告警的来源链接",
+        },
         // 动态
         V {
             name: "label:<名称>",
@@ -337,6 +464,18 @@ pub fn render_variables() -> Vec<VariableMeta> {
             group: "dynamic",
             ty: "string",
             description: "任意注解，如 ${annotation:runbook}",
+        },
+        V {
+            name: "item.label:<名称>",
+            group: "dynamic",
+            ty: "string",
+            description: "循环内取当前告警的任意标签，如 ${item.label:team}",
+        },
+        V {
+            name: "item.annotation:<名称>",
+            group: "dynamic",
+            ty: "string",
+            description: "循环内取当前告警的任意注解，如 ${item.annotation:runbook}",
         },
         V {
             name: "<名称>",
@@ -440,7 +579,7 @@ mod tests {
         let known: std::collections::BTreeSet<String> =
             render_variable_names().into_iter().collect();
         for preset in alkh_domain::card_catalog::alert_presets() {
-            let nodes: serde_json::Value = serde_json::from_str(preset.nodes_json)
+            let nodes: serde_json::Value = serde_json::from_str(&preset.nodes_json)
                 .unwrap_or_else(|e| panic!("积木「{}」不是合法 JSON: {e}", preset.label));
             for variable in alkh_domain::template::detect_variables_json(&nodes) {
                 // `label:` / `annotation:` 是运行时动态 key，不在静态清单里。

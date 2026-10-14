@@ -4,7 +4,7 @@ use alkh_domain::alert::{AlertGroup, AlertInstance};
 use alkh_domain::channel::Channel;
 use alkh_domain::policy::NotificationPolicy;
 use alkh_domain::template::{
-    render_json, CardMessageSpec, CardSource, RenderContext, CARD_JSON_MAX_BYTES,
+    render_str, CardMessageSpec, CardSource, RenderContext, CARD_JSON_MAX_BYTES,
 };
 use alkh_domain::Timestamp;
 use serde_json::{json, Map, Value};
@@ -68,7 +68,7 @@ pub fn render_card_message(
                 .card_json
                 .as_ref()
                 .ok_or_else(|| AppError::validation("模板缺少 card_json"))?;
-            let mut rendered = render_json(card, ctx);
+            let mut rendered = expand_card_json(card, ctx);
             if !rendered.is_object() {
                 return Err(AppError::validation("渲染后的卡片不是 JSON 对象"));
             }
@@ -100,36 +100,55 @@ pub fn render_card_message(
 
 /// 把渲染结果压进飞书卡片体积上限（`CARD_JSON_MAX_BYTES`）。
 ///
-/// 策略：反复找出当前**最长的字符串叶子**并按超出量截断，保证结构始终是合法 JSON。
-/// 截断会加一个可见后缀，便于用户知道内容被裁过。
+/// 策略：每轮把**超出的字节数**从最长的字符串叶子开始逐段砍掉（一轮可以砍多个叶子），
+/// 保证结构始终是合法 JSON。截断会加一个可见后缀，便于用户知道内容被裁过。
 ///
 /// 返回是否发生了截断。
 pub fn shrink_json_to_bytes(value: &mut Value, limit: usize) -> bool {
     const SUFFIX: &str = "…（已截断）";
     let mut truncated = false;
-    // 每轮都会砍掉至少 1 字节，设上限防止极端结构下空转。
-    for _ in 0..512 {
+    // 每轮都**一次性砍够**（而不是每轮只砍一个叶子）：否则「大量短字符串」的长尾
+    // 会在轮次上限内收敛不了，卡片仍然超限 → 飞书直接拒收、整条告警丢失。
+    // 每轮都让序列化体积严格变小，几轮内必然收敛（8 轮纯粹是保险）。
+    for _ in 0..8 {
         let Ok(bytes) = serde_json::to_vec(value) else {
             return truncated;
         };
         if bytes.len() <= limit {
             return truncated;
         }
-        let over = bytes.len() - limit;
-        let Some((path, len)) = longest_string_leaf(value) else {
-            return truncated;
-        };
-        truncated = true;
-        if len <= SUFFIX.len() + over + 2 {
-            // 太短了，砍不出多少，直接清空这个叶子。
-            set_string_at(value, &path, String::new());
-        } else {
-            let keep = len - over - SUFFIX.len() - 8;
-            let cut = truncate_utf8(
-                value_at(value, &path).and_then(Value::as_str).unwrap_or(""),
-                keep,
-            );
-            set_string_at(value, &path, format!("{cut}{SUFFIX}"));
+        // 需要腾出的字节数（+8 字节余量）。截断按**原始字符串字节**估算，而 JSON
+        // 转义只会让实际释放更多，所以这个估算天然偏保守，不会「砍完还差一点」。
+        let need = (bytes.len() - limit).saturating_add(8);
+
+        let mut leaves = string_leaves(value);
+        leaves.sort_by_key(|leaf| std::cmp::Reverse(leaf.1)); // 先砍最长的，尽量保留短的结构字段
+        let mut changed = false;
+        let mut remaining = need;
+        for (path, len) in leaves {
+            if remaining == 0 {
+                break;
+            }
+            if len == 0 {
+                continue;
+            }
+            changed = true;
+            truncated = true;
+            if len <= remaining.saturating_add(SUFFIX.len()) {
+                // 砍光整段也腾不出多少，直接清空这个叶子。
+                set_string_at(value, &path, String::new());
+                remaining = remaining.saturating_sub(len);
+            } else {
+                // 保留可见后缀（饱和减法：`remaining + 后缀` 可能大于字符串长度）。
+                let current = value_at(value, &path).and_then(Value::as_str).unwrap_or("");
+                let keep = current.len().saturating_sub(remaining + SUFFIX.len());
+                let cut = truncate_utf8(current, keep);
+                set_string_at(value, &path, format!("{cut}{SUFFIX}"));
+                remaining = 0;
+            }
+        }
+        if !changed {
+            return truncated; // 已经没有可压缩的字符串了
         }
     }
     truncated
@@ -142,35 +161,31 @@ enum Seg {
     Idx(usize),
 }
 
-/// 找出最长的字符串叶子及其路径（按**字节**计，因为上限是字节）。
-fn longest_string_leaf(value: &Value) -> Option<(Vec<Seg>, usize)> {
-    fn walk(v: &Value, path: &mut Vec<Seg>, best: &mut Option<(Vec<Seg>, usize)>) {
+/// 收集所有字符串叶子及其路径（按**字节**计，因为上限是字节）。
+fn string_leaves(value: &Value) -> Vec<(Vec<Seg>, usize)> {
+    fn walk(v: &Value, path: &mut Vec<Seg>, out: &mut Vec<(Vec<Seg>, usize)>) {
         match v {
-            Value::String(s) => {
-                if best.as_ref().map(|(_, b)| s.len() > *b).unwrap_or(true) {
-                    *best = Some((path.clone(), s.len()));
-                }
-            }
+            Value::String(s) => out.push((path.clone(), s.len())),
             Value::Array(items) => {
                 for (i, item) in items.iter().enumerate() {
                     path.push(Seg::Idx(i));
-                    walk(item, path, best);
+                    walk(item, path, out);
                     path.pop();
                 }
             }
             Value::Object(map) => {
                 for (k, item) in map {
                     path.push(Seg::Key(k.clone()));
-                    walk(item, path, best);
+                    walk(item, path, out);
                     path.pop();
                 }
             }
             _ => {}
         }
     }
-    let mut best = None;
-    walk(value, &mut Vec::new(), &mut best);
-    best
+    let mut out = Vec::new();
+    walk(value, &mut Vec::new(), &mut out);
+    out
 }
 
 fn value_at<'a>(value: &'a Value, path: &[Seg]) -> Option<&'a Value> {
@@ -416,7 +431,308 @@ pub fn build_context(
         "alerts_table",
         alerts_table(group, policy.max_alerts_per_message as usize),
     );
+    ctx.set(
+        "has_alerts",
+        if group.alerts.is_empty() {
+            "false"
+        } else {
+            "true"
+        },
+    );
 
+    // --- 结构化数据：供本地构建器指令（循环/条件）在渲染期使用 ---
+    // 每条告警都已预格式化成展示用的字符串，循环体里直接写 `${item.xxx}` 即可；
+    // 大数组放在 `data` 通道里，不会出现在预览的变量面板中。
+    ctx.set_data(
+        "alerts",
+        Value::Array(group.alerts.iter().map(alert_view).collect()),
+    );
+    ctx.set_data("alerts_limit", json!(policy.max_alerts_per_message));
+    ctx.set_data("truncated_alerts", json!(group.truncated_alerts));
+
+    ctx
+}
+
+/// 把一条告警转成循环体可用的展示视图（时间/颜色等都已算好）。
+fn alert_view(alert: &AlertInstance) -> Value {
+    let mut view = serde_json::to_value(alert).unwrap_or_else(|_| json!({}));
+    let severity = alert.labels.get("severity").map(String::as_str);
+    if let Some(obj) = view.as_object_mut() {
+        obj.insert("status_text".into(), json!(status_text(alert)));
+        obj.insert("status_icon".into(), json!(status_icon(alert)));
+        obj.insert("is_firing".into(), json!(alert.is_firing()));
+        obj.insert("title".into(), json!(alert_title(alert)));
+        obj.insert("severity".into(), json!(severity.unwrap_or_default()));
+        obj.insert("severity_text".into(), json!(severity_text(severity)));
+        obj.insert("severity_color".into(), json!(severity_color(severity)));
+        obj.insert(
+            "status_color".into(),
+            json!(status_color(alert.is_firing(), severity)),
+        );
+        obj.insert("summary".into(), json!(annotation(alert, "summary")));
+        obj.insert(
+            "description".into(),
+            json!(annotation(alert, "description")),
+        );
+        // 与 `${starts_at}` / `${ends_at}` 同格式（RFC3339 对用户不友好）。
+        obj.insert("starts_at".into(), json!(fmt_opt_time(alert.starts_at)));
+        obj.insert("ends_at".into(), json!(fmt_opt_time(alert.ends_at)));
+        obj.insert(
+            "generator_url".into(),
+            json!(alert.generator_url.clone().unwrap_or_default()),
+        );
+    }
+    view
+}
+
+fn annotation(alert: &AlertInstance, key: &str) -> String {
+    alert.annotations.get(key).cloned().unwrap_or_default()
+}
+
+/* ------------------------------------------------------------------ */
+/* 本地构建器指令：循环（repeat）/ 条件（if）                            */
+/* ------------------------------------------------------------------ */
+
+/// 循环指令 tag（不是飞书组件；见 `card_catalog` 里 `group = "directive"` 的项）。
+pub const DIRECTIVE_REPEAT: &str = "repeat";
+/// 条件指令 tag。
+pub const DIRECTIVE_IF: &str = "if";
+
+/// 展开卡片里的构建器指令，并渲染所有 `${变量}`。
+///
+/// 飞书 JSON 2.0 没有循环容器，所以「循环 + 判断 + 文本」是本工具的**本地指令**：
+/// 保存的是指令本身，只有真正发送/预览时才在这里展开成飞书认识的组件。
+/// 展开后的卡片保证不再包含指令 tag，且**组件数不超过飞书上限**（超出部分丢弃，
+/// 与 30KB 体积截断同策略：宁可少显示，也不让整条告警因超限而丢失）。
+pub fn expand_card_json(card: &Value, ctx: &RenderContext) -> Value {
+    let mut budget = alkh_domain::card_catalog::MAX_CARD_ELEMENTS;
+    expand_value(card, ctx, &mut budget)
+}
+
+/// 展开一个 JSON 值。`charged` 表示它是否**作为组件**（elements 数组的成员）被计数。
+fn expand_value(value: &Value, ctx: &RenderContext, budget: &mut usize) -> Value {
+    expand_value_charged(value, ctx, budget, false)
+}
+
+fn expand_value_charged(
+    value: &Value,
+    ctx: &RenderContext,
+    budget: &mut usize,
+    charged: bool,
+) -> Value {
+    match value {
+        Value::String(text) => Value::String(render_str(text, ctx)),
+        Value::Array(items) => Value::Array(expand_list(items, ctx, budget)),
+        Value::Object(map) => match map.get("tag").and_then(Value::as_str) {
+            Some(DIRECTIVE_REPEAT) => expand_repeat(map, ctx, budget),
+            Some(DIRECTIVE_IF) => expand_if(map, ctx, budget),
+            Some(_) => {
+                // 只有「组件」占名额；header/config 这类结构化对象不计入，也不会被丢弃。
+                if charged {
+                    if *budget == 0 {
+                        return Value::Array(Vec::new());
+                    }
+                    *budget -= 1;
+                }
+                Value::Object(
+                    map.iter()
+                        .map(|(key, item)| {
+                            (key.clone(), expand_value_charged(item, ctx, budget, false))
+                        })
+                        .collect(),
+                )
+            }
+            None => Value::Object(
+                map.iter()
+                    .map(|(key, item)| {
+                        (key.clone(), expand_value_charged(item, ctx, budget, false))
+                    })
+                    .collect(),
+            ),
+        },
+        other => other.clone(),
+    }
+}
+
+/// 展开数组：指令可能展开成 0..N 个节点，因此用 flat_map 语义。
+fn expand_list(items: &[Value], ctx: &RenderContext, budget: &mut usize) -> Vec<Value> {
+    let mut out = Vec::new();
+    for item in items {
+        match expand_value_charged(item, ctx, budget, true) {
+            Value::Array(nested) => out.extend(nested),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// 循环：对数据源里的每一项渲染一遍 `elements` 模板。
+fn expand_repeat(map: &Map<String, Value>, ctx: &RenderContext, budget: &mut usize) -> Value {
+    let source = map
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or("alerts");
+    let items: Vec<Value> = ctx
+        .data(source)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let template: Vec<Value> = map
+        .get("elements")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    // 循环次数 = min(数据条数, 策略上限, max_items)；组件数上限由 budget 统一收口。
+    let mut limit = items.len();
+    if let Some(policy_limit) = ctx.data("alerts_limit").and_then(Value::as_u64) {
+        limit = limit.min(policy_limit as usize);
+    }
+    if let Some(configured) = map.get("max_items").and_then(Value::as_u64) {
+        limit = limit.min(configured as usize);
+    }
+    let had_budget = *budget > 0;
+
+    let mut out: Vec<Value> = Vec::new();
+    let mut index = 0;
+    while index < limit && index < items.len() && *budget > 0 {
+        let scoped = item_context(ctx, &items[index], index + 1);
+        let mut expanded = expand_list(&template, &scoped, budget);
+        // 同一段模板会被复制 N 份：模板里的 `element_id` 会因此重复，
+        // 而飞书对重复 element_id 直接报错（300301）。展开出来的副本一律去 id。
+        for node in &mut expanded {
+            strip_element_ids(node);
+        }
+        if expanded.is_empty() && *budget == 0 {
+            break; // 名额耗尽
+        }
+        out.extend(expanded);
+        index += 1;
+    }
+
+    // 「无数据」兜底文案（相当于循环自带的「判断」）。
+    // 只有**一次都没循环**（数据为空、策略上限为 0、或一进来就没名额）时才显示；
+    // 循环了但条件全部不成立，不能谎报「无告警」。
+    if index == 0 && had_budget {
+        if let Some(text) = map.get("empty_content").and_then(Value::as_str) {
+            let rendered = render_str(text, ctx);
+            if !rendered.trim().is_empty() {
+                out.push(json!({ "tag": "markdown", "content": rendered }));
+            }
+        }
+    }
+    Value::Array(out)
+}
+
+/// 递归删除所有 `element_id`。
+///
+/// 只用于**循环展开出来的副本**：同一段模板复制多份时，模板里的 id 必然重复，
+/// 飞书会以 `300301 duplicate element_id` 拒收整张卡片（=整条告警丢失）。
+/// 循环体外（只出现一次）的组件保留自己的 id。
+fn strip_element_ids(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.remove("element_id");
+            for child in map.values_mut() {
+                strip_element_ids(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                strip_element_ids(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 条件：`when` 渲染结果按真值判断；给了 `equals` 则改为精确相等。
+fn expand_if(map: &Map<String, Value>, ctx: &RenderContext, budget: &mut usize) -> Value {
+    let rendered = map
+        .get("when")
+        .and_then(Value::as_str)
+        .map(|when| render_str(when, ctx))
+        .unwrap_or_default();
+    let mut truthy = is_truthy(&rendered);
+    if let Some(equals) = map.get("equals").and_then(Value::as_str) {
+        if !equals.is_empty() {
+            truthy = rendered.trim() == render_str(equals, ctx).trim();
+        }
+    }
+    if map.get("negate").and_then(Value::as_bool).unwrap_or(false) {
+        truthy = !truthy;
+    }
+    if !truthy {
+        return Value::Array(Vec::new());
+    }
+    let elements: Vec<Value> = map
+        .get("elements")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Value::Array(expand_list(&elements, ctx, budget))
+}
+
+/// 空串 / false / 0 / no / off 视为「否」，其余非空值为「是」。
+fn is_truthy(rendered: &str) -> bool {
+    let trimmed = rendered.trim();
+    !trimmed.is_empty()
+        && !matches!(
+            trimmed.to_ascii_lowercase().as_str(),
+            "false" | "0" | "no" | "off"
+        )
+}
+
+/// 循环体内的一层上下文：在基线上叠加 `${item.*}` 变量（继承分组级变量）。
+fn item_context(base: &RenderContext, item: &Value, index: usize) -> RenderContext {
+    let mut ctx = base.clone();
+    // 布尔/数字也要能参与 `${...}` 插值与条件判断，统一转成字符串。
+    let text = |key: &str| match item.get(key) {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Bool(b)) => b.to_string(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => String::new(),
+    };
+    ctx.set("item.index", index.to_string());
+    for key in [
+        "alertname",
+        "instance",
+        "job",
+        "fingerprint",
+        "title",
+        "status",
+        "status_text",
+        "status_icon",
+        "is_firing",
+        "severity",
+        "severity_text",
+        "severity_color",
+        "status_color",
+        "summary",
+        "description",
+        "starts_at",
+        "ends_at",
+        "generator_url",
+    ] {
+        ctx.set(format!("item.{key}"), text(key));
+    }
+    // 与代表告警的 `${alert_status}` 对齐的别名，便于迁移。
+    ctx.set("item.alert_status", text("status"));
+    // 标签 / 注解：`${item.labels.team}` 与 `${item.label:team}` 两种写法都支持。
+    for (prefix, field) in [("label", "labels"), ("annotation", "annotations")] {
+        for (key, value) in item
+            .get(field)
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+        {
+            let Some(value) = value.as_str() else {
+                continue;
+            };
+            ctx.set(format!("item.{field}.{key}"), value.to_string());
+            ctx.set(format!("item.{prefix}:{key}"), value.to_string());
+        }
+    }
     ctx
 }
 
@@ -642,6 +958,88 @@ mod tests {
         assert!(!shrink_json_to_bytes(&mut card, 8));
     }
 
+    /// 回归：上限远小于内容长度时，`len - over - 后缀` 会**下溢 panic**（debug 构建）。
+    #[test]
+    fn shrink_never_underflows_when_over_limit_is_large() {
+        let mut card = json!({"content": "x".repeat(500)});
+        assert!(shrink_json_to_bytes(&mut card, 8));
+        assert!(
+            serde_json::to_vec(&card).unwrap().len() <= 24,
+            "应把内容清掉而不是 panic: {card}"
+        );
+    }
+
+    /// 循环跑过但条件全部不成立时，**不能**谎报「无告警」。
+    #[test]
+    fn repeat_does_not_lie_about_empty_when_conditions_filter_everything() {
+        let mut ctx = RenderContext::new();
+        ctx.set_data("alerts", json!([{"title":"A"},{"title":"B"}]));
+        let card = json!({"body":{"elements":[
+            {"tag":"repeat","source":"alerts","empty_content":"无告警","elements":[
+                {"tag":"if","when":"false","elements":[{"tag":"markdown","content":"never"}]}
+            ]}
+        ]}});
+        assert_eq!(expand_card_json(&card, &ctx)["body"]["elements"], json!([]));
+    }
+
+    /// 循环展开后的副本必须去掉 element_id：模板里的 id 会重复 → 飞书 300301。
+    #[test]
+    fn repeat_strips_template_element_ids_to_avoid_duplicates() {
+        let mut ctx = RenderContext::new();
+        ctx.set_data("alerts", json!([{"title":"A"},{"title":"B"}]));
+
+        let card = json!({"body":{"elements":[
+            {"tag":"markdown","element_id":"header_md","content":"head"},
+            {"tag":"repeat","element_id":"loop_1","source":"alerts","elements":[
+                {"tag":"markdown","element_id":"item_md","content":"${item.title}"},
+                {"tag":"column_set","element_id":"item_cols","columns":[
+                    {"tag":"column","elements":[{"tag":"markdown","element_id":"item_inner","content":"x"}]}
+                ]}
+            ]}
+        ]}});
+
+        let out = expand_card_json(&card, &ctx);
+        assert_eq!(
+            alkh_domain::card_catalog::count_elements(&out),
+            1 + 2 * 4,
+            "两条告警各展开 4 个组件（markdown + 分栏 + 列 + markdown）"
+        );
+        let text = serde_json::to_string(&out).unwrap();
+        assert!(!text.contains("item_md"), "{text}");
+        assert!(!text.contains("item_cols"), "{text}");
+        assert!(!text.contains("item_inner"), "{text}");
+        // 循环体外的 id 保留（只出现一次，是合法的）
+        assert!(text.contains("header_md"), "{text}");
+        // 展开结果本身必须通过结构校验（无重复 id）
+        let report = alkh_domain::card_catalog::validate_card_json(&out);
+        assert!(report.is_valid(), "{:?}", report.errors);
+    }
+
+    /// 多个循环**共享**同一份 200 组件预算：两个「告警列表」叠加也不会超过飞书上限。
+    #[test]
+    fn multiple_loops_share_the_card_element_budget() {
+        let alerts: Vec<Value> = (0..100)
+            .map(|i| json!({"title": format!("A{i}")}))
+            .collect();
+        let mut ctx = RenderContext::new();
+        ctx.set_data("alerts", Value::Array(alerts));
+
+        let loop_node = json!({
+            "tag": "repeat", "source": "alerts",
+            "elements": [{"tag":"markdown","content":"${item.title}"}]
+        });
+        let card = json!({"body":{"elements":[
+            {"tag":"markdown","content":"head"},
+            loop_node.clone(),
+            loop_node,
+        ]}});
+
+        let out = expand_card_json(&card, &ctx);
+        let total = alkh_domain::card_catalog::count_elements(&out);
+        assert!(total <= 200, "展开后 {total} 个组件超过飞书上限");
+        assert_eq!(out["body"]["elements"][0]["content"], "head");
+    }
+
     #[test]
     fn context_exposes_documented_variables() {
         let group = sample_group();
@@ -684,12 +1082,165 @@ mod tests {
         let rendered = render_card_message(&spec, &ctx).unwrap();
         let text = serde_json::to_string(&rendered.to_content()).unwrap();
 
-        // 默认卡片引用的所有变量都在上下文中存在
+        // 默认卡片引用的所有变量都在上下文中存在（`item.*` 在循环展开时才注入）
         for v in detect_variables_json(&crate::defaults::default_card_json()) {
+            if v.starts_with("item.") {
+                continue;
+            }
             assert!(ctx.lookup(&v).is_some(), "缺少变量 {v}");
         }
         assert!(text.contains("HighCPU"));
         assert!(!text.contains("${"), "渲染后仍残留占位符: {text}");
+    }
+
+    /// 结构化「告警列表」：循环体按告警条数展开成真实组件，指令不残留。
+    #[test]
+    fn structured_loop_expands_one_copy_per_alert() {
+        let group = sample_group();
+        let channel = sample_channel();
+        let policy = NotificationPolicy::default_for(channel.id.clone());
+        let ctx = build_context(&group, &channel, &policy, chrono::Utc::now());
+
+        let spec = CardMessageSpec::builder_json(crate::defaults::default_card_json());
+        let RenderedCardMessage::Json(card) = render_card_message(&spec, &ctx).unwrap() else {
+            panic!("默认模板必须是本地卡片 JSON");
+        };
+
+        let text = serde_json::to_string(&card).unwrap();
+        assert!(
+            !text.contains("\"repeat\""),
+            "渲染后不应残留循环指令: {text}"
+        );
+        assert!(!text.contains("\"if\""), "渲染后不应残留条件指令: {text}");
+        // 两条告警都要出现（实例是逐条区分的字段）
+        assert!(text.contains("10.0.0.1:9100"), "{text}");
+        assert!(text.contains("10.0.0.2:9100"), "{text}");
+        // 条件：firing 那条有 description，resolved 那条没有 → 只应出现一次「详情」
+        assert_eq!(text.matches("详情：").count(), 1, "{text}");
+        // 条件 + 取反：只有 firing 的那条显示「开始」，只有 resolved 的显示「恢复」
+        assert_eq!(text.matches("开始：").count(), 1, "{text}");
+        assert_eq!(text.matches("恢复：").count(), 1, "{text}");
+    }
+
+    /// 条件指令：假值渲染成空数组，真值才渲染子组件。
+    #[test]
+    fn if_directive_renders_only_when_truthy() {
+        let card = json!({"body":{"elements":[
+            {"tag":"if","when":"${flag}","elements":[{"tag":"markdown","content":"shown"}]}
+        ]}});
+
+        let yes = RenderContext::new().with("flag", "true");
+        assert_eq!(
+            expand_card_json(&card, &yes)["body"]["elements"],
+            json!([{"tag":"markdown","content":"shown"}])
+        );
+
+        for falsy in ["", "false", "0", "off", "NO"] {
+            let ctx = RenderContext::new().with("flag", falsy);
+            assert_eq!(
+                expand_card_json(&card, &ctx)["body"]["elements"],
+                json!([]),
+                "`{falsy}` 应视为假"
+            );
+        }
+    }
+
+    /// 循环：条数取 min(数据, 策略上限, max_items)，空数据渲染 empty_content。
+    #[test]
+    fn repeat_respects_limits_and_empty_content() {
+        let card = json!({"body":{"elements":[
+            {"tag":"repeat","source":"alerts","max_items":1,"empty_content":"无告警",
+             "elements":[{"tag":"markdown","content":"${item.title}"}]}
+        ]}});
+
+        let mut ctx = RenderContext::new();
+        ctx.set_data("alerts", json!([{"title":"A"},{"title":"B"}]));
+        assert_eq!(
+            expand_card_json(&card, &ctx)["body"]["elements"],
+            json!([{"tag":"markdown","content":"A"}])
+        );
+
+        let mut limited = RenderContext::new();
+        limited.set_data("alerts", json!([{"title":"A"},{"title":"B"}]));
+        limited.set_data("alerts_limit", json!(0));
+        assert_eq!(
+            expand_card_json(&card, &limited)["body"]["elements"],
+            json!([{"tag":"markdown","content":"无告警"}])
+        );
+
+        let empty = RenderContext::new();
+        assert_eq!(
+            expand_card_json(&card, &empty)["body"]["elements"],
+            json!([{"tag":"markdown","content":"无告警"}])
+        );
+    }
+
+    /// 循环体里的 `${item.label:x}` / `${item.labels.x}` 都能取到当前告警的标签。
+    #[test]
+    fn item_scope_exposes_labels_and_annotations() {
+        let card = json!({"body":{"elements":[
+            {"tag":"repeat","source":"alerts","elements":[
+                {"tag":"markdown","content":"${item.index}:${item.label:team}/${item.labels.team}/${item.annotation:runbook}"}
+            ]}
+        ]}});
+        let mut ctx = RenderContext::new();
+        ctx.set_data(
+            "alerts",
+            json!([{"labels":{"team":"sre"},"annotations":{"runbook":"http://rb"}}]),
+        );
+        assert_eq!(
+            expand_card_json(&card, &ctx)["body"]["elements"][0]["content"],
+            "1:sre/sre/http://rb"
+        );
+    }
+
+    /// 展开不能突破飞书 200 组件上限：模板越长，循环次数被压得越少。
+    #[test]
+    fn repeat_respects_card_element_limit() {
+        let alerts: Vec<Value> = (0..100)
+            .map(|i| json!({"title": format!("A{i}")}))
+            .collect();
+        let mut ctx = RenderContext::new();
+        ctx.set_data("alerts", Value::Array(alerts));
+
+        let template: Vec<Value> = (0..5)
+            .map(|i| json!({"tag":"markdown","content":format!("line {i}: ${{item.title}}")}))
+            .collect();
+        let card = json!({"body":{"elements":[
+            {"tag":"repeat","source":"alerts","elements":template}
+        ]}});
+
+        let out = expand_card_json(&card, &ctx);
+        let elements = out["body"]["elements"].as_array().unwrap();
+        assert_eq!(elements.len(), 200, "展开后恰好压到飞书 200 组件上限");
+        assert_eq!(elements[0]["content"], "line 0: A0");
+        assert_eq!(elements[199]["content"], "line 4: A39");
+    }
+
+    /// 组件上限必须按**实际展开量**算：一个 `if` 展开成 5 行时，
+    /// 按模板长度（1）估算会让 100 条告警 × 5 行 = 500 个组件漏过上限。
+    #[test]
+    fn repeat_element_limit_counts_conditional_children() {
+        let alerts: Vec<Value> = (0..100)
+            .map(|i| json!({"title": format!("A{i}")}))
+            .collect();
+        let mut ctx = RenderContext::new();
+        ctx.set_data("alerts", Value::Array(alerts));
+
+        let inner: Vec<Value> = (0..5)
+            .map(|i| json!({"tag":"markdown","content":format!("row {i}: ${{item.title}}")}))
+            .collect();
+        let card = json!({"body":{"elements":[
+            {"tag":"repeat","source":"alerts","elements":[
+                {"tag":"if","when":"true","elements":inner}
+            ]}
+        ]}});
+
+        let out = expand_card_json(&card, &ctx);
+        let elements = out["body"]["elements"].as_array().unwrap();
+        assert_eq!(elements.len(), 200, "应截到 200 而不是 500");
+        assert_eq!(elements[0]["content"], "row 0: A0");
+        assert_eq!(elements[199]["content"], "row 4: A39");
     }
 
     #[test]
