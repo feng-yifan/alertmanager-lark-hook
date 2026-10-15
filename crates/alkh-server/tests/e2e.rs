@@ -42,6 +42,9 @@ struct FakeState {
     /// 用于覆盖发送失败路径（默认 0 = 不注入）。
     fail_send_times: usize,
     fail_send_code: i64,
+    /// 注入错误的 `retryable`。真实网关按 **HTTP 状态**判定（429/5xx 才可重试），
+    /// 业务错误码数值大小与「能否重试」无关，因此必须显式给出。
+    fail_send_retryable: bool,
 }
 
 #[derive(Default)]
@@ -91,9 +94,23 @@ impl FakeLark {
     /// 真实网关会先在内部退避重试，耗尽后才把错误抛给上层；这里直接抛出，
     /// 等价于「内部重试已耗尽」的状态。
     fn inject_send_failure(&self, times: usize, code: i64) {
+        let retryable = code == LarkError::CODE_RATE_LIMITED || code >= 500;
+        self.inject_send_failure_with(times, code, retryable);
+    }
+
+    /// 注入一个**不可重试**的发送失败（模拟权限不足 99991672、参数错误等 HTTP 400）。
+    ///
+    /// 这类错误会立刻把投递置为 `failed`，且后台重试任务只处理 `pending`，
+    /// 因此「重试」只能靠用户手动触发。
+    fn inject_permanent_send_failure(&self, times: usize, code: i64) {
+        self.inject_send_failure_with(times, code, false);
+    }
+
+    fn inject_send_failure_with(&self, times: usize, code: i64, retryable: bool) {
         let mut s = self.snapshot();
         s.fail_send_times = times;
         s.fail_send_code = code;
+        s.fail_send_retryable = retryable;
     }
 
     fn take_injected_send_failure(&self) -> Option<PortError> {
@@ -104,8 +121,7 @@ impl FakeLark {
         s.fail_send_times -= 1;
         let code = s.fail_send_code;
         Some(PortError::Lark(
-            LarkError::new(code, "注入的发送失败（测试用）")
-                .retryable(code == LarkError::CODE_RATE_LIMITED || code >= 500),
+            LarkError::new(code, "注入的发送失败（测试用）").retryable(s.fail_send_retryable),
         ))
     }
 }
@@ -1594,6 +1610,115 @@ async fn successful_retry_repoints_group_active_delivery() {
         body["action"], "update_in_place",
         "重试成功后分组仍被认为没有活跃消息，会重复发卡片（P0-5 回归）: {body}"
     );
+}
+
+/// 回归：手动重试是**当场重发一次**，不是「加入后台队列」。
+///
+/// 飞书返回**不可重试**的错误（如权限不足 99991672 / HTTP 400）时，投递会直接落成
+/// `failed`；此后 `list_retryable` 只挑 `state = pending`，所以这条记录**永远不会**
+/// 被后台任务重试。手动重试接口本身仍返回 200 + `state = failed`，前端若无视返回的
+/// `state` 就会提示「已提交重试，等待后台队列重新发送」——用户点击后什么都不会发生。
+#[tokio::test]
+async fn manual_retry_of_permanent_failure_returns_200_but_stays_failed() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+
+    // 99991672：缺少 cardkit 权限，HTTP 400 ⇒ 不可重试 ⇒ 直接 failed（不进后台队列）。
+    h.fake.inject_permanent_send_failure(usize::MAX, 99991672);
+    let (_, body) = h.push(firing_payload(1)).await;
+    assert_eq!(
+        body["delivery_state"], "failed",
+        "不可重试的错误应直接落 failed，而不是 pending: {body}"
+    );
+    let id = body["delivery_id"]
+        .as_str()
+        .expect("应有投递 ID")
+        .to_string();
+
+    // 第一次手动重试：仍然失败，但 HTTP 是 200（前端因此误报成功）。
+    let (status, retried) = h
+        .post(
+            &format!("/api/v1/deliveries/{id}/retry"),
+            serde_json::json!({}),
+        )
+        .await;
+    assert_eq!(status, 200, "接口返回 200，但不代表消息已发出: {retried}");
+    assert_eq!(retried["state"], "failed", "权限未修复前重试必然再失败");
+    assert!(
+        retried["last_error"]
+            .as_str()
+            .is_some_and(|e| e.contains("99991672")),
+        "失败原因必须回传给前端，否则用户看不到「为什么没收到」: {retried}"
+    );
+
+    // 后台重试集合只看 pending ⇒ 这条 failed 永远不会被自动重试。
+    let pending: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM deliveries WHERE state = 'pending'")
+            .fetch_one(&h.pool)
+            .await
+            .unwrap();
+    assert_eq!(pending, 0, "failed 不在后台重试集合里，不会自动重发");
+
+    // 外部原因修复（补权限）后，手动重试才真正发得出去。
+    h.fake.inject_send_failure(0, 0);
+    let (status, retried) = h
+        .post(
+            &format!("/api/v1/deliveries/{id}/retry"),
+            serde_json::json!({}),
+        )
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        retried["state"], "active",
+        "原因修复后手动重试必须真正发出: {retried}"
+    );
+    assert_eq!(
+        h.fake.snapshot().messages.len(),
+        1,
+        "重试成功后应真的调用了一次飞书发送"
+    );
+}
+
+/// 分组被删除后，投递记录还留在库里（`alert_groups` 删除不级联 `deliveries`），
+/// 此时点「重试」必须拿到 **404** 而不是假成功：没有分组上下文就重建不出投递。
+///
+/// 本机 `data/alkh.db` 里就有这样的悬空投递：`failed` 状态、`alert_group_id`
+/// 在 `alert_groups` 里已经不存在，重试只会报「告警分组不存在，无法重试」。
+#[tokio::test]
+async fn retry_of_delivery_with_deleted_group_is_404() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+    h.fake.inject_permanent_send_failure(usize::MAX, 99991672);
+    let (_, body) = h.push(firing_payload(1)).await;
+    let gid = body["alert_group_id"].as_str().unwrap().to_string();
+    let id = body["delivery_id"].as_str().unwrap().to_string();
+
+    // 直接删分组行：等价于保留清理/手动删除分组后留下的悬空投递。
+    sqlx::query("DELETE FROM alert_groups WHERE id = ?")
+        .bind(&gid)
+        .execute(&h.pool)
+        .await
+        .unwrap();
+
+    let (status, err) = h
+        .post(
+            &format!("/api/v1/deliveries/{id}/retry"),
+            serde_json::json!({}),
+        )
+        .await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::NOT_FOUND,
+        "悬空投递不可重试: {err}"
+    );
+    assert!(
+        err["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("告警分组不存在")),
+        "必须给出可读原因: {err}"
+    );
+    // 一次真实的发送都没发生。
+    assert!(h.fake.snapshot().messages.is_empty());
 }
 
 /// 回归（P0-2）：新消息发送失败时**不允许**撤回旧消息。

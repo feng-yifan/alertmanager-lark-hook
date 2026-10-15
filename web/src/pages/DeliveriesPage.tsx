@@ -21,7 +21,7 @@ import { useAsync, useDebounced } from '../hooks';
 import { DELIVERY_STATE_LABEL, DELIVERY_STATE_VALUES } from '../labels';
 import { useToast } from '../toast';
 import type { Delivery } from '../types';
-import { formatDateTime, shortId, truncate } from '../utils';
+import { formatDateTime, describeRetryResult, shortId, truncate } from '../utils';
 
 const LIMIT = 50;
 
@@ -79,8 +79,10 @@ export default function DeliveriesPage(): JSX.Element {
     setBusyId(delivery.id);
     try {
       if (type === 'retry') {
-        await retryDelivery(delivery.id);
-        toast.success('已提交重试，等待后台队列重新发送');
+        // 后端是**同步重发一次**并返回本次结果，不再有「提交成功」这种中间态：
+        // 失败原因没修复时它仍会落回 failed，必须如实告诉用户，否则会误以为消息在路上。
+        const result = describeRetryResult(await retryDelivery(delivery.id));
+        toast.push(result.message, result.tone);
       } else {
         await revokeDelivery(delivery.id);
         toast.success('已提交撤回；失败时会标记为「撤回失败」');
@@ -267,7 +269,8 @@ export default function DeliveriesPage(): JSX.Element {
         message={
           action?.type === 'retry' ? (
             <>
-              仅失败的投递可以重试：将 <span className="mono">{action?.delivery.id}</span> 重新加入发送队列。
+              仅失败的投递可以重试：会对 <span className="mono">{action?.delivery.id}</span>{' '}
+              立即重发一次并显示本次结果；导致失败的原因未修复时仍会失败。
             </>
           ) : (
             <>

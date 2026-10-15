@@ -223,16 +223,45 @@ impl LarkClient {
 
             return Err(PortError::Lark(LarkError {
                 code,
-                message: if msg.is_empty() {
-                    format!("HTTP {status}")
-                } else {
-                    format!("{msg} (http {status})")
-                },
+                message: with_remediation(
+                    code,
+                    if msg.is_empty() {
+                        format!("HTTP {status}")
+                    } else {
+                        format!("{msg} (http {status})")
+                    },
+                ),
                 log_id,
                 http_status: Some(status),
                 retryable,
             }));
         }
+    }
+}
+
+/// 常见错误码 → 可执行的中文提示。
+///
+/// 飞书的 `msg` 是英文，只说「哪里错了」不说「怎么修」；而这些错误码几乎全是
+/// **开放平台侧的配置问题**，本服务重试多少次都没用。提示写进 `last_error` 后，
+/// 用户在「投递记录」里就能直接看到该做什么，不必再去翻文档。
+fn remediation_hint(code: i64) -> Option<&'static str> {
+    match code {
+        230002 => Some("机器人不在目标群：请把应用机器人拉进该群，并确认群允许机器人发言"),
+        230006 => Some(
+            "应用未开启「机器人」能力（或开启后没有发布版本）：飞书开放平台 →「添加应用能力」→ 机器人，\
+             再「版本管理与发布」→ 创建版本并发布",
+        ),
+        230013 => Some("用户不在应用可用范围内：在「版本管理与发布 → 可用范围」中把该用户/部门加进去"),
+        99991672 => Some("缺少接口权限（scope）：按错误提示的链接申请对应权限，然后创建版本并发布"),
+        200380 => Some("卡片模板不存在或尚未发布"),
+        _ => None,
+    }
+}
+
+fn with_remediation(code: i64, message: String) -> String {
+    match remediation_hint(code) {
+        Some(hint) => format!("{message}；{hint}"),
+        None => message,
     }
 }
 
@@ -484,6 +513,31 @@ mod tests {
     fn token_errors_detected() {
         assert!(is_token_error(99991663));
         assert!(!is_token_error(0));
+    }
+
+    /// 「点重试还是收不到」的头号原因都是控制台配置问题：错误里必须带上怎么修，
+    /// 否则用户只能看到一个英文 `msg`（如 `Bot ability is not activated`）。
+    #[test]
+    fn known_error_codes_carry_actionable_hints() {
+        for code in [230002, 230006, 230013, 99991672, 200380] {
+            let hint = remediation_hint(code).unwrap_or_else(|| panic!("{code} 应有修复提示"));
+            assert!(!hint.is_empty());
+        }
+        // 230006：机器人能力未开启/未发布 —— 提示里必须指明「发布」这一步。
+        let hint = remediation_hint(230006).unwrap();
+        assert!(hint.contains("机器人"), "{hint}");
+        assert!(hint.contains("发布"), "{hint}");
+
+        // 未知错误码不硬编提示，保留飞书原文。
+        assert!(remediation_hint(123456).is_none());
+        assert_eq!(with_remediation(123456, "raw".into()), "raw");
+        assert_eq!(
+            with_remediation(230006, "Bot ability is not activated. (http 400)".into()),
+            format!(
+                "Bot ability is not activated. (http 400)；{}",
+                remediation_hint(230006).unwrap()
+            )
+        );
     }
 
     #[test]

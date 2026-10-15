@@ -145,7 +145,12 @@ POST /api/v1/hooks/alertmanager/{token}
 - **R13 渠道禁用**：`channel.enabled=false` 或 `hook.enabled=false` → 不发送，仅审计。
 - **R14 失败重试**：飞书调用失败按**固定档位阶梯**重试（1s / 5s / 30s / 2m / 10m，共 5 次；不是指数退避，比例并不固定）；
   限频错误（`230020` / HTTP 429）读取 `Retry-After` 优先；`MAX_ATTEMPTS` 为「1 次首发 + 5 次重试」，档位用尽后才置 `Failed`；
-  审计并计入指标，可在管理后台手动重试。
+  审计并计入指标。其中：
+  - **后台任务只重试 `pending`**（`list_retryable`：`state = pending AND attempt < MAX_ATTEMPTS`）。
+    不可重试的错误（HTTP 4xx 且非限频，如权限不足 `99991672`）会**立刻**落成 `failed`，根本不进重试队列。
+  - **手动重试 = 当场重发一次**：`POST /deliveries/:id/retry` 同步调用飞书，返回的 `state` 就是本次结果。
+    原因（权限 / 群 / 模板 / 凭据）未修复时仍会 `failed`，即「点了重试但没收到」，排查看该投递的 `last_error`。
+  - `failed` 是终态，只能手动重试；手动重试会重置 `attempt`、重走完整重试预算。
 
 ## 4.1 飞书 API 约束带来的硬性规则
 

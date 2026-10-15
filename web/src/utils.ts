@@ -1,5 +1,7 @@
 /** Small formatting / coercion helpers shared by the pages. */
 
+import type { Delivery } from './types';
+
 export function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(' ');
 }
@@ -167,6 +169,37 @@ export function sortedEntries(map: Record<string, string> | null | undefined): A
 
 export function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+/**
+ * 「重试投递」的真实结果。
+ *
+ * 手动重试是**当场重发一次**（不是把记录塞回后台队列）：接口返回的那条 `Delivery`
+ * 就是本次尝试的落库结果。必须按 `state` 决定提示，否则「重试又失败了」会被
+ * 无脑报成「已提交重试，等待后台队列重新发送」——用户会一直收不到消息且毫无线索。
+ *
+ * - `active` / `resolved`：真的发出去了；
+ * - `pending`：本次没成功，但错误可重试，已回到后台退避队列；
+ * - `failed`：终态，后台不会再自动重试，必须先修外部原因再手动重试。
+ */
+export function describeRetryResult(delivery: Pick<Delivery, 'state' | 'last_error'>): {
+  tone: 'success' | 'warn' | 'error';
+  message: string;
+} {
+  const reason = delivery.last_error ? `：${truncate(delivery.last_error, 160)}` : '';
+  if (delivery.state === 'active' || delivery.state === 'resolved') {
+    return { tone: 'success', message: '重试成功，消息已发送' };
+  }
+  if (delivery.state === 'pending') {
+    return {
+      tone: 'warn',
+      message: `本次重发未成功${reason}。已回到后台重试队列，会继续退避重试。`,
+    };
+  }
+  return {
+    tone: 'error',
+    message: `重试失败${reason}。这是终态，后台不会再自动重试；原因（权限 / 群 / 模板 / 凭据）修复前重试也不会发出消息。`,
+  };
 }
 
 /**

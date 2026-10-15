@@ -182,11 +182,15 @@ impl DeliveryRepository for SqliteDeliveryRepository {
 
     async fn list_retryable(&self, limit: u32) -> PortResult<Vec<Delivery>> {
         let limit = if limit == 0 { 50 } else { limit };
+        // ⚠️ 上界必须与 `Delivery::MAX_ATTEMPTS`（1 次首发 + 5 次重试）一致。
+        // 以前硬编码 `attempt < 5`：最后一档（10m）永远取不到，重试次数少一次，
+        // 且投递会永久停在 pending —— 既不再重发，也永远不会变成 failed。
         let rows = sqlx::query(
-            "SELECT * FROM deliveries WHERE state = ? AND attempt < 5 \
+            "SELECT * FROM deliveries WHERE state = ? AND attempt < ? \
              ORDER BY updated_at ASC LIMIT ?",
         )
         .bind(enum_to_str(&DeliveryState::Pending))
+        .bind(i64::from(Delivery::MAX_ATTEMPTS))
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await
@@ -398,20 +402,36 @@ mod tests {
         retry.record_attempt(Some("err".into()), base);
         repo.insert(&retry).await.unwrap();
 
-        // pending 但 attempt=5 → 不可重试。
-        let mut exhausted = sample(&group, &channel, base + chrono::Duration::seconds(1));
-        exhausted.attempt = 5;
-        exhausted.updated_at = base + chrono::Duration::seconds(1);
+        // pending + attempt=MAX_ATTEMPTS-1 → **仍可重试**：这一档正是最后一档退避
+        // （10m），跑完才会因 `exhausted()` 落成 failed。若把它排除在重试集合外，
+        // 投递会永远停在 pending（既不再重试、也永远不会变成 failed）。
+        let mut last_tier = sample(&group, &channel, base + chrono::Duration::seconds(1));
+        last_tier.attempt = Delivery::MAX_ATTEMPTS - 1;
+        last_tier.updated_at = base + chrono::Duration::seconds(1);
+        repo.insert(&last_tier).await.unwrap();
+
+        // pending 但 attempt=MAX_ATTEMPTS → 不可重试（正常情况下它已经是 failed）。
+        let mut exhausted = sample(&group, &channel, base + chrono::Duration::seconds(2));
+        exhausted.attempt = Delivery::MAX_ATTEMPTS;
+        exhausted.updated_at = base + chrono::Duration::seconds(2);
         repo.insert(&exhausted).await.unwrap();
 
         // active → 不在重试集合。
-        let mut active = sample(&group, &channel, base + chrono::Duration::seconds(2));
-        active.mark_active(base + chrono::Duration::seconds(2));
+        let mut active = sample(&group, &channel, base + chrono::Duration::seconds(3));
+        active.mark_active(base + chrono::Duration::seconds(3));
         repo.insert(&active).await.unwrap();
 
         let retryable = repo.list_retryable(10).await.unwrap();
-        assert_eq!(retryable.len(), 1);
-        assert_eq!(retryable[0].id, retry.id);
+        assert_eq!(
+            retryable.len(),
+            2,
+            "应包含 attempt=1 与最后一档: {retryable:?}"
+        );
+        assert!(retryable.iter().any(|d| d.id == retry.id));
+        assert!(
+            retryable.iter().any(|d| d.id == last_tier.id),
+            "attempt=MAX_ATTEMPTS-1 必须还能重试"
+        );
         assert!(repo.list_retryable(0).await.unwrap().len() <= 50);
 
         let counts = repo.count_by_state_since(base).await.unwrap();
@@ -425,7 +445,7 @@ mod tests {
             .find(|(s, _)| *s == DeliveryState::Active)
             .unwrap()
             .1;
-        assert_eq!(pending, 2);
+        assert_eq!(pending, 3);
         assert_eq!(active_count, 1);
 
         let after = repo

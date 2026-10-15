@@ -348,8 +348,20 @@
 | GET | `/alert-groups/:id` | 详情（含 deliveries） |
 | DELETE | `/alert-groups/:id` | 删除记录（不影响已发消息） |
 | GET | `/deliveries?alert_group_id=&channel_id=&state=&limit=&offset=` | 投递列表 |
-| POST | `/deliveries/:id/retry` | 重试失败投递 |
+| POST | `/deliveries/:id/retry` | 重试失败投递（**同步重发一次**，返回本次结果，见下） |
 | POST | `/deliveries/:id/revoke` | 手动撤回对应飞书消息 |
+
+> **`POST /deliveries/:id/retry` 的语义**：它不是「入队」，而是**当场同步调用飞书重发一次**，
+> 返回的 `Delivery.state` 就是本次尝试的真实落库结果：
+> - `active` / `resolved` → 消息已发出；
+> - `failed` / `pending` → 这次仍然没发出去，HTTP 仍是 **200**，失败原因在 `last_error`。
+>
+> 后台重试任务只处理 `state = pending`（`attempt < MAX_ATTEMPTS`）；`failed` 是终态，
+> 只能靠手动重试。若导致失败的原因未修复（飞书权限不足、机器人不在群、凭据错误、模板渲染失败等），
+> 每次重试都会立刻再次失败——表现为「点了重试但一直收不到」。排查请看 `last_error`：
+> 已知的飞书配置类错误码（`230002` 机器人不在群、`230006` 未开启机器人能力、`230013` 不在可用范围、
+> `99991672` 缺少权限 scope、`200380` 卡片模板未发布）会在 `last_error` 里附上中文修复提示。
+> 投递所属的告警分组已被删除时，重试会返回 **404**（`alert_group_id` 悬空，无法重建投递上下文）。
 
 ## 7. 概览与审计
 

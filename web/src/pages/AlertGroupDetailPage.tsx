@@ -28,6 +28,7 @@ import { useToast } from '../toast';
 import type { Delivery } from '../types';
 import {
   cx,
+  describeRetryResult,
   formatDateTime,
   prettyJson,
   safeHttpUrl,
@@ -76,8 +77,9 @@ export default function AlertGroupDetailPage(): JSX.Element {
     setBusyId(delivery.id);
     try {
       if (type === 'retry') {
-        await retryDelivery(delivery.id);
-        toast.success('已提交重试，由后台队列重新发送');
+        // 后端同步重发一次并返回真实结果；失败原因未修复时仍是 failed，必须如实提示。
+        const result = describeRetryResult(await retryDelivery(delivery.id));
+        toast.push(result.message, result.tone);
       } else {
         await revokeDelivery(delivery.id);
         toast.success('已提交撤回；若超出撤回时限或权限不足，会标记为「撤回失败」');
@@ -362,7 +364,7 @@ export default function AlertGroupDetailPage(): JSX.Element {
         onConfirm={() => void runAction()}
         message={
           action?.type === 'retry' ? (
-            <>将投递 <span className="mono">{action?.delivery.id}</span> 重新入队发送。</>
+            <>将投递 <span className="mono">{action?.delivery.id}</span> 立即重发一次，并显示本次结果。</>
           ) : (
             <>
               将撤回投递 <span className="mono">{action?.delivery.id}</span> 对应的飞书消息。
