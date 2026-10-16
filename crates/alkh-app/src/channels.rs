@@ -593,8 +593,9 @@ impl ChannelService {
             self.deps.groups.upsert(&group).await?;
         }
 
+        let tz = self.deps.settings.get().await?.display_timezone();
         let mut ctx =
-            crate::render::build_context(&mock_source, &channel, &policy, self.deps.now());
+            crate::render::build_context(&mock_source, &channel, &policy, self.deps.now(), tz);
         mock.apply(&mut ctx);
 
         let sender = NotificationSender::new(self.deps.clone());

@@ -179,6 +179,9 @@ kubectl apply -f deploy/kubernetes.yaml
 > ⚠️ **`ALKH_MASTER_KEY` 一定要备份。** 一旦丢失，数据库里加密保存的飞书 `app_secret` 就**无法解密**，只能重新在管理后台填一遍。如果你选择不设置（让它自动生成到 `/data/master.key`），那这个文件就在数据卷里，备份数据卷即可。
 >
 > 数据保留天数（告警分组 / 投递 / 审计）不在环境变量里，在管理后台「设置」页调整，默认 30 / 30 / 14 天。
+> **卡片内时间的展示时区**同样在「设置」页调整（IANA 名，默认 `UTC`；例如填 `Asia/Shanghai`，
+> 卡片时间即按东八区渲染 `2026-10-16 11:04:19 +08:00`）。它只影响卡片里的展示字符串——
+> AlertManager 推来的时间戳与库内存储仍是 RFC 3339 UTC。
 
 ### 2.4 数据与备份
 
@@ -366,13 +369,18 @@ receivers:
 | `${severity_color}` | 严重级别对应的卡片颜色（**不随恢复变化**，需要状态色请用 `${status_color}`） | 本项目 | `red` / `orange` / `blue` / `grey` |
 | `${channel_name}` | 消息渠道名（群名或用户名） | 本项目 | `运维告警群` |
 | `${channel_id}` | 渠道的接收者 ID | 本项目 | `oc_a0553eda...` |
-| `${first_seen_at}` | 该分组**首次**出现的时间 | 本项目 | `2026-10-13 00:00:00 UTC` |
-| `${last_seen_at}` | 该分组**最后**一次更新的时间 | 本项目 | `2026-10-13 00:15:00 UTC` |
-| `${resolved_at}` | 恢复时间（未恢复为空） | 本项目 | `2026-10-13 00:20:00 UTC` |
-| `${now}` | 当前时间 | 本项目 | `2026-10-13 00:21:03 UTC` |
+| `${first_seen_at}` | 该分组**首次**出现的时间 | 本项目 | `2026-10-13 08:00:00 +08:00` |
+| `${last_seen_at}` | 该分组**最后**一次更新的时间 | 本项目 | `2026-10-13 08:15:00 +08:00` |
+| `${resolved_at}` | 恢复时间（未恢复为空） | 本项目 | `2026-10-13 08:20:00 +08:00` |
+| `${now}` | 当前时间 | 本项目 | `2026-10-13 08:21:03 +08:00` |
 | `${group_labels}` | `groupLabels` 的 JSON 字符串 | **AM 标准**（形态不同） | `{"alertname":"HighCPU"}` |
 | `${common_labels}` | `commonLabels` 的 JSON 字符串 | **AM 标准**（形态不同） | `{"severity":"critical"}` |
 | `${common_annotations}` | `commonAnnotations` 的 JSON 字符串 | **AM 标准**（形态不同） | `{"summary":"CPU 过高"}` |
+
+> **时间变量的时区**：`${first_seen_at}` / `${last_seen_at}` / `${resolved_at}` / `${now}` /
+> `${starts_at}` / `${ends_at}` / `${item.starts_at}` / `${item.ends_at}` 统一按管理后台
+> 「设置 → 时间展示时区」（IANA 名，默认 `UTC`）渲染；上表示例按 `Asia/Shanghai` 给。
+> AlertManager 侧的时间戳始终是 RFC 3339 UTC，本项目只在展示字符串上换算。
 
 **代表告警**（⚠️ 取的是**一条**代表告警，不是整组：优先第一条未解决的，否则第一条）
 
@@ -385,7 +393,7 @@ receivers:
 | `${description}` | 告警详情（取自注解 `description`） | **社区约定** | `持续 5 分钟` |
 | `${fingerprint}` | 告警指纹 | **AM 标准**（每条告警） | `a1b2c3d4e5f6a7b8` |
 | `${alert_status}` | 代表告警自身的状态 | **AM 标准**（每条告警） | `firing` / `resolved` |
-| `${starts_at}` | 代表告警的开始时间 | **AM 标准**（每条告警） | `2026-10-13 00:00:00 UTC` |
+| `${starts_at}` | 代表告警的开始时间 | **AM 标准**（每条告警） | `2026-10-13 08:00:00 +08:00` |
 | `${ends_at}` | 代表告警的结束时间（未结束为空） | **AM 标准**（每条告警） | — |
 | `${generator_url}` | 告警来源链接（通常是 Prometheus 图表） | **AM 标准**（每条告警） | `http://prom:9090/graph?...` |
 
@@ -419,7 +427,7 @@ receivers:
 | `${item.severity_color}` | 当前告警严重级别对应颜色 | `red` / `orange` / `blue` / `grey` |
 | `${item.summary}` | 当前告警的概要注解 | `CPU 使用率 92%` |
 | `${item.description}` | 当前告警的详情注解 | `持续 5 分钟` |
-| `${item.starts_at}` | 当前告警的开始时间 | `2026-10-13 00:00:00 UTC` |
+| `${item.starts_at}` | 当前告警的开始时间 | `2026-10-13 08:00:00 +08:00` |
 | `${item.ends_at}` | 当前告警的结束时间（未结束为空） | — |
 | `${item.generator_url}` | 当前告警的来源链接 | `http://prom:9090/graph?...` |
 

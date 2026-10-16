@@ -90,7 +90,9 @@ impl NotificationSender {
         let ctx = match context {
             Some(c) => c,
             None => {
-                owned_context = build_context(group, channel, policy, self.deps.now());
+                // 卡片内时间的展示时区取自应用设置（默认 UTC）。
+                let tz = self.deps.settings.get().await?.display_timezone();
+                owned_context = build_context(group, channel, policy, self.deps.now(), tz);
                 &owned_context
             }
         };

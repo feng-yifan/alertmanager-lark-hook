@@ -50,6 +50,52 @@ impl RetentionPolicy {
     }
 }
 
+/// 卡片内时间变量的默认展示时区（IANA 名）。
+pub const DEFAULT_TIMEZONE: &str = "UTC";
+
+/// 卡片内时间变量的展示格式：`2026-10-13 08:00:00 +08:00`。
+pub const TIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S %:z";
+
+fn default_timezone() -> String {
+    DEFAULT_TIMEZONE.to_string()
+}
+
+/// 时间展示时区（IANA 名，如 `Asia/Shanghai`）。
+///
+/// AlertManager 推来的时间戳（`startsAt` / `endsAt`）一律是 UTC —— 这是数据层口径，
+/// 本服务不改写它；但卡片里给人看的字符串按本类型换算，取值来自应用设置
+/// （[`AppSettings::timezone`]，默认 [`DEFAULT_TIMEZONE`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayTimeZone(chrono_tz::Tz);
+
+impl Default for DisplayTimeZone {
+    fn default() -> Self {
+        Self(chrono_tz::UTC)
+    }
+}
+
+impl DisplayTimeZone {
+    /// 解析 IANA 时区名；非法名返回 `None`（`UTC` 是合法值）。
+    pub fn parse(name: &str) -> Option<Self> {
+        name.trim().parse::<chrono_tz::Tz>().ok().map(Self)
+    }
+
+    /// 规范化后的 IANA 名（如 `Asia/Shanghai`）。
+    pub fn name(self) -> &'static str {
+        self.0.name()
+    }
+
+    /// 把 UTC 时间戳渲染成该时区下的展示字符串（见 [`TIME_FORMAT`]）。
+    pub fn format(self, t: Timestamp) -> String {
+        t.with_timezone(&self.0).format(TIME_FORMAT).to_string()
+    }
+
+    /// 同 [`Self::format`]，`None` 渲染为空串。
+    pub fn format_opt(self, t: Option<Timestamp>) -> String {
+        t.map(|t| self.format(t)).unwrap_or_default()
+    }
+}
+
 /// 应用设置（单例聚合根）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -59,6 +105,9 @@ pub struct AppSettings {
     pub lark_base_url: String,
     /// 生成 hook 绝对地址用的对外基址。
     pub public_base_url: Option<String>,
+    /// 卡片内时间的展示时区（IANA 名，默认 `UTC`）；只影响展示字符串。
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
     pub retention: RetentionPolicy,
     pub updated_at: Timestamp,
 }
@@ -70,6 +119,7 @@ impl Default for AppSettings {
             lark_app_secret_enc: None,
             lark_base_url: "https://open.feishu.cn".into(),
             public_base_url: None,
+            timezone: default_timezone(),
             retention: RetentionPolicy::default(),
             updated_at: crate::now(),
         }
@@ -101,7 +151,18 @@ impl AppSettings {
                 ));
             }
         }
+        if DisplayTimeZone::parse(&self.timezone).is_none() {
+            return Err(DomainError::validation(format!(
+                "timezone 非法：需 IANA 时区名（如 UTC / Asia/Shanghai），收到 `{}`",
+                self.timezone
+            )));
+        }
         self.retention.validate()
+    }
+
+    /// 生效的展示时区（`timezone` 经 [`Self::validate`] 校验过；异常值退化为 UTC）。
+    pub fn display_timezone(&self) -> DisplayTimeZone {
+        DisplayTimeZone::parse(&self.timezone).unwrap_or_default()
     }
 
     pub fn is_configured(&self) -> bool {
@@ -129,6 +190,7 @@ impl AppSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone as _;
 
     #[test]
     fn base_url_must_be_absolute() {
@@ -169,5 +231,37 @@ mod tests {
             s.hook_url("alkh_x"),
             "https://alkh.example.com/api/v1/hooks/alertmanager/alkh_x"
         );
+    }
+
+    #[test]
+    fn timezone_must_be_iana_name() {
+        assert_eq!(AppSettings::default().timezone, DEFAULT_TIMEZONE);
+        let bad = AppSettings {
+            timezone: "Asia/Shangai".into(),
+            ..Default::default()
+        };
+        assert!(bad.validate().is_err());
+        let good = AppSettings {
+            timezone: "Asia/Shanghai".into(),
+            ..Default::default()
+        };
+        assert!(good.validate().is_ok());
+    }
+
+    #[test]
+    fn display_timezone_renders_configured_zone() {
+        let t = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 16, 3, 4, 19)
+            .unwrap();
+        assert_eq!(
+            DisplayTimeZone::default().format(t),
+            "2026-10-16 03:04:19 +00:00"
+        );
+
+        let cst = DisplayTimeZone::parse("Asia/Shanghai").unwrap();
+        assert_eq!(cst.name(), "Asia/Shanghai");
+        assert_eq!(cst.format(t), "2026-10-16 11:04:19 +08:00");
+        assert_eq!(cst.format_opt(None), "");
+        assert_eq!(cst.format_opt(Some(t)), "2026-10-16 11:04:19 +08:00");
     }
 }

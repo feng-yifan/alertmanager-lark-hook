@@ -3,6 +3,7 @@
 use alkh_domain::alert::{AlertGroup, AlertInstance};
 use alkh_domain::channel::Channel;
 use alkh_domain::policy::NotificationPolicy;
+use alkh_domain::settings::DisplayTimeZone;
 use alkh_domain::template::{
     render_str, CardMessageSpec, CardSource, RenderContext, CARD_JSON_MAX_BYTES,
 };
@@ -268,22 +269,16 @@ pub fn is_firing_group(group: &AlertGroup) -> bool {
     group.alerts.iter().any(|a| a.is_firing())
 }
 
-const TIME_FMT: &str = "%Y-%m-%d %H:%M:%S UTC";
-
-fn fmt_time(t: Timestamp) -> String {
-    t.format(TIME_FMT).to_string()
-}
-
-fn fmt_opt_time(t: Option<Timestamp>) -> String {
-    t.map(fmt_time).unwrap_or_default()
-}
-
 /// 构造渲染上下文（`docs/business-rules.md` §5）。
+///
+/// `tz` 为卡片内时间的展示时区（来自应用设置，默认 UTC）；
+/// AlertManager 数据层的时间戳始终是 UTC，这里只做展示换算。
 pub fn build_context(
     group: &AlertGroup,
     channel: &Channel,
     policy: &NotificationPolicy,
     now: Timestamp,
+    tz: DisplayTimeZone,
 ) -> RenderContext {
     let mut ctx = RenderContext::new();
     let is_firing = is_firing_group(group);
@@ -301,10 +296,10 @@ pub fn build_context(
     ctx.set("firing_count", group.firing_count.to_string());
     ctx.set("resolved_count", group.resolved_count.to_string());
     ctx.set("truncated_alerts", group.truncated_alerts.to_string());
-    ctx.set("first_seen_at", fmt_time(group.first_seen_at));
-    ctx.set("last_seen_at", fmt_time(group.last_seen_at));
-    ctx.set("resolved_at", fmt_opt_time(group.resolved_at));
-    ctx.set("now", fmt_time(now));
+    ctx.set("first_seen_at", tz.format(group.first_seen_at));
+    ctx.set("last_seen_at", tz.format(group.last_seen_at));
+    ctx.set("resolved_at", tz.format_opt(group.resolved_at));
+    ctx.set("now", tz.format(now));
     ctx.set("status", group.status.as_str());
     ctx.set("status_text", if is_firing { "未解决" } else { "已恢复" });
     ctx.set("is_firing", if is_firing { "true" } else { "false" });
@@ -361,8 +356,8 @@ pub fn build_context(
             "alert_status",
             if a.is_firing() { "firing" } else { "resolved" },
         );
-        ctx.set("starts_at", fmt_opt_time(a.starts_at));
-        ctx.set("ends_at", fmt_opt_time(a.ends_at));
+        ctx.set("starts_at", tz.format_opt(a.starts_at));
+        ctx.set("ends_at", tz.format_opt(a.ends_at));
         ctx.set("generator_url", a.generator_url.clone().unwrap_or_default());
     } else {
         for k in [
@@ -425,7 +420,7 @@ pub fn build_context(
     ctx.set("alerts_summary", alerts_summary(group));
     ctx.set(
         "alerts_list",
-        alerts_list(group, policy.max_alerts_per_message as usize),
+        alerts_list(group, policy.max_alerts_per_message as usize, tz),
     );
     ctx.set(
         "alerts_table",
@@ -445,7 +440,7 @@ pub fn build_context(
     // 大数组放在 `data` 通道里，不会出现在预览的变量面板中。
     ctx.set_data(
         "alerts",
-        Value::Array(group.alerts.iter().map(alert_view).collect()),
+        Value::Array(group.alerts.iter().map(|a| alert_view(a, tz)).collect()),
     );
     ctx.set_data("alerts_limit", json!(policy.max_alerts_per_message));
     ctx.set_data("truncated_alerts", json!(group.truncated_alerts));
@@ -454,7 +449,7 @@ pub fn build_context(
 }
 
 /// 把一条告警转成循环体可用的展示视图（时间/颜色等都已算好）。
-fn alert_view(alert: &AlertInstance) -> Value {
+fn alert_view(alert: &AlertInstance, tz: DisplayTimeZone) -> Value {
     let mut view = serde_json::to_value(alert).unwrap_or_else(|_| json!({}));
     let severity = alert.labels.get("severity").map(String::as_str);
     if let Some(obj) = view.as_object_mut() {
@@ -475,8 +470,8 @@ fn alert_view(alert: &AlertInstance) -> Value {
             json!(annotation(alert, "description")),
         );
         // 与 `${starts_at}` / `${ends_at}` 同格式（RFC3339 对用户不友好）。
-        obj.insert("starts_at".into(), json!(fmt_opt_time(alert.starts_at)));
-        obj.insert("ends_at".into(), json!(fmt_opt_time(alert.ends_at)));
+        obj.insert("starts_at".into(), json!(tz.format_opt(alert.starts_at)));
+        obj.insert("ends_at".into(), json!(tz.format_opt(alert.ends_at)));
         obj.insert(
             "generator_url".into(),
             json!(alert.generator_url.clone().unwrap_or_default()),
@@ -784,7 +779,7 @@ fn alert_title(a: &AlertInstance) -> String {
     }
 }
 
-fn alerts_list(group: &AlertGroup, max: usize) -> String {
+fn alerts_list(group: &AlertGroup, max: usize, tz: DisplayTimeZone) -> String {
     if group.alerts.is_empty() {
         return "无告警".into();
     }
@@ -812,9 +807,9 @@ fn alerts_list(group: &AlertGroup, max: usize) -> String {
             lines.push(format!("　‣ 详情：{}", truncate(s, 200)));
         }
         if a.is_firing() {
-            lines.push(format!("　‣ 开始：{}", fmt_opt_time(a.starts_at)));
+            lines.push(format!("　‣ 开始：{}", tz.format_opt(a.starts_at)));
         } else {
-            lines.push(format!("　‣ 恢复：{}", fmt_opt_time(a.ends_at)));
+            lines.push(format!("　‣ 恢复：{}", tz.format_opt(a.ends_at)));
         }
     }
     let hidden = group.alerts.len().saturating_sub(max);
@@ -1041,11 +1036,52 @@ mod tests {
     }
 
     #[test]
+    fn time_variables_follow_the_display_timezone() {
+        let group = sample_group();
+        let channel = sample_channel();
+        let policy = NotificationPolicy::default_for(channel.id.clone());
+        let now = chrono::Utc::now();
+
+        let utc = build_context(&group, &channel, &policy, now, DisplayTimeZone::default());
+        let cst = build_context(
+            &group,
+            &channel,
+            &policy,
+            now,
+            DisplayTimeZone::parse("Asia/Shanghai").unwrap(),
+        );
+
+        let utc_first = utc.lookup("first_seen_at").unwrap();
+        let cst_first = cst.lookup("first_seen_at").unwrap();
+        assert!(utc_first.ends_with("+00:00"), "{utc_first}");
+        assert!(cst_first.ends_with("+08:00"), "{cst_first}");
+        assert_ne!(utc_first, cst_first);
+        assert!(cst.lookup("now").unwrap().ends_with("+08:00"));
+        // `data` 通道里的逐条时间同样按展示时区预格式化（循环 `${item.starts_at}`）。
+        let item_start = cst
+            .data("alerts")
+            .and_then(|v| v.get(0))
+            .and_then(|v| v.get("starts_at"))
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert!(
+            item_start.is_empty() || item_start.ends_with("+08:00"),
+            "{item_start}"
+        );
+    }
+
+    #[test]
     fn context_exposes_documented_variables() {
         let group = sample_group();
         let channel = sample_channel();
         let policy = NotificationPolicy::default_for(channel.id.clone());
-        let ctx = build_context(&group, &channel, &policy, chrono::Utc::now());
+        let ctx = build_context(
+            &group,
+            &channel,
+            &policy,
+            chrono::Utc::now(),
+            DisplayTimeZone::default(),
+        );
 
         assert_eq!(ctx.lookup("status_text"), Some("未解决"));
         assert_eq!(ctx.lookup("status"), Some("firing"));
@@ -1067,7 +1103,13 @@ mod tests {
         let group = sample_group();
         let channel = sample_channel();
         let policy = NotificationPolicy::default_for(channel.id.clone());
-        let ctx = build_context(&group, &channel, &policy, chrono::Utc::now());
+        let ctx = build_context(
+            &group,
+            &channel,
+            &policy,
+            chrono::Utc::now(),
+            DisplayTimeZone::default(),
+        );
         assert_eq!(ctx.lookup("instance"), Some("10.0.0.1:9100"));
     }
 
@@ -1076,7 +1118,13 @@ mod tests {
         let group = sample_group();
         let channel = sample_channel();
         let policy = NotificationPolicy::default_for(channel.id.clone());
-        let ctx = build_context(&group, &channel, &policy, chrono::Utc::now());
+        let ctx = build_context(
+            &group,
+            &channel,
+            &policy,
+            chrono::Utc::now(),
+            DisplayTimeZone::default(),
+        );
 
         let spec = CardMessageSpec::builder_json(crate::defaults::default_card_json());
         let rendered = render_card_message(&spec, &ctx).unwrap();
@@ -1099,7 +1147,13 @@ mod tests {
         let group = sample_group();
         let channel = sample_channel();
         let policy = NotificationPolicy::default_for(channel.id.clone());
-        let ctx = build_context(&group, &channel, &policy, chrono::Utc::now());
+        let ctx = build_context(
+            &group,
+            &channel,
+            &policy,
+            chrono::Utc::now(),
+            DisplayTimeZone::default(),
+        );
 
         let spec = CardMessageSpec::builder_json(crate::defaults::default_card_json());
         let RenderedCardMessage::Json(card) = render_card_message(&spec, &ctx).unwrap() else {
@@ -1294,7 +1348,13 @@ mod tests {
         let channel = sample_channel();
         let mut policy = NotificationPolicy::default_for(channel.id.clone());
         policy.max_alerts_per_message = 1;
-        let ctx = build_context(&group, &channel, &policy, chrono::Utc::now());
+        let ctx = build_context(
+            &group,
+            &channel,
+            &policy,
+            chrono::Utc::now(),
+            DisplayTimeZone::default(),
+        );
         let list = ctx.lookup("alerts_list").unwrap();
         assert!(list.contains("另有 **1** 条告警未在此展示"), "{list}");
     }
@@ -1321,7 +1381,13 @@ mod tests {
             ChannelSource::Manual,
         );
         let policy = NotificationPolicy::default_for(channel.id.clone());
-        let ctx = build_context(&group, &channel, &policy, chrono::Utc::now());
+        let ctx = build_context(
+            &group,
+            &channel,
+            &policy,
+            chrono::Utc::now(),
+            DisplayTimeZone::default(),
+        );
         assert_eq!(ctx.lookup("status_text"), Some("已恢复"));
         assert_eq!(ctx.lookup("is_firing"), Some("false"));
         // 严重级别本身不变（仍是 warning），但状态色必须变绿
@@ -1342,7 +1408,13 @@ mod tests {
             ChannelSource::Manual,
         );
         let policy = NotificationPolicy::default_for(channel.id.clone());
-        let ctx = build_context(&group, &channel, &policy, chrono::Utc::now());
+        let ctx = build_context(
+            &group,
+            &channel,
+            &policy,
+            chrono::Utc::now(),
+            DisplayTimeZone::default(),
+        );
 
         let spec = CardMessageSpec::builder_json(crate::defaults::default_card_json());
         let rendered = render_card_message(&spec, &ctx).unwrap();

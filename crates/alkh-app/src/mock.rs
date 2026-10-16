@@ -146,7 +146,13 @@ pub async fn mock_baseline(
     let policy = deps.policies.get(&channel.id).await?.unwrap_or_else(|| {
         alkh_domain::policy::NotificationPolicy::default_for(channel.id.clone())
     });
-    let ctx = crate::render::build_context(&group, channel, &policy, now);
+    let ctx = crate::render::build_context(
+        &group,
+        channel,
+        &policy,
+        now,
+        deps.settings.get().await?.display_timezone(),
+    );
 
     let (source, label) = match &mock.alert_group_id {
         Some(_) => (MockSource::AlertGroup, Some(group_label(&group))),

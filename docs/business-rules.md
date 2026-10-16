@@ -194,7 +194,10 @@ POST /api/v1/hooks/alertmanager/{token}
   见 §5.3。
 - 循环内变量：`item.*`（`item.title` / `item.alertname` / `item.summary` …）只在
   `repeat` 指令的子组件里有值；标签/注解用 `${item.label:x}` / `${item.labels.x}` 取。
-- 时间变量统一为 `%Y-%m-%d %H:%M:%S UTC` 字符串。
+- 时间变量统一为 `%Y-%m-%d %H:%M:%S %:z` 字符串（例 `2026-10-13 08:00:00 +08:00`）：
+  时区取后台「设置 → 时间展示时区」（IANA 名，默认 `UTC`）。AlertManager 推来的时间戳
+  本身是 RFC 3339 UTC，本服务只在**展示字符串**上换算——库内存储与 HTTP API 不改写，
+  历史卡片也不重渲染（下次更新时才用新时区）。
 - 严重级别映射：`critical|fatal|emergency`→`red`/`严重`，`warning|warn|major`→`orange`/`警告`，
   `info|informational|notice`→`blue`/`提示`，其余→`grey`/`未知`。
 - 状态颜色映射：`status_color` 在分组仍有未解决告警时等于 `severity_color`；**全部恢复后固定为

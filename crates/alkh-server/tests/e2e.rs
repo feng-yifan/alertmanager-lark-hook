@@ -723,6 +723,56 @@ async fn meta_and_settings_expose_no_secrets() {
 }
 
 #[tokio::test]
+async fn settings_timezone_round_trips_and_rejects_invalid_names() {
+    let h = start().await;
+
+    // 未设置过 → 默认 UTC（保持既有卡片时间行为）
+    let (status, settings) = h.get("/api/v1/settings").await;
+    assert_eq!(status, 200);
+    assert_eq!(settings["timezone"], "UTC");
+
+    // 设为东八区
+    let resp = h
+        .http
+        .put(h.url("/api/v1/settings"))
+        .bearer_auth(&h.token)
+        .json(&json!({
+            "lark_base_url": "https://open.feishu.cn",
+            "timezone": "Asia/Shanghai",
+            "retention": {"alert_group_days": 30, "delivery_days": 30, "audit_days": 14}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["timezone"], "Asia/Shanghai");
+
+    let (status, settings) = h.get("/api/v1/settings").await;
+    assert_eq!(status, 200);
+    assert_eq!(settings["timezone"], "Asia/Shanghai");
+
+    // 非法 IANA 名被拒（不落库）
+    let resp = h
+        .http
+        .put(h.url("/api/v1/settings"))
+        .bearer_auth(&h.token)
+        .json(&json!({
+            "lark_base_url": "https://open.feishu.cn",
+            "timezone": "Asia/Shangai",
+            "retention": {"alert_group_days": 30, "delivery_days": 30, "audit_days": 14}
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    let (status, settings) = h.get("/api/v1/settings").await;
+    assert_eq!(status, 200);
+    assert_eq!(settings["timezone"], "Asia/Shanghai");
+}
+
+#[tokio::test]
 async fn channel_sync_imports_feishu_chats_and_exposes_hook_urls() {
     let h = start().await;
 

@@ -276,6 +276,7 @@ pub struct AppSettings {
     pub lark_app_secret_enc: Option<EncryptedSecret>, // AES-256-GCM
     pub lark_base_url: String,
     pub public_base_url: Option<String>,
+    pub timezone: String,             // 卡片内时间的展示时区（IANA 名，默认 UTC）
     pub retention: RetentionPolicy,   // alert_group_days / delivery_days / audit_days
     pub updated_at: Timestamp,
 }

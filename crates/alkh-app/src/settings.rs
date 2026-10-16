@@ -2,7 +2,7 @@
 
 use alkh_domain::audit::{action as audit_action, AuditActor, AuditLog};
 use alkh_domain::ports::LarkCredential;
-use alkh_domain::settings::{AppSettings, RetentionPolicy};
+use alkh_domain::settings::{AppSettings, DisplayTimeZone, RetentionPolicy};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -16,6 +16,8 @@ pub struct SettingsView {
     pub app_secret_set: bool,
     pub lark_base_url: String,
     pub public_base_url: Option<String>,
+    /// 卡片内时间的展示时区（IANA 名，默认 `UTC`）。
+    pub timezone: String,
     pub retention: RetentionPolicy,
     pub updated_at: alkh_domain::Timestamp,
     pub configured: bool,
@@ -31,6 +33,9 @@ pub struct SettingsInput {
     pub lark_base_url: String,
     #[serde(default)]
     pub public_base_url: Option<String>,
+    /// 卡片内时间的展示时区（IANA 名）；`null`（缺省）表示不变。
+    #[serde(default)]
+    pub timezone: Option<String>,
     pub retention: RetentionPolicy,
 }
 
@@ -63,6 +68,7 @@ impl SettingsService {
             app_secret_set: s.lark_app_secret_enc.is_some(),
             lark_base_url: s.lark_base_url.clone(),
             public_base_url: s.public_base_url.clone(),
+            timezone: s.timezone.clone(),
             retention: s.retention,
             updated_at: s.updated_at,
             configured: s.is_configured(),
@@ -92,6 +98,16 @@ impl SettingsService {
 
         s.lark_base_url = input.lark_base_url.trim().to_string();
         s.public_base_url = normalize(input.public_base_url);
+        if let Some(name) = input.timezone.as_deref() {
+            // 存规范化后的 IANA 名：非法值在这里就拒绝，不让它落库。
+            let tz = DisplayTimeZone::parse(name).ok_or_else(|| {
+                AppError::validation(format!(
+                    "timezone 非法：需 IANA 时区名（如 UTC / Asia/Shanghai），收到 `{}`",
+                    name.trim()
+                ))
+            })?;
+            s.timezone = tz.name().to_string();
+        }
         s.retention = input.retention;
         s.updated_at = self.deps.now();
         s.validate()?;
@@ -109,6 +125,7 @@ impl SettingsService {
             "app_secret_changed": input.app_secret.is_some(),
             "lark_base_url": s.lark_base_url,
             "public_base_url": s.public_base_url,
+            "timezone": s.timezone,
             "configured_before": old_configured,
             "configured_after": s.is_configured(),
         }));

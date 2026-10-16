@@ -116,6 +116,8 @@ export interface AppSettings {
   app_secret_set: boolean;
   lark_base_url: string;
   public_base_url: string | null;
+  /** IANA name; card timestamps are rendered in this zone (default `UTC`). */
+  timezone: string;
   retention: RetentionPolicy;
 }
 
@@ -125,6 +127,8 @@ export interface AppSettingsUpdate {
   app_secret?: string | null;
   lark_base_url?: string;
   public_base_url?: string | null;
+  /** `null` = unchanged. */
+  timezone?: string | null;
   retention?: RetentionPolicy;
 }
 

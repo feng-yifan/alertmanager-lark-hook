@@ -5,7 +5,8 @@
 - 管理接口鉴权：`Cookie: alkh_session=<token>`（HttpOnly）或 `Authorization: Bearer <token>`
 - 错误信封：`{"error":{"code":"<machine_code>","message":"<human>"}}`
 - 分页信封：`{"items":[...],"total":123,"limit":50,"offset":0}`
-- 时间：RFC 3339 UTC（`2026-10-13T00:00:00Z`）
+- 时间：RFC 3339 UTC（`2026-10-13T00:00:00Z`）；API 一律 UTC，只有**卡片内的展示字符串**按
+  「设置 → 时间展示时区」换算（见 §2）
 - ID：UUID v4 字符串
 
 > **本文档描述的是真实线格式。** 端到端测试 `crates/alkh-server/tests/e2e.rs` 会断言这些形状，
@@ -104,7 +105,7 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/settings` | 返回设置（`app_secret` 永不回显，仅 `app_secret_set: bool`） |
-| PUT | `/settings` | 更新；`app_secret` 为 write-only，传 `null` 表示不变，传 `""` 表示清除 |
+| PUT | `/settings` | 更新；`app_secret` 为 write-only，传 `null` 表示不变，传 `""` 表示清除；`timezone` 传 IANA 名（如 `Asia/Shanghai`），非法名返回 400，传 `null` 表示不变 |
 | POST | `/settings/check` | 用当前凭据换取 `tenant_access_token` 并拉一次群列表，返回 `{"ok":true,"chat_count":12}` 或 `{"ok":false,"error_code":...,"message":"..."}`（**没有 `bot_name`**） |
 
 ```json
@@ -114,6 +115,7 @@
   "app_secret_set": true,
   "lark_base_url": "https://open.feishu.cn",
   "public_base_url": "https://alkh.example.com",
+  "timezone": "Asia/Shanghai",
   "retention": {"alert_group_days":30,"delivery_days":30,"audit_days":14}
 }
 ```

@@ -37,6 +37,7 @@ interface SettingsForm {
   lark_app_id: string;
   lark_base_url: string;
   public_base_url: string;
+  timezone: string;
   alert_group_days: string;
   delivery_days: string;
   audit_days: string;
@@ -46,10 +47,53 @@ const EMPTY_FORM: SettingsForm = {
   lark_app_id: '',
   lark_base_url: 'https://open.feishu.cn',
   public_base_url: '',
+  timezone: 'UTC',
   alert_group_days: '30',
   delivery_days: '30',
   audit_days: '14',
 };
+
+const FALLBACK_TIMEZONES = [
+  'UTC',
+  'Asia/Shanghai',
+  'Asia/Hong_Kong',
+  'Asia/Tokyo',
+  'Asia/Singapore',
+  'Europe/London',
+  'Europe/Berlin',
+  'America/New_York',
+  'America/Los_Angeles',
+];
+
+/** IANA 时区候选：优先取浏览器内置全量列表，取不到时退化为常用值。 */
+function timezoneOptions(): string[] {
+  const intl = Intl as typeof Intl & { supportedValuesOf?: (key: string) => string[] };
+  try {
+    const list = intl.supportedValuesOf?.('timeZone');
+    if (list && list.length > 0) return list.includes('UTC') ? list : ['UTC', ...list];
+  } catch {
+    /* 忽略：退化为常用值 */
+  }
+  return FALLBACK_TIMEZONES;
+}
+
+/** 预览某时区的当前时间；无效时区名返回提示文案（服务端同样会拒绝）。 */
+function timezonePreview(name: string): string {
+  try {
+    return new Intl.DateTimeFormat('zh-CN', {
+      timeZone: name.trim(),
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).format(new Date());
+  } catch {
+    return '无效的时区名';
+  }
+}
 
 type SecretMode = 'unchanged' | 'set' | 'clear';
 
@@ -76,6 +120,7 @@ export default function SettingsPage(): JSX.Element {
       lark_app_id: settings.lark_app_id ?? '',
       lark_base_url: settings.lark_base_url ?? 'https://open.feishu.cn',
       public_base_url: settings.public_base_url ?? '',
+      timezone: settings.timezone ?? 'UTC',
       alert_group_days: String(settings.retention.alert_group_days),
       delivery_days: String(settings.retention.delivery_days),
       audit_days: String(settings.retention.audit_days),
@@ -99,6 +144,11 @@ export default function SettingsPage(): JSX.Element {
         return;
       }
     }
+    const timezone = form.timezone.trim();
+    if (!timezone) {
+      toast.error('时间展示时区不能为空（默认 UTC）');
+      return;
+    }
     setSaving(true);
     try {
       await updateSettings({
@@ -106,6 +156,7 @@ export default function SettingsPage(): JSX.Element {
         app_secret: secretMode === 'unchanged' ? null : secretMode === 'clear' ? '' : secretValue,
         lark_base_url: form.lark_base_url.trim(),
         public_base_url: form.public_base_url.trim() || null,
+        timezone,
         retention: { alert_group_days: alertDays, delivery_days: deliveryDays, audit_days: auditDays },
       });
       toast.success('设置已保存');
@@ -210,7 +261,7 @@ export default function SettingsPage(): JSX.Element {
     <>
       <PageHeader
         title="设置"
-        subtitle="飞书应用凭据、数据保留、管理员密码与审计日志"
+        subtitle="飞书应用凭据、时间展示时区、数据保留、管理员密码与审计日志"
         actions={
           <Button onClick={reload} loading={refreshing}>
             刷新设置
@@ -314,6 +365,27 @@ export default function SettingsPage(): JSX.Element {
                   placeholder="https://alkh.example.com"
                   onChange={(event) => setForm({ ...form, public_base_url: event.target.value })}
                 />
+              </Field>
+            </div>
+
+            <div className="form-grid">
+              <Field
+                label="时间展示时区"
+                hint="卡片内所有时间变量（首次出现 / 最后更新 / 开始 / 恢复、循环里的 ${item.starts_at}）按该时区渲染；IANA 名，默认 UTC。例：填 Asia/Shanghai → 2026-10-16 11:04:19 +08:00。"
+              >
+                <Input
+                  className="mono"
+                  list="timezone-options"
+                  value={form.timezone}
+                  placeholder="UTC"
+                  onChange={(event) => setForm({ ...form, timezone: event.target.value })}
+                />
+                <datalist id="timezone-options">
+                  {timezoneOptions().map((zone) => (
+                    <option key={zone} value={zone} />
+                  ))}
+                </datalist>
+                <div className="hint">该时区当前时间：{timezonePreview(form.timezone)}</div>
               </Field>
             </div>
 

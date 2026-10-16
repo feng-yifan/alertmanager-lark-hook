@@ -344,7 +344,13 @@ impl TemplateService {
             self.deps.now(),
         )
         .await?;
-        let mut ctx = crate::render::build_context(&group, &channel, &policy, self.deps.now());
+        let mut ctx = crate::render::build_context(
+            &group,
+            &channel,
+            &policy,
+            self.deps.now(),
+            self.deps.settings.get().await?.display_timezone(),
+        );
         mock.apply(&mut ctx);
 
         let variables = serde_json::to_value(ctx.vars())?;
