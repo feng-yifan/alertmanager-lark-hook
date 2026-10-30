@@ -119,6 +119,23 @@ POST /api/v1/hooks/alertmanager/{token}
   - 关闭的渠道（R13）与静默期（R5）不发消息，但仍然会对齐 Pin 状态。
   - 该能力不需要额外权限：发送卡片用的 `im:message:send_as_bot` 与
     `im:message`、`im:message.pins:write_only` 三者任一即可调用 Pin / Unpin。
+- **R4c 忽略并 unpin（卡片按钮）**：告警卡片上的「忽略并 unpin」按钮被点击后：
+  1. 立即撤销该分组当前**全部** Pin（不分 unresolved / resolved）；
+  2. 置 `AlertGroup.pin_ignored = true`，此后本次告警事件周期内的**重复通知 / 恢复通知 /
+     更新 / 静默 / 策略抑制 / 后台重试**都不再 Pin（等价于把该分组本轮 Pin 策略覆盖为空）；
+  3. 该告警彻底恢复后**重开**（Resolved→Firing，视为新告警）时自动清除标志，新告警重新按策略 Pin。
+  - **只影响 Pin，不影响消息投递**（`decide()` 决策与发送逻辑不变）。
+  - 实现要点：`pin_ignored` 是分组级持久标志，由唯一的 Pin 对账函数 `reconcile_pins` 在计算
+    期望 Pin 集合时统一压住（置位 → 期望集合为空 → 差额逻辑撤销全部并停止新增）。回调写标志
+    与投递流水线共用同一把按 `(hook_id, group_key)` 的 keyed lock，避免并发丢标志。
+  - 入口：飞书「卡片回传交互」事件 `card.action.trigger` → `POST /api/v1/lark/card-callback`
+    （公开端点，用应用设置里的 **Verification Token** 校验来源）。按钮通过内置默认卡 +
+    可拖拽积木「忽略并 unpin 按钮」（callback value = `{"alkh_action":"ignore_unpin","alert_group_id":"${alert_group_id}"}`）
+    提供；飞书要求 3s 内 ack，故标志同步落库、取消 Pin 异步执行。
+  - 管理端反向出口：`POST / DELETE /api/v1/alert-groups/{id}/pin-ignore` 可手动忽略 / 恢复 Pin。
+  - 安全：采用 Verification Token 校验，**不启用**飞书 Encrypt Key 加密策略（启用后事件体加密，
+    需 AES 解密，本服务不引入该复杂度）。
+  - 审计动作 `pin.ignored`，指标 `alkh_pins_ignored_total`。
 - **R5 静默期**：`mute_until` 未过期时抑制所有发送类动作，但事件分类与分组状态照常推进
   （即解除静默后不会补发历史消息，只反映最新状态）。
 - **R6 聚合窗口**：`aggregation_window_secs > 0` 时，同一 `(hook, group_key)` 在窗口内的事件

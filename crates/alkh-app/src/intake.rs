@@ -95,6 +95,15 @@ impl IntakeOutcome {
     }
 }
 
+/// 「忽略并 unpin」/「恢复 Pin」的结果。
+#[derive(Debug, Clone, Serialize)]
+pub struct IgnoreOutcome {
+    /// 分组是否存在（不存在时为 false，回调据此提示）。
+    pub found: bool,
+    /// 本次撤销的 Pin 条数。
+    pub unpinned: usize,
+}
+
 /// 按 key 串行化的异步锁。
 ///
 /// 用途：`(hook, group_key)` 上的「读取分组 → 推进状态 → 落库 → 发消息」必须整体
@@ -434,6 +443,119 @@ impl IntakeService {
         });
     }
 
+    /// 「忽略并 unpin」（R4c）：撤销该分组当前所有 Pin，并置 `pin_ignored`，使本次告警
+    /// 事件周期内不再 Pin；重开（Resolved→Firing）时由 `process_event` 自动清除标志。
+    ///
+    /// 与投递流水线共用同一 `KeyedLocks`（按 `hook_id|group_key`），避免与 `process_event`
+    /// 的读改写并发导致标志丢失。飞书侧取消 Pin 失败不影响标志落库，下一次事件会对账重试。
+    pub async fn ignore_and_unpin(
+        &self,
+        group_id: &AlertGroupId,
+        operator: Option<String>,
+    ) -> AppResult<IgnoreOutcome> {
+        let now = self.deps.now();
+        // 先读一次拿到锁的 key（hook+group_key）；拿到锁后再重读，保证读到最新快照。
+        let Some(probe) = self.deps.groups.get(group_id).await? else {
+            return Ok(IgnoreOutcome {
+                found: false,
+                unpinned: 0,
+            });
+        };
+        let lock_key = format!("{}|{}", probe.hook_id, probe.group_key);
+        let _guard = self.group_locks.lock(&lock_key).await;
+
+        let mut group = match self.deps.groups.get(group_id).await? {
+            Some(g) => g,
+            None => {
+                return Ok(IgnoreOutcome {
+                    found: false,
+                    unpinned: 0,
+                })
+            }
+        };
+        group.ignore_pin();
+        let policy = self
+            .deps
+            .policies
+            .get(&group.channel_id)
+            .await?
+            .unwrap_or_else(|| NotificationPolicy::default_for(group.channel_id.clone()));
+        let before = group.pinned_messages.len();
+        // 复用唯一的撤销路径：flag 置位 ⇒ desired 为空 ⇒ 撤销全部 Pin（不再新增）。
+        self.sender.reconcile_pins(&mut group, &policy, None).await;
+        let unpinned = before.saturating_sub(group.pinned_messages.len());
+        self.deps.groups.upsert(&group).await?;
+        self.deps
+            .metrics
+            .incr(alkh_domain::ports::Counter::PinsIgnored, 1);
+
+        let log = AuditLog::new(
+            AuditActor::system("card_callback"),
+            audit_action::PIN_IGNORED,
+            Outcome::Ok,
+            now,
+        )
+        .target(group.channel_id.to_string())
+        .detail(json!({
+            "alert_group_id": group.id.to_string(),
+            "operator": operator,
+            "unpinned": unpinned,
+        }));
+        self.write_audit(log).await;
+
+        Ok(IgnoreOutcome {
+            found: true,
+            unpinned,
+        })
+    }
+
+    /// 管理端「恢复 Pin」（反向出口）：清除 `pin_ignored` 并按策略重新对账，把当前活跃卡片
+    /// 重新 Pin 上（若分组仍在 firing 且策略开启）。
+    pub async fn unignore_pin(&self, group_id: &AlertGroupId) -> AppResult<IgnoreOutcome> {
+        let Some(probe) = self.deps.groups.get(group_id).await? else {
+            return Ok(IgnoreOutcome {
+                found: false,
+                unpinned: 0,
+            });
+        };
+        let lock_key = format!("{}|{}", probe.hook_id, probe.group_key);
+        let _guard = self.group_locks.lock(&lock_key).await;
+        let mut group = match self.deps.groups.get(group_id).await? {
+            Some(g) => g,
+            None => {
+                return Ok(IgnoreOutcome {
+                    found: false,
+                    unpinned: 0,
+                })
+            }
+        };
+        group.clear_pin_ignored();
+        let policy = self
+            .deps
+            .policies
+            .get(&group.channel_id)
+            .await?
+            .unwrap_or_else(|| NotificationPolicy::default_for(group.channel_id.clone()));
+        // 恢复 Pin 时要重新 Pin 当前活跃卡片：取活跃投递的 message_id。
+        let current_msg = match group.active_delivery_id.clone() {
+            Some(did) => self
+                .deps
+                .deliveries
+                .get(&did)
+                .await?
+                .and_then(|d| d.lark_message_id),
+            None => None,
+        };
+        self.sender
+            .reconcile_pins(&mut group, &policy, current_msg.as_deref())
+            .await;
+        self.deps.groups.upsert(&group).await?;
+        Ok(IgnoreOutcome {
+            found: true,
+            unpinned: 0,
+        })
+    }
+
     async fn process_event(
         &self,
         hook: &Hook,
@@ -486,6 +608,17 @@ impl IntakeService {
                 g
             }
         };
+
+        // R4c：「忽略并 unpin」只在本次告警事件周期内有效；分组彻底恢复后重开
+        // （事件为 NewFiring 且历史状态为 Resolved）时清除标志，新告警重新按策略 Pin。
+        if kind == EventKind::NewFiring
+            && existing
+                .as_ref()
+                .map(|g| g.status == alkh_domain::alert::GroupStatus::Resolved)
+                .unwrap_or(false)
+        {
+            group.clear_pin_ignored();
+        }
 
         if policy.is_muted(now) {
             // R4：静默期不发消息，但 Pin 状态仍要与开关/分组状态对齐

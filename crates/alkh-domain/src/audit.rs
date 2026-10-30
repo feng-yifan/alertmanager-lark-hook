@@ -172,4 +172,5 @@ pub mod action {
     pub const AUTH_LOGOUT: &str = "auth.logout";
     pub const AUTH_PASSWORD_CHANGED: &str = "auth.password_changed";
     pub const TEST_MESSAGE: &str = "message.test";
+    pub const PIN_IGNORED: &str = "pin.ignored";
 }

@@ -14,6 +14,8 @@ pub struct SettingsView {
     pub lark_app_id: Option<String>,
     /// 只暴露"是否已配置"，永不回显明文。
     pub app_secret_set: bool,
+    /// 卡片回调 Verification Token 是否已配置（永不回显明文）。
+    pub verification_token_set: bool,
     pub lark_base_url: String,
     pub public_base_url: Option<String>,
     /// 卡片内时间的展示时区（IANA 名，默认 `UTC`）。
@@ -30,6 +32,10 @@ pub struct SettingsInput {
     /// `null`（缺省）表示不变；空串表示清除；非空表示设置。
     #[serde(default)]
     pub app_secret: Option<String>,
+    /// 卡片回调（`card.action.trigger`）验签用的 Verification Token；
+    /// `null`（缺省）不变，空串清除，非空设置。
+    #[serde(default)]
+    pub verification_token: Option<String>,
     pub lark_base_url: String,
     #[serde(default)]
     pub public_base_url: Option<String>,
@@ -66,6 +72,7 @@ impl SettingsService {
         SettingsView {
             lark_app_id: s.lark_app_id.clone(),
             app_secret_set: s.lark_app_secret_enc.is_some(),
+            verification_token_set: s.lark_verification_token_enc.is_some(),
             lark_base_url: s.lark_base_url.clone(),
             public_base_url: s.public_base_url.clone(),
             timezone: s.timezone.clone(),
@@ -96,6 +103,20 @@ impl SettingsService {
             }
         }
 
+        match input.verification_token.as_deref() {
+            None => {}
+            Some("") => s.lark_verification_token_enc = None,
+            Some(token) => {
+                let token = token.trim();
+                if token.len() < 8 {
+                    return Err(AppError::validation(
+                        "Verification Token 看起来不合法（过短）",
+                    ));
+                }
+                s.lark_verification_token_enc = Some(self.deps.cipher.encrypt(token)?);
+            }
+        }
+
         s.lark_base_url = input.lark_base_url.trim().to_string();
         s.public_base_url = normalize(input.public_base_url);
         if let Some(name) = input.timezone.as_deref() {
@@ -123,6 +144,7 @@ impl SettingsService {
         .detail(json!({
             "app_id": s.lark_app_id,
             "app_secret_changed": input.app_secret.is_some(),
+            "verification_token_changed": input.verification_token.is_some(),
             "lark_base_url": s.lark_base_url,
             "public_base_url": s.public_base_url,
             "timezone": s.timezone,
@@ -185,6 +207,15 @@ impl SettingsService {
             app_secret: secret,
             base_url: s.lark_base_url,
         }))
+    }
+
+    /// 供卡片回调端点使用：返回解密后的 Verification Token（未配置返回 None）。
+    pub async fn callback_verification_token(&self) -> AppResult<Option<String>> {
+        let s = self.deps.settings.get().await?;
+        match s.lark_verification_token_enc {
+            Some(enc) => Ok(Some(self.deps.cipher.decrypt(&enc)?)),
+            None => Ok(None),
+        }
     }
 }
 

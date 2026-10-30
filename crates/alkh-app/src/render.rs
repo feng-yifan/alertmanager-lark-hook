@@ -285,6 +285,7 @@ pub fn build_context(
 
     // --- 分组级 ---
     ctx.set("group_key", group.group_key.clone());
+    ctx.set("alert_group_id", group.id.to_string());
     ctx.set("receiver", group.receiver.clone());
     ctx.set(
         "external_url",

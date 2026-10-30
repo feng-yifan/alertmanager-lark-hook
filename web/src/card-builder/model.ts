@@ -289,6 +289,13 @@ export function readProp(node: Record<string, unknown>, prop: CardPropMeta): unk
     );
     return isPlainObject(open) ? (open.default_url as string | undefined) ?? '' : '';
   }
+  if (prop.accessor === 'button_callback') {
+    const behaviors = node.behaviors;
+    if (!Array.isArray(behaviors)) return '';
+    const cb = behaviors.find((item) => isPlainObject(item) && item.type === 'callback');
+    if (!isPlainObject(cb) || cb.value === undefined) return '';
+    return typeof cb.value === 'string' ? cb.value : JSON.stringify(cb.value);
+  }
   return getPath(node, prop.path);
 }
 
@@ -311,6 +318,25 @@ export function writeProp(
         ios_url: '',
         android_url: '',
       });
+    }
+    const next = { ...node };
+    if (behaviors.length > 0) next.behaviors = behaviors;
+    else delete next.behaviors;
+    return next;
+  }
+  if (prop.accessor === 'button_callback') {
+    const raw = typeof value === 'string' ? value.trim() : '';
+    const behaviors = (Array.isArray(node.behaviors) ? node.behaviors : []).filter(
+      (item) => !(isPlainObject(item) && item.type === 'callback'),
+    );
+    if (raw) {
+      let parsed: unknown = raw;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        parsed = raw;
+      }
+      behaviors.push({ type: 'callback', value: parsed });
     }
     const next = { ...node };
     if (behaviors.length > 0) next.behaviors = behaviors;

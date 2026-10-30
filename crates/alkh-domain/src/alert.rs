@@ -444,6 +444,11 @@ pub struct AlertGroup {
     /// 全部恢复时按策略批量取消（或保留）未解决 Pin，并可按「已解决告警 Pin」再 Pin
     /// 当前恢复卡片。为空表示该分组没有任何 Pin（R4）。
     pub pinned_messages: Vec<PinnedMessage>,
+    /// 「忽略并 unpin」标志（R4c，默认关闭）：为 `true` 时 `reconcile_pins` 把期望 Pin
+    /// 集合视为空，从而撤销该分组所有 Pin，并在本次告警事件周期内不再 Pin。分组彻底恢复
+    /// 后重开（Resolved→Firing）时清除该标志，新告警重新按策略 Pin。
+    #[serde(default)]
+    pub pin_ignored: bool,
 }
 
 impl AlertGroup {
@@ -478,6 +483,7 @@ impl AlertGroup {
             resolved_at: None,
             active_delivery_id: None,
             pinned_messages: Vec::new(),
+            pin_ignored: false,
         };
         g.normalize_status(now);
         g
@@ -532,6 +538,16 @@ impl AlertGroup {
 
     pub fn mark_notified(&mut self, at: Timestamp) {
         self.last_notified_at = Some(at);
+    }
+
+    /// 「忽略并 unpin」（R4c）：置位后 `reconcile_pins` 会撤销全部 Pin 并停止后续 Pin。
+    pub fn ignore_pin(&mut self) {
+        self.pin_ignored = true;
+    }
+
+    /// 清除「忽略」标志（重开新告警 / 管理端「恢复 Pin」时调用）。
+    pub fn clear_pin_ignored(&mut self) {
+        self.pin_ignored = false;
     }
 
     /// 恢复通知的语义校验：`status == Resolved` ⇔ 无 firing 告警。

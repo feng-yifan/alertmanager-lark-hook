@@ -359,6 +359,7 @@ receivers:
 | `${is_firing}` | 是否还有未解决告警 | 本项目 | `true` / `false` |
 | `${receiver}` | AlertManager 的 receiver 名 | **AM 标准**（`.Receiver`） | `lark-ops` |
 | `${group_key}` | 告警分组键 | AM webhook 字段 `groupKey` | `{}:{alertname="HighCPU"}` |
+| `${alert_group_id}` | 告警分组 ID（卡片回调用，如「忽略并 unpin」按钮） | 本项目 | `0f3c…` |
 | `${external_url}` | AlertManager 外部地址 | **AM 标准**（`.ExternalURL`） | `http://am:9093` |
 | `${alert_count}` | 本次告警总条数 | 本项目 | `3` |
 | `${firing_count}` | 未解决条数 | 本项目 | `2` |

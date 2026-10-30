@@ -479,53 +479,59 @@ impl NotificationSender {
 
         // 计算期望的 Pin 集合。
         let mut desired: Vec<PinnedMessage> = Vec::new();
-        match group.status {
-            GroupStatus::Firing => {
-                if policy.pin_unresolved {
-                    // 保留已累积的未解决 Pin（不互相顶掉）。
-                    desired.extend(
-                        group
-                            .pinned_messages
-                            .iter()
-                            .filter(|p| p.kind == PinKind::Unresolved)
-                            .cloned(),
-                    );
-                    if let Some(id) = current_message_id {
-                        if !desired.iter().any(|p| p.message_id == id) {
-                            desired.push(PinnedMessage::new(id, PinKind::Unresolved));
-                        }
-                    }
-                }
-                // 关闭时 desired 为空 ⇒ 取消所有未解决 Pin。
-            }
-            GroupStatus::Resolved => {
-                if policy.pin_unresolved && !policy.unpin_on_resolve {
-                    // 全部恢复后不自动取消：保留未解决期间的 Pin。
-                    desired.extend(
-                        group
-                            .pinned_messages
-                            .iter()
-                            .filter(|p| p.kind == PinKind::Unresolved)
-                            .cloned(),
-                    );
-                }
-                if policy.pin_resolved {
-                    match current_message_id {
-                        // 当前恢复卡片：同一张（原地更新）则改角色，否则追加。
-                        Some(id) => match desired.iter_mut().find(|p| p.message_id == id) {
-                            Some(existing) => existing.kind = PinKind::Resolved,
-                            None => desired.push(PinnedMessage::new(id, PinKind::Resolved)),
-                        },
-                        // 没有当前消息：保留已有的已解决 Pin。
-                        None => {
-                            let keep: Vec<PinnedMessage> = group
+        // R4c：「忽略并 unpin」置位后，期望 Pin 集合恒为空 —— 下方的统一差额逻辑会
+        // 撤销该分组所有 Pin；且任何新事件（重复/恢复/更新/静默/抑制/重试）都不会再 Pin。
+        if !group.pin_ignored {
+            match group.status {
+                GroupStatus::Firing => {
+                    if policy.pin_unresolved {
+                        // 保留已累积的未解决 Pin（不互相顶掉）。
+                        desired.extend(
+                            group
                                 .pinned_messages
                                 .iter()
-                                .filter(|p| p.kind == PinKind::Resolved)
-                                .filter(|p| !desired.iter().any(|d| d.message_id == p.message_id))
-                                .cloned()
-                                .collect();
-                            desired.extend(keep);
+                                .filter(|p| p.kind == PinKind::Unresolved)
+                                .cloned(),
+                        );
+                        if let Some(id) = current_message_id {
+                            if !desired.iter().any(|p| p.message_id == id) {
+                                desired.push(PinnedMessage::new(id, PinKind::Unresolved));
+                            }
+                        }
+                    }
+                    // 关闭时 desired 为空 ⇒ 取消所有未解决 Pin。
+                }
+                GroupStatus::Resolved => {
+                    if policy.pin_unresolved && !policy.unpin_on_resolve {
+                        // 全部恢复后不自动取消：保留未解决期间的 Pin。
+                        desired.extend(
+                            group
+                                .pinned_messages
+                                .iter()
+                                .filter(|p| p.kind == PinKind::Unresolved)
+                                .cloned(),
+                        );
+                    }
+                    if policy.pin_resolved {
+                        match current_message_id {
+                            // 当前恢复卡片：同一张（原地更新）则改角色，否则追加。
+                            Some(id) => match desired.iter_mut().find(|p| p.message_id == id) {
+                                Some(existing) => existing.kind = PinKind::Resolved,
+                                None => desired.push(PinnedMessage::new(id, PinKind::Resolved)),
+                            },
+                            // 没有当前消息：保留已有的已解决 Pin。
+                            None => {
+                                let keep: Vec<PinnedMessage> = group
+                                    .pinned_messages
+                                    .iter()
+                                    .filter(|p| p.kind == PinKind::Resolved)
+                                    .filter(|p| {
+                                        !desired.iter().any(|d| d.message_id == p.message_id)
+                                    })
+                                    .cloned()
+                                    .collect();
+                                desired.extend(keep);
+                            }
                         }
                     }
                 }

@@ -116,6 +116,8 @@ pub enum Counter {
     MessagePinned,
     /// 成功取消 Pin（R4）。
     MessageUnpinned,
+    /// 成功执行「忽略并 unpin」（R4c）。
+    PinsIgnored,
 }
 
 /// 指标出口；由 `alkh-server` 实现为 Prometheus 文本指标。

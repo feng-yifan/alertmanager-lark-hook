@@ -104,8 +104,8 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/settings` | 返回设置（`app_secret` 永不回显，仅 `app_secret_set: bool`） |
-| PUT | `/settings` | 更新；`app_secret` 为 write-only，传 `null` 表示不变，传 `""` 表示清除；`timezone` 传 IANA 名（如 `Asia/Shanghai`），非法名返回 400，传 `null` 表示不变 |
+| GET | `/settings` | 返回设置（`app_secret` / `verification_token` 永不回显，仅 `*_set: bool`） |
+| PUT | `/settings` | 更新；`app_secret`、`verification_token` 为 write-only，传 `null` 表示不变，传 `""` 表示清除；`timezone` 传 IANA 名（如 `Asia/Shanghai`），非法名返回 400，传 `null` 表示不变 |
 | POST | `/settings/check` | 用当前凭据换取 `tenant_access_token` 并拉一次群列表，返回 `{"ok":true,"chat_count":12}` 或 `{"ok":false,"error_code":...,"message":"..."}`（**没有 `bot_name`**） |
 
 ```json
@@ -113,6 +113,7 @@
 {
   "lark_app_id": "cli_aa4645f83578dbef",
   "app_secret_set": true,
+  "verification_token_set": true,
   "lark_base_url": "https://open.feishu.cn",
   "public_base_url": "https://alkh.example.com",
   "timezone": "Asia/Shanghai",
@@ -214,6 +215,18 @@
 | `deferred` | 因聚合窗口或最小发送间隔被延后，稍后由后台任务冲刷 |
 
 > 指标与告警排查请以 `delivery_state` 为准，而不是 `action`——`action` 只是决策意图。
+
+### 4.1 卡片回传交互端点（忽略并 unpin）
+
+飞书「事件与回调」把卡片回传交互事件 `card.action.trigger` 打到本端点。**公开端点**（不在管理会话下），用应用设置里的 **Verification Token** 校验来源；仅处理按钮 `value.alkh_action == "ignore_unpin"`（R4c）。
+
+| 方法 | 路径 | 鉴权 | 说明 |
+|---|---|---|---|
+| POST | `/lark/card-callback` | Verification Token | 飞书卡片回调：`url_verification` 回 `challenge`；`card.action.trigger` 按按钮 value 执行「忽略并 unpin」 |
+
+- 部署前置：飞书后台「事件与回调 → 回调配置」请求地址配到本端点，并订阅 `card.action.trigger`；**不启用 Encrypt Key 加密策略**（启用后事件体加密，需 AES 解密）。
+- 成功返回 `{"toast":{"type":"success","content":"已忽略，后续不再 Pin"}}`；未配置 Verification Token 时返回 `503`，token 不匹配返回 `403`。
+- 执行是异步的（飞书要求 3s 内 ack）：标志同步落库，取消 Pin 在后台进行。
 
 ## 5. 卡片模板
 
@@ -351,6 +364,8 @@
 | GET | `/alert-groups?status=&channel_id=&severity=&q=&limit=&offset=` | 分组列表（按 `last_seen_at` 倒序） |
 | GET | `/alert-groups/:id` | 详情（含 deliveries） |
 | DELETE | `/alert-groups/:id` | 删除记录（不影响已发消息） |
+| POST | `/alert-groups/:id/pin-ignore` | 手动「忽略并 unpin」（等价于点卡片按钮，R4c） |
+| DELETE | `/alert-groups/:id/pin-ignore` | 「恢复 Pin」：清除忽略标志并按策略重新对账 |
 | GET | `/deliveries?alert_group_id=&channel_id=&state=&limit=&offset=` | 投递列表 |
 | POST | `/deliveries/:id/retry` | 重试失败投递（**同步重发一次**，返回本次结果，见下） |
 | POST | `/deliveries/:id/revoke` | 手动撤回对应飞书消息 |

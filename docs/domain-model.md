@@ -185,6 +185,7 @@ pub struct AlertGroup {
     pub resolved_at: Option<Timestamp>,
     pub active_delivery_id: Option<DeliveryId>, // 当前"活"的消息，供更新/撤回定位
     pub pinned_messages: Vec<PinnedMessage>,     // 当前被 Pin 的卡片消息（可多条，R4）
+    pub pin_ignored: bool,                       // 忽略并 unpin 标志（R4c，默认 false）
 }
 
 pub enum PinKind { Unresolved, Resolved }       // 未解决期间 / 恢复后 的 Pin
@@ -225,6 +226,8 @@ pub struct AlertInstance {
 - `pinned_messages` 中每条记录对应一条被 Pin 的卡片消息，`kind` 区分 `unresolved`（未解决期间）
   与 `resolved`（恢复后）。未解决 Pin 仅在 `pin_unresolved` 开启时产生；分组恢复时按
   `unpin_on_resolve` 批量取消（或保留）未解决 Pin，并按 `pin_resolved` 追加恢复卡片 Pin（R4）。
+- `pin_ignored == true`（R4c）时，Pin 对账函数把期望 Pin 集合视为空：撤销该分组全部 Pin，
+  并在本次告警事件周期内不再 Pin；分组彻底恢复后重开（Resolved→Firing）时清除该标志。
 
 ### 6.2 事件分类（领域服务 `EventClassifier`）
 
@@ -284,6 +287,8 @@ Pending ──send ok──▶ Active ──新消息取代──▶ Superseded
 pub struct AppSettings {
     pub lark_app_id: Option<String>,
     pub lark_app_secret_enc: Option<EncryptedSecret>, // AES-256-GCM
+    /// 卡片回调（`card.action.trigger`）验签用的 Verification Token（加密存储，永不回显）。
+    pub lark_verification_token_enc: Option<EncryptedSecret>,
     pub lark_base_url: String,
     pub public_base_url: Option<String>,
     pub timezone: String,             // 卡片内时间的展示时区（IANA 名，默认 UTC）

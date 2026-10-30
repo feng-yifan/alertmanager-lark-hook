@@ -2756,3 +2756,220 @@ async fn manual_test_message_and_retry_endpoints() {
     assert_eq!(status, 200, "{revoked}");
     assert_eq!(h.fake.snapshot().recalled.len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// R4c：卡片「忽略并 unpin」
+// ---------------------------------------------------------------------------
+
+async fn put_settings_with_token(h: &Harness, token: &str) {
+    let resp = h
+        .http
+        .put(h.url("/api/v1/settings"))
+        .bearer_auth(&h.token)
+        .json(&json!({
+            "lark_app_id": "cli_test",
+            "app_secret": "test-secret-123",
+            "verification_token": token,
+            "lark_base_url": "https://open.feishu.cn",
+            "retention": {"alert_group_days": 30, "delivery_days": 30, "audit_days": 14}
+        }))
+        .send()
+        .await
+        .expect("保存设置失败");
+    assert_eq!(
+        resp.status(),
+        200,
+        "保存设置（含 Verification Token）应成功"
+    );
+}
+
+async fn post_card_callback(h: &Harness, body: Value) -> (reqwest::StatusCode, Value) {
+    let resp = h
+        .http
+        .post(h.url("/api/v1/lark/card-callback"))
+        .json(&body)
+        .send()
+        .await
+        .expect("卡片回调请求失败");
+    let status = resp.status();
+    let parsed = resp.json().await.unwrap_or(Value::Null);
+    (status, parsed)
+}
+
+fn ignore_event(token: &str, group_id: &str) -> Value {
+    json!({
+        "schema": "2.0",
+        "header": {"event_id": "evt_1", "event_type": "card.action.trigger", "token": token, "app_id": "cli_test"},
+        "event": {
+            "operator": {"open_id": "ou_tester"},
+            "action": {"tag": "button", "value": {"alkh_action": "ignore_unpin", "alert_group_id": group_id}},
+            "context": {"open_message_id": "om_x", "open_chat_id": "oc_test_group"}
+        }
+    })
+}
+
+async fn wait_pin_ignored(h: &Harness, gid: &str, secs: u64) -> Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        let (_, g) = h.get(&format!("/api/v1/alert-groups/{gid}")).await;
+        if g["pin_ignored"].as_bool() == Some(true) {
+            return g;
+        }
+        if std::time::Instant::now() >= deadline {
+            return g;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// R4c 主闭环：点按钮 → 撤销 Pin + 之后重复/恢复都不 Pin → 重开恢复 Pin。
+#[tokio::test]
+async fn card_ignore_unpin_suppresses_future_pins_and_reopen_restores() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+    let channel_id = h.channel_id.clone().unwrap();
+    put_policy_flag(&h, &channel_id, "pin_unresolved", json!(true)).await;
+    put_settings_with_token(&h, "test-verify-token-123").await;
+
+    // firing → 发送并 Pin 当前卡片。
+    let (_, body) = h.push(firing_payload(1)).await;
+    assert_eq!(body["action"], "send_new");
+    let gid = body["alert_group_id"].as_str().unwrap().to_string();
+    let first_pin = {
+        let s = h.fake.snapshot();
+        assert_eq!(s.pinned.len(), 1, "开启 pin_unresolved 后 firing 应 Pin");
+        s.pinned[0].clone()
+    };
+
+    // 点「忽略并 unpin」：异步执行，等标志落库且 Pin 被撤销。
+    let (status, resp) = post_card_callback(&h, ignore_event("test-verify-token-123", &gid)).await;
+    assert_eq!(status, 200, "{resp}");
+    let g = wait_pin_ignored(&h, &gid, 3).await;
+    assert_eq!(
+        g["pin_ignored"].as_bool(),
+        Some(true),
+        "回调后应置 pin_ignored: {g}"
+    );
+    assert!(
+        h.fake.snapshot().unpinned.contains(&first_pin),
+        "应撤销分组已有 Pin"
+    );
+    assert!(
+        group_pinned_messages(&h).await.is_empty(),
+        "撤销后 Pin 记录应清空"
+    );
+    assert!(
+        metric(&h, "alkh_pins_ignored_total").await >= 1,
+        "忽略应计入指标"
+    );
+
+    // 重复通知（repeat=send）→ 发新卡但不 Pin。真实 AM 的重复通知间隔 > 60s，
+    // 而幂等窗口是 60s；测试里同一 payload 会命中去重，故先清空去重表模拟「窗口已过」。
+    put_policy_flag(&h, &channel_id, "repeat_policy", json!("send")).await;
+    sqlx::query("DELETE FROM event_dedup")
+        .execute(&h.pool)
+        .await
+        .expect("清空去重表失败");
+    let (_, body) = h.push(firing_payload(1)).await;
+    assert_eq!(body["event"], "repeated");
+    assert_eq!(body["action"], "send_new");
+    assert_eq!(
+        h.fake.snapshot().pinned.len(),
+        1,
+        "忽略后重复通知不应再 Pin 新卡片"
+    );
+
+    // 全部恢复（即使开启 pin_resolved）→ 恢复卡也不 Pin。
+    put_policy_flag(&h, &channel_id, "pin_resolved", json!(true)).await;
+    let (_, body) = h.push(resolved_payload()).await;
+    assert_eq!(body["event"], "resolved");
+    assert_eq!(
+        h.fake.snapshot().pinned.len(),
+        1,
+        "忽略后恢复通知不应 Pin 恢复卡片"
+    );
+    assert!(group_pinned_messages(&h).await.is_empty());
+
+    // 重开（resolved → firing 视为新告警）→ 清除忽略标志并重新 Pin。
+    sqlx::query("DELETE FROM event_dedup")
+        .execute(&h.pool)
+        .await
+        .expect("清空去重表失败");
+    let (_, body) = h.push(firing_payload(1)).await;
+    assert_eq!(body["event"], "new_firing");
+    let g = h.get(&format!("/api/v1/alert-groups/{gid}")).await.1;
+    assert_eq!(
+        g["pin_ignored"].as_bool(),
+        Some(false),
+        "重开后应清除忽略标志"
+    );
+    assert!(
+        h.fake.snapshot().pinned.len() >= 2,
+        "重开后新告警应重新 Pin"
+    );
+}
+
+/// R4c：回调验签（challenge / 错误 token）。
+#[tokio::test]
+async fn card_callback_rejects_bad_token_and_answers_challenge() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+    put_settings_with_token(&h, "test-verify-token-123").await;
+
+    let (status, body) = post_card_callback(
+        &h,
+        json!({"type": "url_verification", "challenge": "abc123", "token": "test-verify-token-123"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["challenge"], "abc123");
+
+    let (status, _) = post_card_callback(&h, ignore_event("wrong-token-xxxx", "whatever")).await;
+    assert_eq!(status, 403, "错误 Verification Token 必须被拒绝");
+}
+
+/// R4c：未配置 Verification Token 时事件回调拒绝（避免公开端点裸奔）。
+#[tokio::test]
+async fn card_callback_503_when_token_not_configured() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+    let (status, _) = post_card_callback(&h, ignore_event("any-token", "whatever")).await;
+    assert_eq!(status, 503, "未配置 Verification Token 时应拒绝事件回调");
+}
+
+/// R4c：管理端「忽略并 unpin」/「恢复 Pin」反向出口。
+#[tokio::test]
+async fn admin_pin_ignore_and_restore_endpoints() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+    let channel_id = h.channel_id.clone().unwrap();
+    put_policy_flag(&h, &channel_id, "pin_unresolved", json!(true)).await;
+
+    let (_, body) = h.push(firing_payload(1)).await;
+    let gid = body["alert_group_id"].as_str().unwrap().to_string();
+    assert_eq!(h.fake.snapshot().pinned.len(), 1);
+
+    let (status, out) = h
+        .post(&format!("/api/v1/alert-groups/{gid}/pin-ignore"), json!({}))
+        .await;
+    assert_eq!(status, 200, "{out}");
+    assert_eq!(out["found"], true);
+    let g = h.get(&format!("/api/v1/alert-groups/{gid}")).await.1;
+    assert_eq!(g["pin_ignored"].as_bool(), Some(true));
+    assert!(group_pinned_messages(&h).await.is_empty());
+
+    let resp = h
+        .http
+        .delete(h.url(&format!("/api/v1/alert-groups/{gid}/pin-ignore")))
+        .bearer_auth(&h.token)
+        .send()
+        .await
+        .expect("DELETE 失败");
+    assert_eq!(resp.status(), 200);
+    let g = h.get(&format!("/api/v1/alert-groups/{gid}")).await.1;
+    assert_eq!(g["pin_ignored"].as_bool(), Some(false));
+    assert!(
+        h.fake.snapshot().pinned.len() >= 2,
+        "恢复后应重新 Pin 当前活跃卡片"
+    );
+}

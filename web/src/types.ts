@@ -114,6 +114,8 @@ export interface AppSettings {
   lark_app_id: string | null;
   /** write-only: the API never echoes the secret, only whether one is stored. */
   app_secret_set: boolean;
+  /** 卡片回调 Verification Token 是否已配置（永不回显）。 */
+  verification_token_set: boolean;
   lark_base_url: string;
   public_base_url: string | null;
   /** IANA name; card timestamps are rendered in this zone (default `UTC`). */
@@ -125,6 +127,8 @@ export interface AppSettingsUpdate {
   lark_app_id?: string | null;
   /** `null` = unchanged, `""` = clear, non-empty = set. */
   app_secret?: string | null;
+  /** 卡片回调 Verification Token；`null` = unchanged, `""` = clear, non-empty = set. */
+  verification_token?: string | null;
   lark_base_url?: string;
   public_base_url?: string | null;
   /** `null` = unchanged. */
@@ -290,7 +294,7 @@ export type CardJson = Record<string, unknown>;
 /* --- 组件目录（服务端 alkh-domain::card_catalog 下发，前端不另立规则） --- */
 
 export type CardPropType = 'text' | 'markdown' | 'number' | 'bool' | 'enum' | 'px' | 'url';
-export type CardPropAccessor = 'field' | 'button_url';
+export type CardPropAccessor = 'field' | 'button_url' | 'button_callback';
 
 export interface CardPropMeta {
   name: string;
@@ -524,6 +528,8 @@ export interface AlertGroup {
   active_delivery_id: UUID | null;
   /** 当前被 Pin 的卡片消息（可多条）；`[]` = 该分组没有 Pin 卡片。 */
   pinned_messages: PinnedMessage[];
+  /** 「忽略并 unpin」标志：为 true 时该分组不再 Pin（R4c）。 */
+  pin_ignored: boolean;
   /** `GET /alert-groups/:id` embeds the group's deliveries. */
   deliveries?: Delivery[];
 }

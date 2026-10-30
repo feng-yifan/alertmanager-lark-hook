@@ -17,6 +17,7 @@ pub struct Metrics {
     pub deliveries_recalled_total: AtomicU64,
     pub messages_pinned_total: AtomicU64,
     pub messages_unpinned_total: AtomicU64,
+    pub pins_ignored_total: AtomicU64,
     pub deliveries_failed_total: AtomicU64,
     pub deliveries_suppressed_total: AtomicU64,
     pub delivery_retries_total: AtomicU64,
@@ -36,6 +37,7 @@ impl alkh_domain::ports::MetricsSink for Metrics {
             Counter::DeliveryRecalled => &self.deliveries_recalled_total,
             Counter::MessagePinned => &self.messages_pinned_total,
             Counter::MessageUnpinned => &self.messages_unpinned_total,
+            Counter::PinsIgnored => &self.pins_ignored_total,
         };
         Self::add(target, by);
     }
@@ -140,6 +142,12 @@ impl Metrics {
         );
         gauge(
             &mut out,
+            "alkh_pins_ignored_total",
+            "Alert groups set to ignore-and-unpin via card button",
+            Self::get(&self.pins_ignored_total),
+        );
+        gauge(
+            &mut out,
             "alkh_deliveries_failed_total",
             "Deliveries failed after retries",
             Self::get(&self.deliveries_failed_total),
@@ -218,6 +226,7 @@ mod tests {
             "alkh_deliveries_recalled_total",
             "alkh_messages_pinned_total",
             "alkh_messages_unpinned_total",
+            "alkh_pins_ignored_total",
             "alkh_deliveries_failed_total",
             "alkh_deliveries_suppressed_total",
             "alkh_delivery_retries_total",

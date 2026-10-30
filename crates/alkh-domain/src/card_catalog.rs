@@ -49,6 +49,8 @@ pub enum CardPropAccessor {
     Field,
     /// 按钮跳转：维护 `behaviors[{type:"open_url",default_url}]`。
     ButtonUrl,
+    /// 按钮回调：维护 `behaviors[{type:"callback",value}]`（点击后飞书回调 value）。
+    ButtonCallback,
 }
 
 /// 一个可编辑属性的元数据。
@@ -228,6 +230,17 @@ const BUTTON_PROPS: &[CardProp] = &[
         max_chars: None,
         placeholder: "${external_url}",
         hint: "写入 behaviors[0].{type:open_url,default_url}",
+    },
+    CardProp {
+        name: "callback_value",
+        label: "回调值（JSON）",
+        ty: CardPropType::Text,
+        path: "behaviors",
+        accessor: CardPropAccessor::ButtonCallback,
+        values: &[],
+        max_chars: None,
+        placeholder: r#"{"alkh_action":"ignore_unpin","alert_group_id":"${alert_group_id}"}"#,
+        hint: "写入 behaviors[]{type:\"callback\",value}；点按钮时由飞书回调该值。仅回调按钮使用。",
     },
     prop("disabled", "禁用", CardPropType::Bool, &[], ""),
     prop("margin", "外边距", CardPropType::Px, &[], ""),
@@ -660,6 +673,12 @@ fn build_alert_presets() -> Vec<CardPreset> {
             label: "详情按钮",
             description: "跳转 AlertManager（${external_url}）",
             nodes_json: r#"[{"tag":"button","element_id":"detail_btn","text":{"tag":"plain_text","content":"查看详情"},"type":"primary","size":"medium","behaviors":[{"type":"open_url","default_url":"${external_url}","pc_url":"","ios_url":"","android_url":""}]}]"#.into(),
+        },
+        CardPreset {
+            id: "ignore_pin_button",
+            label: "忽略并 unpin 按钮",
+            description: "点击后撤销该分组 Pin 并停止后续 Pin（需先在飞书后台配置卡片回调）",
+            nodes_json: r#"[{"tag":"button","element_id":"ignore_pin_btn","text":{"tag":"plain_text","content":"忽略并 unpin"},"type":"default","size":"medium","behaviors":[{"type":"callback","value":{"alkh_action":"ignore_unpin","alert_group_id":"${alert_group_id}"}}]}]"#.into(),
         },
         CardPreset {
             id: "collapsible_detail",

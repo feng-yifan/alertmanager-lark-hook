@@ -102,6 +102,9 @@ pub struct AppSettings {
     pub lark_app_id: Option<String>,
     /// 加密后的 app_secret；永不回显明文。
     pub lark_app_secret_enc: Option<EncryptedSecret>,
+    /// 卡片回调（`card.action.trigger`）验签用的 Verification Token；加密存储、永不回显明文。
+    #[serde(default)]
+    pub lark_verification_token_enc: Option<EncryptedSecret>,
     pub lark_base_url: String,
     /// 生成 hook 绝对地址用的对外基址。
     pub public_base_url: Option<String>,
@@ -117,6 +120,7 @@ impl Default for AppSettings {
         Self {
             lark_app_id: None,
             lark_app_secret_enc: None,
+            lark_verification_token_enc: None,
             lark_base_url: "https://open.feishu.cn".into(),
             public_base_url: None,
             timezone: default_timezone(),

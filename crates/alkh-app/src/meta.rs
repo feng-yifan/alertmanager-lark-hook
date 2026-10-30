@@ -114,6 +114,12 @@ pub fn render_variables() -> Vec<VariableMeta> {
             description: "AlertManager 分组键",
         },
         V {
+            name: "alert_group_id",
+            group: "group",
+            ty: "string",
+            description: "告警分组 ID（卡片回调用，如「忽略并 unpin」按钮）",
+        },
+        V {
             name: "receiver",
             group: "group",
             ty: "string",

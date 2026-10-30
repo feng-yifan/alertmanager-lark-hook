@@ -45,6 +45,22 @@ fn build_default_card() -> Value {
                         "text_size": "notation",
                         "text_color": "grey"
                     }
+                },
+                {
+                    "tag": "button",
+                    "element_id": "ignore_pin_btn",
+                    "text": { "tag": "plain_text", "content": "忽略并 unpin" },
+                    "type": "default",
+                    "size": "medium",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": {
+                                "alkh_action": "ignore_unpin",
+                                "alert_group_id": "${alert_group_id}"
+                            }
+                        }
+                    ]
                 }
             ]
         }
@@ -87,7 +103,7 @@ mod tests {
         );
         assert_eq!(
             alkh_domain::card_catalog::collect_tags(&card),
-            vec!["markdown", "repeat", "if", "hr", "div"]
+            vec!["markdown", "repeat", "if", "hr", "div", "button"]
         );
     }
 

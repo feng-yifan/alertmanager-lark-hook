@@ -108,6 +108,8 @@ export default function SettingsPage(): JSX.Element {
   const [form, setForm] = useState<SettingsForm>(EMPTY_FORM);
   const [secretMode, setSecretMode] = useState<SecretMode>('unchanged');
   const [secretValue, setSecretValue] = useState('');
+  const [tokenMode, setTokenMode] = useState<SecretMode>('unchanged');
+  const [tokenValue, setTokenValue] = useState('');
   const [clearConfirm, setClearConfirm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [checking, setChecking] = useState(false);
@@ -127,6 +129,8 @@ export default function SettingsPage(): JSX.Element {
     });
     setSecretMode('unchanged');
     setSecretValue('');
+    setTokenMode('unchanged');
+    setTokenValue('');
   }, [settings]);
 
   const saveSettings = async (event?: FormEvent) => {
@@ -154,6 +158,7 @@ export default function SettingsPage(): JSX.Element {
       await updateSettings({
         lark_app_id: form.lark_app_id.trim() || null,
         app_secret: secretMode === 'unchanged' ? null : secretMode === 'clear' ? '' : secretValue,
+        verification_token: tokenMode === 'unchanged' ? null : tokenMode === 'clear' ? '' : tokenValue,
         lark_base_url: form.lark_base_url.trim(),
         public_base_url: form.public_base_url.trim() || null,
         timezone,
@@ -162,6 +167,8 @@ export default function SettingsPage(): JSX.Element {
       toast.success('设置已保存');
       setSecretMode('unchanged');
       setSecretValue('');
+      setTokenMode('unchanged');
+      setTokenValue('');
       reload();
     } catch (cause) {
       toast.error(errorMessage(cause));
@@ -343,6 +350,54 @@ export default function SettingsPage(): JSX.Element {
                   )}{' '}
                   {secretMode === 'set' ? '· 保存后将写入新密钥' : null}
                   {secretMode === 'clear' ? '· 保存后将清除已存储的密钥' : null}
+                </div>
+              </Field>
+            </div>
+
+            <div className="form-grid">
+              <Field
+                label="卡片回调 Verification Token"
+                hint="飞书「事件与回调 → 加密策略」里的 Verification Token，用于校验卡片按钮回调来源。留空表示不修改；点击「清除 Token」提交空串以清除。注意：本服务不启用 Encrypt Key 加密策略。"
+              >
+                <div className="row tight">
+                  <Input
+                    type="password"
+                    autoComplete="new-password"
+                    value={tokenValue}
+                    disabled={tokenMode === 'clear'}
+                    placeholder={
+                      tokenMode === 'clear'
+                        ? '保存后将清除'
+                        : settings.verification_token_set
+                          ? '已配置 · 留空则不修改'
+                          : '未配置 · 请输入 Verification Token'
+                    }
+                    onChange={(event) => {
+                      setTokenValue(event.target.value);
+                      setTokenMode(event.target.value ? 'set' : 'unchanged');
+                    }}
+                  />
+                  {tokenMode === 'clear' ? (
+                    <Button size="sm" onClick={() => setTokenMode('unchanged')}>
+                      撤销清除
+                    </Button>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      disabled={!settings.verification_token_set}
+                      onClick={() => setTokenMode('clear')}
+                    >
+                      清除 Token
+                    </Button>
+                  )}
+                </div>
+                <div className="hint">
+                  {settings.verification_token_set ? (
+                    <Badge tone="ok">已配置</Badge>
+                  ) : (
+                    <Badge tone="warn">未配置</Badge>
+                  )}
                 </div>
               </Field>
             </div>

@@ -17,10 +17,18 @@ fn row_to_settings(row: &SqliteRow) -> PortResult<AppSettings> {
         (Some(nonce), Some(ciphertext)) => Some(EncryptedSecret { nonce, ciphertext }),
         _ => None,
     };
+    let verification_token = match (
+        row.opt_str_col("lark_verification_token_nonce")?,
+        row.opt_str_col("lark_verification_token_ciphertext")?,
+    ) {
+        (Some(nonce), Some(ciphertext)) => Some(EncryptedSecret { nonce, ciphertext }),
+        _ => None,
+    };
 
     Ok(AppSettings {
         lark_app_id: row.opt_str_col("lark_app_id")?,
         lark_app_secret_enc: secret,
+        lark_verification_token_enc: verification_token,
         lark_base_url: row.str_col("lark_base_url")?,
         public_base_url: row.opt_str_col("public_base_url")?,
         timezone: row.str_col("timezone")?,
@@ -66,16 +74,26 @@ impl SettingsRepository for SqliteSettingsRepository {
             ),
             None => (None, None),
         };
+        let (verif_nonce, verif_cipher) = match &settings.lark_verification_token_enc {
+            Some(secret) => (
+                Some(secret.nonce.as_str()),
+                Some(secret.ciphertext.as_str()),
+            ),
+            None => (None, None),
+        };
         sqlx::query(
             "INSERT INTO app_settings \
-             (id, lark_app_id, lark_app_secret_nonce, lark_app_secret_ciphertext, lark_base_url, \
-              public_base_url, timezone, retention_alert_group_days, \
+             (id, lark_app_id, lark_app_secret_nonce, lark_app_secret_ciphertext, \
+              lark_verification_token_nonce, lark_verification_token_ciphertext, \
+              lark_base_url, public_base_url, timezone, retention_alert_group_days, \
               retention_delivery_days, retention_audit_days, updated_at) \
-             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(id) DO UPDATE SET \
               lark_app_id = excluded.lark_app_id, \
               lark_app_secret_nonce = excluded.lark_app_secret_nonce, \
               lark_app_secret_ciphertext = excluded.lark_app_secret_ciphertext, \
+              lark_verification_token_nonce = excluded.lark_verification_token_nonce, \
+              lark_verification_token_ciphertext = excluded.lark_verification_token_ciphertext, \
               lark_base_url = excluded.lark_base_url, \
               public_base_url = excluded.public_base_url, \
               timezone = excluded.timezone, \
@@ -87,6 +105,8 @@ impl SettingsRepository for SqliteSettingsRepository {
         .bind(settings.lark_app_id.as_deref())
         .bind(nonce)
         .bind(ciphertext)
+        .bind(verif_nonce)
+        .bind(verif_cipher)
         .bind(&settings.lark_base_url)
         .bind(settings.public_base_url.as_deref())
         .bind(&settings.timezone)

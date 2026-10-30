@@ -2,6 +2,7 @@
 
 pub mod alerts;
 pub mod auth;
+pub mod card_callback;
 pub mod channels;
 pub mod settings;
 pub mod templates;
@@ -59,6 +60,8 @@ pub fn router() -> Router<AppState> {
         .route("/hooks/{id}/rotate", post(channels::rotate_hook))
         // AlertManager 接收端点（token 即凭证，无需会话）
         .route("/hooks/alertmanager/{token}", post(webhooks::alertmanager))
+        // 飞书卡片回传交互（卡片按钮回调，公开端点，靠 Verification Token 校验来源）
+        .route("/lark/card-callback", post(card_callback::handle))
         // --- 卡片模板 ---
         .route(
             "/card-templates",
@@ -84,6 +87,11 @@ pub fn router() -> Router<AppState> {
         .route(
             "/alert-groups/{id}",
             get(alerts::get_group).delete(alerts::delete_group),
+        )
+        // 「忽略并 unpin」管理端入口（反向出口：恢复 Pin）
+        .route(
+            "/alert-groups/{id}/pin-ignore",
+            post(alerts::ignore_pin).delete(alerts::unignore_pin),
         )
         .route("/deliveries", get(alerts::list_deliveries))
         .route("/deliveries/{id}/retry", post(alerts::retry_delivery))

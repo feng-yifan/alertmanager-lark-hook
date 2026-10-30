@@ -32,6 +32,8 @@ pub struct AppState {
     pub ready: Arc<AtomicBool>,
     /// 未认证的 hook 接收端点限流（按来源 IP）。
     pub hook_limiter: Arc<crate::limiter::FixedWindowLimiter>,
+    /// 卡片回调端点限流（按来源 IP）。
+    pub callback_limiter: Arc<crate::limiter::FixedWindowLimiter>,
 }
 
 impl AppState {
@@ -44,6 +46,11 @@ impl AppState {
         let hook_limiter = Arc::new(crate::limiter::FixedWindowLimiter::new(
             std::time::Duration::from_secs(10),
             config.hook_rate_limit,
+        ));
+        // 卡片回调低频且是公开端点：单独限流，避免与 hook 互相挤占。
+        let callback_limiter = Arc::new(crate::limiter::FixedWindowLimiter::new(
+            std::time::Duration::from_secs(10),
+            60,
         ));
         Self {
             intake: Arc::new(IntakeService::new(deps.clone())),
@@ -59,6 +66,7 @@ impl AppState {
             pool,
             ready: Arc::new(AtomicBool::new(false)),
             hook_limiter,
+            callback_limiter,
         }
     }
 

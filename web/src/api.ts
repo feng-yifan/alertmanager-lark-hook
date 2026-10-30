@@ -409,6 +409,21 @@ export function listAuditLogs(
   return request<Paginated<AuditLog>>('/audit-logs', { query: { ...params }, signal });
 }
 
+export interface PinIgnoreResult {
+  found: boolean;
+  unpinned: number;
+}
+
+/** 管理端「忽略并 unpin」：撤销该分组 Pin 并停止后续 Pin（等价于点卡片按钮）。 */
+export function ignoreAlertGroupPin(id: string): Promise<PinIgnoreResult> {
+  return request<PinIgnoreResult>(`/alert-groups/${id}/pin-ignore`, { method: 'POST' });
+}
+
+/** 管理端「恢复 Pin」：清除忽略标志并按策略重新对账。 */
+export function unignoreAlertGroupPin(id: string): Promise<PinIgnoreResult> {
+  return request<PinIgnoreResult>(`/alert-groups/${id}/pin-ignore`, { method: 'DELETE' });
+}
+
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
 /* ------------------------------------------------------------------ */

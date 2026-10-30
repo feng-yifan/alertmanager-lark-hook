@@ -4,9 +4,11 @@ import {
   deleteAlertGroup,
   errorMessage,
   getAlertGroup,
+  ignoreAlertGroupPin,
   listDeliveries,
   retryDelivery,
   revokeDelivery,
+  unignoreAlertGroupPin,
 } from '../api';
 import {
   Badge,
@@ -69,6 +71,7 @@ export default function AlertGroupDetailPage(): JSX.Element {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [pinBusy, setPinBusy] = useState(false);
   const [detailJson, setDetailJson] = useState<{ title: string; value: unknown } | null>(null);
 
   const runAction = async () => {
@@ -109,6 +112,25 @@ export default function AlertGroupDetailPage(): JSX.Element {
     }
   };
 
+  const togglePinIgnore = async () => {
+    if (!group) return;
+    setPinBusy(true);
+    try {
+      if (group.pin_ignored) {
+        await unignoreAlertGroupPin(group.id);
+        toast.success('已恢复 Pin');
+      } else {
+        await ignoreAlertGroupPin(group.id);
+        toast.success('已忽略并取消 Pin，本次告警周期内不再 Pin');
+      }
+      reload();
+    } catch (cause) {
+      toast.error(errorMessage(cause));
+    } finally {
+      setPinBusy(false);
+    }
+  };
+
   if (loading && !group) return <Loading label="正在加载告警分组…" />;
   if (error && !group) return <ErrorState error={error} onRetry={reload} />;
   if (!group) return <ErrorState error={new Error('分组不存在')} onRetry={reload} />;
@@ -123,6 +145,7 @@ export default function AlertGroupDetailPage(): JSX.Element {
             </Link>
             <span>{group.alertname ?? '（无 alertname）'}</span>
             <StatusBadge kind="group" value={group.status} />
+            {group.pin_ignored ? <Badge tone="warn">已忽略 Pin</Badge> : null}
           </span>
         }
         subtitle={
@@ -133,6 +156,9 @@ export default function AlertGroupDetailPage(): JSX.Element {
         }
         actions={
           <>
+            <Button onClick={() => void togglePinIgnore()} loading={pinBusy}>
+              {group.pin_ignored ? '恢复 Pin' : '忽略并 unpin'}
+            </Button>
             <Button onClick={reload} loading={refreshing}>
               刷新
             </Button>

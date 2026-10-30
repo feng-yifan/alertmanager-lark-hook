@@ -73,6 +73,7 @@ fn row_to_group(row: &SqliteRow) -> PortResult<AlertGroup> {
             .opt_str_col("active_delivery_id")?
             .map(DeliveryId::from_string),
         pinned_messages: row.json_col::<Vec<PinnedMessage>>("pinned_messages"),
+        pin_ignored: row.bool_col("pin_ignored")?,
     })
 }
 
@@ -116,8 +117,8 @@ impl AlertGroupRepository for SqliteAlertGroupRepository {
               group_labels, common_labels, common_annotations, alerts, firing_count, \
               resolved_count, truncated_alerts, event_count, last_event_hash, external_url, \
               first_seen_at, last_seen_at, last_notified_at, resolved_at, active_delivery_id, \
-              pinned_messages) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+              pinned_messages, pin_ignored) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(id) DO UPDATE SET \
               hook_id = excluded.hook_id, channel_id = excluded.channel_id, \
               group_key = excluded.group_key, receiver = excluded.receiver, \
@@ -131,7 +132,7 @@ impl AlertGroupRepository for SqliteAlertGroupRepository {
               first_seen_at = excluded.first_seen_at, last_seen_at = excluded.last_seen_at, \
               last_notified_at = excluded.last_notified_at, resolved_at = excluded.resolved_at, \
               active_delivery_id = excluded.active_delivery_id, \
-              pinned_messages = excluded.pinned_messages",
+              pinned_messages = excluded.pinned_messages, pin_ignored = excluded.pin_ignored",
         )
         .bind(group.id.as_str())
         .bind(group.hook_id.as_str())
@@ -157,6 +158,7 @@ impl AlertGroupRepository for SqliteAlertGroupRepository {
         .bind(ts_opt(group.resolved_at))
         .bind(group.active_delivery_id.as_ref().map(|d| d.as_str()))
         .bind(to_json(&group.pinned_messages))
+        .bind(group.pin_ignored)
         .execute(&self.pool)
         .await
         .map_err(common::map_sql)?;

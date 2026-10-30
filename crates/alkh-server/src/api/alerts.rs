@@ -103,6 +103,36 @@ pub async fn delete_group(
     Ok((StatusCode::NO_CONTENT, ()).into_response())
 }
 
+/// 管理端「忽略并 unpin」：撤销该分组 Pin 并停止后续 Pin（等价于点卡片按钮）。
+pub async fn ignore_pin(
+    State(state): State<AppState>,
+    _admin: Admin,
+    Path(id): Path<AlertGroupId>,
+) -> ApiResult<Json<alkh_app::intake::IgnoreOutcome>> {
+    Ok(Json(
+        state
+            .intake
+            .ignore_and_unpin(&id, None)
+            .await
+            .map_err(ApiError::from)?,
+    ))
+}
+
+/// 管理端「恢复 Pin」：清除忽略标志并按策略重新对账（闭环反向出口）。
+pub async fn unignore_pin(
+    State(state): State<AppState>,
+    _admin: Admin,
+    Path(id): Path<AlertGroupId>,
+) -> ApiResult<Json<alkh_app::intake::IgnoreOutcome>> {
+    Ok(Json(
+        state
+            .intake
+            .unignore_pin(&id)
+            .await
+            .map_err(ApiError::from)?,
+    ))
+}
+
 pub async fn list_deliveries(
     State(state): State<AppState>,
     _admin: Admin,

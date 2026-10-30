@@ -1353,6 +1353,56 @@ Doc note about 机器人进群/可见范围: 机器人需要被添加到群组�
 
 ---
 
+## 11. 卡片回传交互（`card.action.trigger`）— VERIFIED
+
+一句话：用户点击卡片按钮后，飞书把事件推送到应用「事件与回调 → 回调配置」的请求地址
+（HTTP）或通过长连接下发；本服务据此执行「忽略并 unpin」。以下是实现依赖的要点与出处。
+
+### 11.1 配置与请求网址校验
+
+- 开发者后台 **事件与回调 → 回调配置**：填请求地址（HTTP）或选择「使用长连接接收事件」，
+  并订阅 `card.action.trigger`。保存 HTTP 地址时飞书先发 `url_verification`：
+  `{"challenge":"…","type":"url_verification","token":"…"}`，须 3 秒内原样回 `{"challenge":"…"}`。
+
+### 11.2 安全校验
+
+两条路：签名校验（需 Encrypt Key，事件体被加密）或 Verification Token 校验（明文）。
+
+- **签名算法（明文公式）**：`sha256(X-Lark-Request-Timestamp + X-Lark-Request-Nonce + encrypt_key + rawBody)`
+  取十六进制，比对请求头 `X-Lark-Signature`。`rawBody` 必须是**原始字节**，不能先反序列化再拼。
+- 配置了 Encrypt Key 时事件体是 **AES-256-CBC 加密**（key = `sha256(encrypt_key)`，iv = 前 16 字节，
+  再按飞书自定义方式去 padding）。
+- 本项目采用 **Verification Token 校验**：请求体内 `header.token`（明文事件）与应用里配置的
+  Verification Token 比对；**不启用 Encrypt Key**，以避免 AES 解密复杂度。
+
+### 11.3 事件体结构（要点）
+
+```json
+{
+  "schema": "2.0",
+  "header": {"event_id": "…", "event_type": "card.action.trigger", "token": "<verification token>", "app_id": "…"},
+  "event": {
+    "operator": {"open_id": "ou_…"},
+    "action": {"tag": "button", "value": {"alkh_action": "ignore_unpin", "alert_group_id": "…"}},
+    "context": {"open_message_id": "om_…", "open_chat_id": "oc_…"}
+  }
+}
+```
+
+- 按钮 JSON 2.0 用 `"behaviors":[{"type":"callback","value":{...}}]`；点击后 value 出现在
+  `event.action.value`（可能是对象，也可能是 JSON 字符串）。
+- 响应可为 `{"toast":{"type":"success","content":"…"}}`（可选再带 `card` 做延时更新卡片）。
+
+### 11.4 权限与约束
+
+- 接收卡片回调只需在「事件与回调」订阅该事件；**不需要** `im:message:readonly`（那用于反查
+  `card_content`）。
+- 必须 3 秒内 ack，否则飞书重投；重投必须幂等（本项目靠分组的 `pin_ignored` 标志幂等）。
+- 官方出处：
+  - 处理卡片回调 <https://open.feishu.cn/document/uAjLw4CM/ukzMukzMukzM/feishu-cards/handle-card-callbacks>
+  - 卡片回传交互回调 <https://open.feishu.cn/document/feishu-cards/card-callback-communication>
+  - 步骤三：接收事件 <https://open.larksuite.com/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-subscription-configure-/encrypt-key-encryption-configuration-case>
+
 ## Gaps / uncertainties
 
 These could **not** be verified from the official documentation I fetched. The implementer must treat
