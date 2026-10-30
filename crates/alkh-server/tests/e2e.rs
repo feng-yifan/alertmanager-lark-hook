@@ -2924,6 +2924,17 @@ async fn card_callback_rejects_bad_token_and_answers_challenge() {
     assert_eq!(status, 200);
     assert_eq!(body["challenge"], "abc123");
 
+    // 关键回归：飞书保存 URL 的校验体可能只有 `challenge`（无 type / 无 token）。
+    // 即使已配置 token，也必须原样回 challenge，否则无法保存回调地址。
+    for payload in [
+        json!({"challenge": "only-challenge"}),
+        json!({"type": "url_verification", "challenge": "no-token"}),
+    ] {
+        let (status, body) = post_card_callback(&h, payload).await;
+        assert_eq!(status, 200, "challenge 校验必须 200: {body}");
+        assert!(body.get("challenge").is_some(), "必须回 challenge: {body}");
+    }
+
     let (status, _) = post_card_callback(&h, ignore_event("wrong-token-xxxx", "whatever")).await;
     assert_eq!(status, 403, "错误 Verification Token 必须被拒绝");
 }

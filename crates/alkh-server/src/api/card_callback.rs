@@ -41,26 +41,12 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid json"),
     };
 
-    // 1. 请求网址校验（保存回调地址时飞书发来的 challenge）。
-    if value.get("type").and_then(|t| t.as_str()) == Some("url_verification") {
-        match state.settings.callback_verification_token().await {
-            Ok(Some(expected)) => {
-                let got = value
-                    .get("token")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or_default();
-                if !ct_eq(got, &expected) {
-                    return error_response(StatusCode::FORBIDDEN, "verification token mismatch");
-                }
-            }
-            // 未配置 token 时允许完成 challenge（后续事件仍会被拒），便于先把地址配好。
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, "读取回调 Verification Token 失败");
-                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
-            }
-        }
-        let challenge = value.get("challenge").cloned().unwrap_or(Value::Null);
+    // 1. 请求网址校验：飞书保存回调 URL 时会 POST 一个含 `challenge` 的请求
+    //    （有时带 `type=url_verification` 与 `token`，有时仅有 `challenge`）。
+    //    **无条件原样回 `challenge`**：该校验本身无副作用；若在此强制校验 token，
+    //    会出现「token 未配置/配错 → 无法保存 URL」的死锁。真实事件（card.action.trigger）
+    //    仍在下文严格校验 token。
+    if let Some(challenge) = value.get("challenge") {
         return (StatusCode::OK, Json(json!({ "challenge": challenge }))).into_response();
     }
 
