@@ -40,6 +40,11 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
         Ok(v) => v,
         Err(_) => return error_response(StatusCode::BAD_REQUEST, "invalid json"),
     };
+    // 诊断：记录回调请求体的顶层字段名（不记录字段值，避免泄露 token），用于排查飞书发送的形态。
+    if let Some(obj) = value.as_object() {
+        let keys: Vec<&String> = obj.keys().collect();
+        tracing::info!(keys = ?keys, "card-callback 请求体顶层字段");
+    }
 
     // 1. 请求网址校验：飞书保存回调 URL 时会 POST 一个含 `challenge` 的请求
     //    （有时带 `type=url_verification` 与 `token`，有时仅有 `challenge`）。

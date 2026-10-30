@@ -73,9 +73,17 @@ async fn metrics_handler(State(state): State<AppState>) -> Response {
 
 async fn count_requests(State(state): State<AppState>, req: Request, next: Next) -> Response {
     Metrics::inc(&state.metrics.http_requests_total);
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
     let response = next.run(req).await;
-    if response.status().is_client_error() || response.status().is_server_error() {
+    let status = response.status();
+    if status.is_client_error() || status.is_server_error() {
         Metrics::inc(&state.metrics.http_errors_total);
+    }
+    // 诊断：回调路径与错误响应记录 method/path/status（不含请求体与请求头），
+    // 便于排查飞书回调是否到达、打到哪个路径、返回什么状态。
+    if path.contains("/lark/") || status.is_client_error() || status.is_server_error() {
+        tracing::info!(%method, %path, %status, "http 请求");
     }
     response
 }

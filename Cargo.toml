@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.3.1"
+version = "1.3.2"
 edition = "2021"
 license = "MIT"
 # 实际下限由 Cargo.lock 中依赖声明的最高 rust-version 决定（当前 1.89，来自 uuid 1.28.0）。
