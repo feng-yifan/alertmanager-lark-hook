@@ -1,6 +1,6 @@
 //! `AlertGroupRepository` 的 SQLite 实现。
 
-use alkh_domain::alert::{AlertGroup, AlertInstance, GroupStatus};
+use alkh_domain::alert::{AlertGroup, AlertInstance, GroupStatus, PinnedMessage};
 use alkh_domain::error::PortResult;
 use alkh_domain::ids::{AlertGroupId, ChannelId, DeliveryId, HookId};
 use alkh_domain::ports::{AlertGroupFilter, AlertGroupRepository};
@@ -72,7 +72,7 @@ fn row_to_group(row: &SqliteRow) -> PortResult<AlertGroup> {
         active_delivery_id: row
             .opt_str_col("active_delivery_id")?
             .map(DeliveryId::from_string),
-        pinned_message_id: row.opt_str_col("pinned_message_id")?,
+        pinned_messages: row.json_col::<Vec<PinnedMessage>>("pinned_messages"),
     })
 }
 
@@ -116,7 +116,7 @@ impl AlertGroupRepository for SqliteAlertGroupRepository {
               group_labels, common_labels, common_annotations, alerts, firing_count, \
               resolved_count, truncated_alerts, event_count, last_event_hash, external_url, \
               first_seen_at, last_seen_at, last_notified_at, resolved_at, active_delivery_id, \
-              pinned_message_id) \
+              pinned_messages) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(id) DO UPDATE SET \
               hook_id = excluded.hook_id, channel_id = excluded.channel_id, \
@@ -131,7 +131,7 @@ impl AlertGroupRepository for SqliteAlertGroupRepository {
               first_seen_at = excluded.first_seen_at, last_seen_at = excluded.last_seen_at, \
               last_notified_at = excluded.last_notified_at, resolved_at = excluded.resolved_at, \
               active_delivery_id = excluded.active_delivery_id, \
-              pinned_message_id = excluded.pinned_message_id",
+              pinned_messages = excluded.pinned_messages",
         )
         .bind(group.id.as_str())
         .bind(group.hook_id.as_str())
@@ -156,7 +156,7 @@ impl AlertGroupRepository for SqliteAlertGroupRepository {
         .bind(ts_opt(group.last_notified_at))
         .bind(ts_opt(group.resolved_at))
         .bind(group.active_delivery_id.as_ref().map(|d| d.as_str()))
-        .bind(group.pinned_message_id.as_deref())
+        .bind(to_json(&group.pinned_messages))
         .execute(&self.pool)
         .await
         .map_err(common::map_sql)?;
@@ -309,14 +309,17 @@ mod tests {
                 "HighCPU",
                 "{alertname=\"HighCPU\"}",
             );
-            g.pinned_message_id = Some("om_pinned".into());
+            g.pinned_messages = vec![PinnedMessage::new(
+                "om_pinned",
+                alkh_domain::alert::PinKind::Unresolved,
+            )];
             g
         };
         repo.upsert(&g).await.unwrap();
 
         let got = repo.get(&g.id).await.unwrap().unwrap();
         assert_eq!(got.group_key, g.group_key);
-        assert_eq!(got.pinned_message_id.as_deref(), Some("om_pinned"));
+        assert_eq!(got.pinned_messages, g.pinned_messages);
         assert_eq!(got.status, GroupStatus::Firing);
         assert_eq!(got.alertname.as_deref(), Some("HighCPU"));
         assert_eq!(got.severity.as_deref(), Some("critical"));

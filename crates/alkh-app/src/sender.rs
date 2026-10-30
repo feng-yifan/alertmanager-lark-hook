@@ -331,7 +331,7 @@ impl NotificationSender {
                 let mut group = group.clone();
                 group.active_delivery_id = Some(d.id.clone());
                 group.last_notified_at = Some(now);
-                self.reconcile_pin(&mut group, &policy, d.lark_message_id.as_deref())
+                self.reconcile_pins(&mut group, &policy, d.lark_message_id.as_deref())
                     .await;
                 if let Err(e) = self.deps.groups.upsert(&group).await {
                     tracing::warn!(group_id = %group.id, error = %e, "Pin 状态落库失败");
@@ -454,47 +454,113 @@ impl NotificationSender {
         }
     }
 
-    /// R4：让「分组是否仍有未解决告警」与「群里是否有一条被 Pin 的卡片」保持一致。
+    /// R4：让「分组当前应有的 Pin 集合」与「群里实际被 Pin 的卡片」保持一致。
     ///
     /// 这里用的是飞书的 **Pin**（`im/v1/pins`，消息进入会话的 Pin 列表，可 Pin 多条），
     /// 与固定在会话顶部、只能置顶 1 条的「置顶消息 / 群置顶」（`chat.top_notice`）不是同一个功能。
     ///
-    /// - 开关开启且分组为 firing：目标 = 当前活跃消息。`current_message_id` 为空
-    ///   （本轮被 suppress，或发送失败还没有消息）时保留现有 Pin，不做无谓的 Pin 调用。
-    /// - 其余情况（分组已恢复 / 开关被关闭 / 消息被新消息替换）：目标 = 无 ⇒ 取消现有 Pin。
+    /// 支持多条 Pin：
+    /// - 分组仍为 firing 且「未解决告警 Pin」开启：把当前活跃卡片加入 Pin 集合，
+    ///   已 Pin 的历史卡片保留（`repeat_policy = send` 会逐条累积，不互相顶掉）。
+    /// - 「未解决告警 Pin」关闭：取消所有未解决 Pin。
+    /// - 分组已恢复且「全部恢复后自动取消 Pin」开启（默认）：批量取消所有未解决 Pin。
+    /// - 分组已恢复且「已解决告警 Pin」开启：把当前恢复卡片 Pin 上（与未解决 Pin 可并存）。
     ///
     /// 飞书侧失败（群设置只允许群主 Pin、机器人权限不足、限频等）只记日志与指标，
     /// **不阻塞投递**（与 R2 同款语义），状态保持不变，下一次事件会再试一次；
-    /// 取消 Pin 失败时不再继续 Pin 新消息，避免群里同时留下两条 Pin。
-    pub async fn reconcile_pin(
+    /// 取消 Pin 失败时不再继续 Pin 新消息，避免同一分组出现「旧 Pin 没撤、新 Pin 又加」。
+    pub async fn reconcile_pins(
         &self,
         group: &mut alkh_domain::alert::AlertGroup,
         policy: &NotificationPolicy,
         current_message_id: Option<&str>,
     ) {
-        let desired: Option<String> =
-            if policy.pin_unresolved && group.status == GroupStatus::Firing {
-                current_message_id
-                    .map(str::to_string)
-                    .or_else(|| group.pinned_message_id.clone())
-            } else {
-                None
-            };
+        use alkh_domain::alert::{PinKind, PinnedMessage};
 
-        if desired == group.pinned_message_id {
-            return;
+        // 计算期望的 Pin 集合。
+        let mut desired: Vec<PinnedMessage> = Vec::new();
+        match group.status {
+            GroupStatus::Firing => {
+                if policy.pin_unresolved {
+                    // 保留已累积的未解决 Pin（不互相顶掉）。
+                    desired.extend(
+                        group
+                            .pinned_messages
+                            .iter()
+                            .filter(|p| p.kind == PinKind::Unresolved)
+                            .cloned(),
+                    );
+                    if let Some(id) = current_message_id {
+                        if !desired.iter().any(|p| p.message_id == id) {
+                            desired.push(PinnedMessage::new(id, PinKind::Unresolved));
+                        }
+                    }
+                }
+                // 关闭时 desired 为空 ⇒ 取消所有未解决 Pin。
+            }
+            GroupStatus::Resolved => {
+                if policy.pin_unresolved && !policy.unpin_on_resolve {
+                    // 全部恢复后不自动取消：保留未解决期间的 Pin。
+                    desired.extend(
+                        group
+                            .pinned_messages
+                            .iter()
+                            .filter(|p| p.kind == PinKind::Unresolved)
+                            .cloned(),
+                    );
+                }
+                if policy.pin_resolved {
+                    match current_message_id {
+                        // 当前恢复卡片：同一张（原地更新）则改角色，否则追加。
+                        Some(id) => match desired.iter_mut().find(|p| p.message_id == id) {
+                            Some(existing) => existing.kind = PinKind::Resolved,
+                            None => desired.push(PinnedMessage::new(id, PinKind::Resolved)),
+                        },
+                        // 没有当前消息：保留已有的已解决 Pin。
+                        None => {
+                            let keep: Vec<PinnedMessage> = group
+                                .pinned_messages
+                                .iter()
+                                .filter(|p| p.kind == PinKind::Resolved)
+                                .filter(|p| !desired.iter().any(|d| d.message_id == p.message_id))
+                                .cloned()
+                                .collect();
+                            desired.extend(keep);
+                        }
+                    }
+                }
+            }
         }
 
-        if let Some(old) = group.pinned_message_id.clone() {
-            match self.deps.lark.unpin_message(&old).await {
+        // 差异：需要取消 / 需要新增（按 message_id 比较）。
+        let to_unpin: Vec<String> = group
+            .pinned_messages
+            .iter()
+            .filter(|old| !desired.iter().any(|d| d.message_id == old.message_id))
+            .map(|p| p.message_id.clone())
+            .collect();
+        let to_pin: Vec<PinnedMessage> = desired
+            .iter()
+            .filter(|d| {
+                !group
+                    .pinned_messages
+                    .iter()
+                    .any(|old| old.message_id == d.message_id)
+            })
+            .cloned()
+            .collect();
+
+        // 先取消（失败即停，避免新旧 Pin 同时留在群里）。
+        for id in &to_unpin {
+            match self.deps.lark.unpin_message(id).await {
                 Ok(()) => {
                     self.deps.metrics.incr(Counter::MessageUnpinned, 1);
-                    group.pinned_message_id = None;
+                    group.pinned_messages.retain(|p| &p.message_id != id);
                 }
                 Err(err) => {
                     tracing::warn!(
                         group_id = %group.id,
-                        message_id = %old,
+                        message_id = %id,
                         error = %err,
                         "取消 Pin 失败（R4：不阻塞投递，下一轮重试）"
                     );
@@ -504,21 +570,36 @@ impl NotificationSender {
             }
         }
 
-        if let Some(new) = desired {
-            match self.deps.lark.pin_message(&new).await {
+        // 再 Pin 新增（单条失败不影响其它条，下一轮重试）。
+        for item in to_pin {
+            let id = item.message_id;
+            match self.deps.lark.pin_message(&id).await {
                 Ok(()) => {
                     self.deps.metrics.incr(Counter::MessagePinned, 1);
-                    group.pinned_message_id = Some(new);
+                    group
+                        .pinned_messages
+                        .push(PinnedMessage::new(id, item.kind));
                 }
                 Err(err) => {
                     tracing::warn!(
                         group_id = %group.id,
-                        message_id = %new,
+                        message_id = %id,
                         error = %err,
                         "Pin 失败（R4：不阻塞投递，下一轮重试）"
                     );
                     self.deps.metrics.incr(Counter::LarkApiError, 1);
                 }
+            }
+        }
+
+        // 同一条消息角色变化（未解决 → 已解决）时无需调用接口，只更新记录。
+        for d in &desired {
+            if let Some(p) = group
+                .pinned_messages
+                .iter_mut()
+                .find(|p| p.message_id == d.message_id)
+            {
+                p.kind = d.kind;
             }
         }
     }
@@ -584,12 +665,12 @@ impl NotificationSender {
                 d.last_error.clone().unwrap_or_else(|| "撤回失败".into()),
             )));
         }
-        // R4：被撤回的正是分组当前 Pin 的那条消息时，Pin 随消息一起消失，清掉记录，
+        // R4：被撤回的消息若在 Pin 集合里，Pin 随消息一起消失，清掉对应记录，
         // 避免下一次对一条已不存在的消息调用取消 Pin。
-        if let Some(pinned) = group.pinned_message_id.clone() {
-            if Some(pinned.as_str()) == d.lark_message_id.as_deref() {
+        if let Some(msg_id) = d.lark_message_id.clone() {
+            if group.pinned_messages.iter().any(|p| p.message_id == msg_id) {
                 let mut g = group.clone();
-                g.pinned_message_id = None;
+                g.pinned_messages.retain(|p| p.message_id != msg_id);
                 // 这条消息同时是分组活跃指针时，连同指针一起清掉后一次写回，
                 // 避免「先写回旧指针、再单独清指针」的中间态。
                 if pointer_is_this {

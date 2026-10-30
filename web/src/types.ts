@@ -160,8 +160,12 @@ export interface LabelMatcher {
 
 export interface NotificationPolicy {
   card_template_id: UUID | null;
-  /** 未解决告警 Pin：firing 期间 Pin 当前卡片，全部恢复后取消 Pin。 */
+  /** 未解决告警 Pin：firing 期间 Pin 当前卡片，全部恢复后按 unpin_on_resolve 处理。 */
   pin_unresolved: boolean;
+  /** 全部恢复后是否自动取消未解决 Pin（默认开启，仅 pin_unresolved 开启时显示）。 */
+  unpin_on_resolve: boolean;
+  /** 已解决告警 Pin：全部恢复时把当前恢复卡片也 Pin 上（默认关闭）。 */
+  pin_resolved: boolean;
   repeat_policy: RepeatPolicy;
   resolved_policy: ResolvedPolicy;
   group_update_policy: GroupUpdatePolicy;
@@ -477,6 +481,12 @@ export interface DraftSendTestRequest extends ValidateRequest {
 
 export type GroupStatus = 'firing' | 'resolved';
 export type AlertStatus = 'firing' | 'resolved';
+/** 一条被 Pin 的卡片消息：kind 区分「未解决期间」与「恢复后」两类 Pin。 */
+export type PinKind = 'unresolved' | 'resolved';
+export interface PinnedMessage {
+  message_id: string;
+  kind: PinKind;
+}
 
 export interface AlertInstance {
   fingerprint: string;
@@ -512,8 +522,8 @@ export interface AlertGroup {
   last_notified_at: ISODateTime | null;
   resolved_at: ISODateTime | null;
   active_delivery_id: UUID | null;
-  /** 当前被 Pin 的卡片消息（R4）；`null` = 该分组没有 Pin 卡片。 */
-  pinned_message_id: string | null;
+  /** 当前被 Pin 的卡片消息（可多条）；`[]` = 该分组没有 Pin 卡片。 */
+  pinned_messages: PinnedMessage[];
   /** `GET /alert-groups/:id` embeds the group's deliveries. */
   deliveries?: Delivery[];
 }

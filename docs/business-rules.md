@@ -98,20 +98,24 @@ POST /api/v1/hooks/alertmanager/{token}
 - **R3 内容未变化则不重复更新**：`UpdateInPlace` 前比较 `rendered_digest`，
   相同则跳过更新调用（幂等，避免飞书限频与无意义的 `update_time` 变化）。
 - **R4 未解决告警 Pin**（策略开关 `pin_unresolved`，默认关闭）：分组仍处于 firing 时，
-  把**当前活跃卡片** Pin 到会话的 **Pin 列表**（`POST /open-apis/im/v1/pins`）；
-  分组内全部告警恢复后，对同一条消息调用 `DELETE /open-apis/im/v1/pins/:message_id` 取消 Pin。
+  把**当前活跃卡片** Pin 到会话的 **Pin 列表**（`POST /open-apis/im/v1/pins`）。
+  支持**多条 Pin**：卡片被新消息取代（重复通知发送新消息、R1 降级、发送重试补发）时，
+  新卡片各自追加一条 Pin，历史卡片的 Pin 保留（`repeat_policy = send` 会逐条累积）。
   > ⚠️ 这是飞书的 **Pin**（Pin 列表，可 Pin 多条，入口是客户端消息菜单的「Pin」/ Pin 标签页），
   > **不是**固定在会话顶部的「置顶消息 / 群置顶」——后者用客户端按钮只能置顶 1 条，且是另一套接口
   > （`im/v1/chats/:chat_id/top_notice/put_top_notice`），本项目未使用。
   > 详见 [`docs/research/feishu-api.md` §4.1](research/feishu-api.md)。
-  - 目标是「当前活跃卡片」而不是固定某条：卡片被新消息取代（重复通知发送新消息、
-    R1 降级、发送重试补发）时，先取消旧消息的 Pin，再 Pin 新消息。
-  - 幂等：消息已被 Pin / 未 Pin / 已被撤回时，飞书都返回成功；`AlertGroup.pinned_message_id`
-    记录当前 Pin 的消息，避免每次事件都重复调用，也保证关闭开关或恢复时能精确取消。
+  - 全部恢复后由 `unpin_on_resolve`（默认开启）决定：开启时批量取消该分组所有未解决 Pin
+    （`DELETE /open-apis/im/v1/pins/:message_id`）；关闭时保留这些 Pin，需手动取消。
+  - 幂等：消息已被 Pin / 未 Pin / 已被撤回时，飞书都返回成功；`AlertGroup.pinned_messages`
+    记录当前被 Pin 的消息（含 `kind`），避免每次事件都重复调用，也保证关闭开关或恢复时能精确取消。
+  - 开关关闭后，该分组的下一个事件会取消所有未解决 Pin（不依赖告警真正恢复）。
+- **R4b 已解决告警 Pin**（策略开关 `pin_resolved`，默认关闭）：分组全部恢复时，把当前活跃的
+  恢复卡片也 Pin 上（`kind = resolved`）。与 R4 相互独立、可并存多条 Pin；无论恢复通知是
+  原地更新、单独发送还是删旧发新，都 Pin 最终那条恢复卡片。
   - 失败不阻塞（与 R2 同款语义）：群设置只允许群主 / 群管理员 Pin、机器人权限不足（`230046` / `230027`）、
     单条消息 Pin/Unpin 超过 5 QPS（`230047`）等只记日志与指标，投递照常返回 200，
     状态保持不变，下一次事件会重试；取消 Pin 失败时不会继续 Pin 新消息。
-  - 开关关闭后，该分组的下一个事件会取消已有 Pin（不依赖告警真正恢复）。
   - 关闭的渠道（R13）与静默期（R5）不发消息，但仍然会对齐 Pin 状态。
   - 该能力不需要额外权限：发送卡片用的 `im:message:send_as_bot` 与
     `im:message`、`im:message.pins:write_only` 三者任一即可调用 Pin / Unpin。

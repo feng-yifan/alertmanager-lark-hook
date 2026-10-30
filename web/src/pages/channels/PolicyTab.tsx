@@ -29,6 +29,7 @@ import {
   MATCH_OP_LABEL,
   MUTE_NOTE,
   PIN_NOTE,
+  RESOLVED_PIN_NOTE,
 } from '../../labels';
 import { enumOptions, useMeta } from '../../meta';
 import { useToast } from '../../toast';
@@ -55,6 +56,8 @@ interface Props {
 interface Draft {
   card_template_id: string;
   pin_unresolved: boolean;
+  unpin_on_resolve: boolean;
+  pin_resolved: boolean;
   repeat_policy: RepeatPolicy;
   resolved_policy: ResolvedPolicy;
   group_update_policy: GroupUpdatePolicy;
@@ -69,6 +72,8 @@ interface Draft {
 const DEFAULT_DRAFT: Draft = {
   card_template_id: '',
   pin_unresolved: false,
+  unpin_on_resolve: true,
+  pin_resolved: false,
   repeat_policy: 'suppress',
   resolved_policy: 'send',
   group_update_policy: 'update_previous',
@@ -194,6 +199,8 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
     const payload: NotificationPolicyInput = {
       card_template_id: draft.card_template_id || null,
       pin_unresolved: draft.pin_unresolved,
+      unpin_on_resolve: draft.unpin_on_resolve,
+      pin_resolved: draft.pin_resolved,
       repeat_policy: draft.repeat_policy,
       resolved_policy: draft.resolved_policy,
       group_update_policy: draft.group_update_policy,
@@ -333,14 +340,35 @@ export default function PolicyTab({ channelId, channelName, onSaved }: Props): J
 
       <Card
         title="未解决告警 Pin"
-        subtitle="有未解决告警时把当前卡片 Pin 到会话的 Pin 列表，全部恢复后自动取消（默认关闭；与飞书的「置顶消息」不是同一个功能）"
+        subtitle="有未解决告警时把当前卡片 Pin 到会话的 Pin 列表（默认关闭；与飞书的「置顶消息」不是同一个功能）"
       >
         <div className="callout info mb-16">{PIN_NOTE}</div>
         <Switch
           checked={draft.pin_unresolved}
           onChange={(next) => setDraft((current) => ({ ...current, pin_unresolved: next }))}
           label="有未解决告警时 Pin 当前卡片"
-          hint="关闭开关后，该分组的下一个事件就会取消已有 Pin，不必等告警恢复。"
+          hint="重复通知每次新发一张卡片时都会各自累积一条 Pin。关闭开关后，该分组的下一个事件就会取消所有未解决 Pin。"
+        />
+        {draft.pin_unresolved ? (
+          <Switch
+            checked={draft.unpin_on_resolve}
+            onChange={(next) => setDraft((current) => ({ ...current, unpin_on_resolve: next }))}
+            label="全部恢复后自动取消 Pin"
+            hint="关闭后，告警全部恢复时仍保留未解决卡片的 Pin，需要手动取消（便于回看已恢复的告警）。"
+          />
+        ) : null}
+      </Card>
+
+      <Card
+        title="已解决告警 Pin"
+        subtitle="全部恢复时把恢复卡片也 Pin 上（默认关闭；与「未解决告警 Pin」相互独立，可同时存在多条 Pin）"
+      >
+        <div className="callout info mb-16">{RESOLVED_PIN_NOTE}</div>
+        <Switch
+          checked={draft.pin_resolved}
+          onChange={(next) => setDraft((current) => ({ ...current, pin_resolved: next }))}
+          label="全部恢复时 Pin 恢复卡片"
+          hint="无论恢复通知是原地更新、单独发送还是删旧发新，都会 Pin 当前活跃的恢复卡片。"
         />
       </Card>
 
@@ -492,6 +520,8 @@ function draftFromPolicy(policy: NotificationPolicy): Draft {
   return {
     card_template_id: policy.card_template_id ?? '',
     pin_unresolved: policy.pin_unresolved,
+    unpin_on_resolve: policy.unpin_on_resolve,
+    pin_resolved: policy.pin_resolved,
     repeat_policy: policy.repeat_policy,
     resolved_policy: policy.resolved_policy,
     group_update_policy: policy.group_update_policy,

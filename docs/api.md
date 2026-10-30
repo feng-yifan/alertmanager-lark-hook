@@ -168,6 +168,8 @@
 {
   "card_template_id": "b1d2...",
   "pin_unresolved": false,
+  "unpin_on_resolve": true,
+  "pin_resolved": false,
   "repeat_policy": "suppress",
   "resolved_policy": "send",
   "group_update_policy": "update_previous",
@@ -329,7 +331,7 @@
   "alerts": [{"fingerprint":"a1b2","status":"firing","labels":{},"annotations":{},"starts_at":"...","ends_at":null,"generator_url":"..."}],
   "firing_count": 3, "resolved_count": 1, "truncated_alerts": 0, "event_count": 7,
   "first_seen_at": "...", "last_seen_at": "...", "last_notified_at": "...", "resolved_at": null,
-  "active_delivery_id": "...", "pinned_message_id": "om_..."
+  "active_delivery_id": "...", "pinned_messages": [{"message_id":"om_...","kind":"unresolved"}]
 }
 ```
 

@@ -17,6 +17,8 @@ fn row_to_policy(row: &SqliteRow) -> PortResult<NotificationPolicy> {
             .opt_str_col("card_template_id")?
             .map(CardTemplateId::from_string),
         pin_unresolved: row.bool_col("pin_unresolved")?,
+        unpin_on_resolve: row.bool_col("unpin_on_resolve")?,
+        pin_resolved: row.bool_col("pin_resolved")?,
         repeat_policy: row.enum_col("repeat_policy")?,
         resolved_policy: row.enum_col("resolved_policy")?,
         group_update_policy: row.enum_col("group_update_policy")?,
@@ -55,13 +57,16 @@ impl NotificationPolicyRepository for SqliteNotificationPolicyRepository {
     async fn upsert(&self, policy: &NotificationPolicy) -> PortResult<()> {
         sqlx::query(
             "INSERT INTO notification_policies \
-             (channel_id, card_template_id, pin_unresolved, repeat_policy, \
-              resolved_policy, group_update_policy, label_matchers, aggregation_window_secs, \
-              min_send_interval_secs, max_alerts_per_message, mute_until, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             (channel_id, card_template_id, pin_unresolved, unpin_on_resolve, pin_resolved, \
+              repeat_policy, resolved_policy, group_update_policy, label_matchers, \
+              aggregation_window_secs, min_send_interval_secs, max_alerts_per_message, \
+              mute_until, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(channel_id) DO UPDATE SET \
               card_template_id = excluded.card_template_id, \
               pin_unresolved = excluded.pin_unresolved, \
+              unpin_on_resolve = excluded.unpin_on_resolve, \
+              pin_resolved = excluded.pin_resolved, \
               repeat_policy = excluded.repeat_policy, \
               resolved_policy = excluded.resolved_policy, \
               group_update_policy = excluded.group_update_policy, \
@@ -74,6 +79,8 @@ impl NotificationPolicyRepository for SqliteNotificationPolicyRepository {
         .bind(policy.channel_id.as_str())
         .bind(policy.card_template_id.as_ref().map(|t| t.as_str()))
         .bind(policy.pin_unresolved)
+        .bind(policy.unpin_on_resolve)
+        .bind(policy.pin_resolved)
         .bind(enum_to_str(&policy.repeat_policy))
         .bind(enum_to_str(&policy.resolved_policy))
         .bind(enum_to_str(&policy.group_update_policy))
@@ -144,6 +151,8 @@ mod tests {
         let mut p = NotificationPolicy::default_for(channel_id.clone());
         p.card_template_id = Some(CardTemplateId::new());
         p.pin_unresolved = true;
+        p.unpin_on_resolve = false;
+        p.pin_resolved = true;
         p.repeat_policy = RepeatPolicy::SendAndRevokePrevious;
         p.resolved_policy = ResolvedPolicy::UpdatePrevious;
         p.group_update_policy = GroupUpdatePolicy::Send;
@@ -156,6 +165,8 @@ mod tests {
         let got = repo.get(&channel_id).await.unwrap().unwrap();
         assert_eq!(got.card_template_id, p.card_template_id);
         assert!(got.pin_unresolved, "pin_unresolved 必须落库并回读");
+        assert!(!got.unpin_on_resolve, "unpin_on_resolve 必须落库并回读");
+        assert!(got.pin_resolved, "pin_resolved 必须落库并回读");
         assert_eq!(got.repeat_policy, RepeatPolicy::SendAndRevokePrevious);
         assert_eq!(got.resolved_policy, ResolvedPolicy::UpdatePrevious);
         assert_eq!(got.group_update_policy, GroupUpdatePolicy::Send);

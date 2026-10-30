@@ -995,12 +995,18 @@ async fn repeat_policy_send_and_revoke_previous_recalls_old_message() {
     assert_eq!(s.recalled.len(), 1, "应撤回/删除旧消息");
 }
 
-/// 读取某个分组的 Pin 消息记录（R4）。
-async fn group_pinned_message(h: &Harness) -> Option<String> {
-    sqlx::query_scalar("SELECT pinned_message_id FROM alert_groups LIMIT 1")
+/// 读取某个分组当前的 Pin 消息列表（R4）。
+async fn group_pinned_messages(h: &Harness) -> Vec<String> {
+    let raw: String = sqlx::query_scalar("SELECT pinned_messages FROM alert_groups LIMIT 1")
         .fetch_one(&h.pool)
         .await
-        .expect("读取 alert_groups 失败")
+        .expect("读取 alert_groups 失败");
+    let items: Vec<Value> =
+        serde_json::from_str(&raw).expect("pinned_messages 必须是合法 JSON 数组");
+    items
+        .into_iter()
+        .filter_map(|v| v["message_id"].as_str().map(str::to_string))
+        .collect()
 }
 
 /// 把渠道策略里的某个开关改成指定值并保存。
@@ -1047,8 +1053,8 @@ async fn pin_unresolved_pins_firing_message_and_unpins_on_resolve() {
         s.pinned[0].clone()
     };
     assert_eq!(
-        group_pinned_message(&h).await.as_deref(),
-        Some(pinned.as_str()),
+        group_pinned_messages(&h).await,
+        vec![pinned.clone()],
         "Pin 消息必须落库，恢复时才能精确取消"
     );
     assert!(
@@ -1061,7 +1067,15 @@ async fn pin_unresolved_pins_firing_message_and_unpins_on_resolve() {
         .expect("缺少 alert_group_id");
     let (status, group) = h.get(&format!("/api/v1/alert-groups/{group_id}")).await;
     assert_eq!(status, 200);
-    assert_eq!(group["pinned_message_id"].as_str(), Some(pinned.as_str()));
+    let pinned_list = group["pinned_messages"]
+        .as_array()
+        .expect("pinned_messages 应为数组");
+    assert!(
+        pinned_list
+            .iter()
+            .any(|p| p["message_id"].as_str() == Some(pinned.as_str())),
+        "HTTP 响应应暴露当前 Pin 的消息"
+    );
 
     // 再次内容变化：卡片被原地更新，仍是同一条消息 ⇒ 不应重复调用 Pin 接口。
     let (_, body) = h.push(firing_payload(3)).await;
@@ -1079,9 +1093,8 @@ async fn pin_unresolved_pins_firing_message_and_unpins_on_resolve() {
         let s = h.fake.snapshot();
         assert_eq!(s.unpinned, vec![pinned.clone()], "恢复后必须取消 Pin");
     }
-    assert_eq!(
-        group_pinned_message(&h).await,
-        None,
+    assert!(
+        group_pinned_messages(&h).await.is_empty(),
         "取消 Pin 后分组记录必须清空"
     );
     assert!(
@@ -1113,7 +1126,128 @@ async fn disabling_pin_unresolved_unpins_on_next_event() {
         let s = h.fake.snapshot();
         assert_eq!(s.unpinned, vec![pinned], "关闭开关后下一个事件应取消 Pin");
     }
-    assert_eq!(group_pinned_message(&h).await, None);
+    assert!(group_pinned_messages(&h).await.is_empty());
+}
+
+/// R4（多条 Pin）：内容变化策略为「发送」时，每张新卡片都会累积一条 Pin；
+/// 全部恢复且「自动取消 Pin」开启（默认）时，批量取消所有未解决 Pin。
+#[tokio::test]
+async fn pin_unresolved_accumulates_and_unpins_all_on_resolve() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+    let channel_id = h.channel_id.clone().unwrap();
+    put_policy_flag(&h, &channel_id, "pin_unresolved", json!(true)).await;
+    // 内容变化时发送新消息，制造多张卡片。
+    put_policy_flag(&h, &channel_id, "group_update_policy", json!("send")).await;
+
+    h.push(firing_payload(1)).await;
+    h.push(firing_payload(2)).await;
+    h.push(firing_payload(3)).await;
+
+    let pinned = h.fake.snapshot().pinned.clone();
+    assert_eq!(pinned.len(), 3, "每次新卡片都应累积一条 Pin");
+    assert_eq!(
+        group_pinned_messages(&h).await.len(),
+        3,
+        "三条 Pin 都必须落库"
+    );
+
+    h.push(resolved_payload()).await;
+    {
+        let s = h.fake.snapshot();
+        for id in &pinned {
+            assert!(
+                s.unpinned.contains(id),
+                "恢复后应批量取消所有未解决 Pin: {id}"
+            );
+        }
+    }
+    assert!(
+        group_pinned_messages(&h).await.is_empty(),
+        "批量取消后 Pin 记录应清空"
+    );
+}
+
+/// R4（多条 Pin）：关闭「全部恢复后自动取消 Pin」后，恢复时保留未解决 Pin。
+#[tokio::test]
+async fn disabling_unpin_on_resolve_keeps_pins() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+    let channel_id = h.channel_id.clone().unwrap();
+    put_policy_flag(&h, &channel_id, "pin_unresolved", json!(true)).await;
+    put_policy_flag(&h, &channel_id, "unpin_on_resolve", json!(false)).await;
+    put_policy_flag(&h, &channel_id, "group_update_policy", json!("send")).await;
+
+    h.push(firing_payload(1)).await;
+    h.push(firing_payload(2)).await;
+    let pinned = h.fake.snapshot().pinned.clone();
+    assert_eq!(pinned.len(), 2);
+
+    h.push(resolved_payload()).await;
+    {
+        let s = h.fake.snapshot();
+        assert!(
+            s.unpinned.is_empty(),
+            "关闭自动取消后恢复时不应取消未解决 Pin"
+        );
+    }
+    assert_eq!(
+        group_pinned_messages(&h).await,
+        pinned,
+        "未解决 Pin 应全部保留"
+    );
+}
+
+/// R4b：开启「已解决告警 Pin」后，恢复时把恢复卡片也 Pin 上（与未解决 Pin 独立）。
+#[tokio::test]
+async fn pin_resolved_pins_the_resolution_card() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+    let channel_id = h.channel_id.clone().unwrap();
+    // 只开「已解决 Pin」，不开「未解决 Pin」。
+    put_policy_flag(&h, &channel_id, "pin_resolved", json!(true)).await;
+
+    let (_, body) = h.push(firing_payload(1)).await;
+    assert_eq!(body["action"], "send_new");
+    assert!(
+        h.fake.snapshot().pinned.is_empty(),
+        "未开启未解决 Pin 时 firing 不应 Pin"
+    );
+
+    h.push(resolved_payload()).await;
+    assert_eq!(h.fake.snapshot().pinned.len(), 1, "恢复时应 Pin 恢复卡片");
+    let raw: String = sqlx::query_scalar("SELECT pinned_messages FROM alert_groups LIMIT 1")
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+    let items: Vec<Value> = serde_json::from_str(&raw).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["kind"], "resolved", "记录角色应为 resolved");
+}
+
+/// R4/R4b：两组同时开启且关闭自动取消时，未解决 Pin 保留、恢复卡片也额外 Pin（多条并存）。
+#[tokio::test]
+async fn unresolved_and_resolved_pins_can_coexist() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+    let channel_id = h.channel_id.clone().unwrap();
+    put_policy_flag(&h, &channel_id, "pin_unresolved", json!(true)).await;
+    put_policy_flag(&h, &channel_id, "unpin_on_resolve", json!(false)).await;
+    put_policy_flag(&h, &channel_id, "pin_resolved", json!(true)).await;
+    put_policy_flag(&h, &channel_id, "group_update_policy", json!("send")).await;
+
+    h.push(firing_payload(1)).await;
+    h.push(firing_payload(2)).await;
+    let firing_pins = h.fake.snapshot().pinned.clone();
+    assert_eq!(firing_pins.len(), 2);
+
+    h.push(resolved_payload()).await;
+    {
+        let s = h.fake.snapshot();
+        assert_eq!(s.pinned.len(), 3, "两张未解决 + 一张恢复卡片共三条 Pin");
+        assert!(s.unpinned.is_empty(), "关闭自动取消时不应取消未解决 Pin");
+    }
+    assert_eq!(group_pinned_messages(&h).await.len(), 3);
 }
 
 /// 回归（P0-1）：处理失败后 AlertManager 的重试必须被**重新处理**，而不是被判为重复。

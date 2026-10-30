@@ -134,6 +134,17 @@ pub struct NotificationPolicy {
     /// Pin 失败（如群设置只允许群主/管理员 Pin、机器人权限不足）不阻塞投递，
     /// 只记日志与指标，下一次事件会重试。
     pub pin_unresolved: bool,
+    /// 「未解决告警 Pin」开启时，分组全部恢复后是否自动取消这些未解决 Pin（R4，默认开启）。
+    ///
+    /// 关闭后，告警全部恢复时仍保留未解决卡片的 Pin，需要值班人手动取消，
+    /// 便于回看已恢复的告警。仅在 `pin_unresolved` 开启时才有意义（前端会隐藏）。
+    pub unpin_on_resolve: bool,
+    /// 「已解决告警 Pin」（R4b，默认关闭）：分组全部恢复时，把当前活跃的恢复卡片也 Pin 上。
+    ///
+    /// 与「未解决告警 Pin」相互独立：无论恢复通知是原地更新同一条、单独发送新卡片，
+    /// 还是发送并删除旧卡片，事件结束时都有一条当前活跃的恢复卡片可 Pin。
+    /// 默认关闭以保持存量渠道行为不变。
+    pub pin_resolved: bool,
     pub repeat_policy: RepeatPolicy,
     pub resolved_policy: ResolvedPolicy,
     pub group_update_policy: GroupUpdatePolicy,
@@ -159,6 +170,8 @@ impl NotificationPolicy {
             channel_id,
             card_template_id: None,
             pin_unresolved: false,
+            unpin_on_resolve: true,
+            pin_resolved: false,
             repeat_policy: RepeatPolicy::Suppress,
             resolved_policy: ResolvedPolicy::Send,
             group_update_policy: GroupUpdatePolicy::UpdatePrevious,

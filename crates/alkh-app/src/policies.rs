@@ -19,6 +19,10 @@ pub struct PolicyInput {
     pub card_template_id: Option<CardTemplateId>,
     /// R4：未解决告警时 Pin 当前卡片，全部恢复后取消 Pin（默认关闭）。
     pub pin_unresolved: bool,
+    /// R4：全部恢复后是否自动取消未解决 Pin（默认开启，仅 `pin_unresolved` 开启时有意义）。
+    pub unpin_on_resolve: bool,
+    /// R4b：全部恢复时把当前恢复卡片也 Pin 上（默认关闭）。
+    pub pin_resolved: bool,
     pub repeat_policy: RepeatPolicy,
     pub resolved_policy: ResolvedPolicy,
     pub group_update_policy: GroupUpdatePolicy,
@@ -35,6 +39,8 @@ impl Default for PolicyInput {
         Self {
             card_template_id: d.card_template_id,
             pin_unresolved: d.pin_unresolved,
+            unpin_on_resolve: d.unpin_on_resolve,
+            pin_resolved: d.pin_resolved,
             repeat_policy: d.repeat_policy,
             resolved_policy: d.resolved_policy,
             group_update_policy: d.group_update_policy,
@@ -53,6 +59,8 @@ impl PolicyInput {
             channel_id,
             card_template_id: self.card_template_id,
             pin_unresolved: self.pin_unresolved,
+            unpin_on_resolve: self.unpin_on_resolve,
+            pin_resolved: self.pin_resolved,
             repeat_policy: self.repeat_policy,
             resolved_policy: self.resolved_policy,
             group_update_policy: self.group_update_policy,
@@ -122,6 +130,8 @@ impl PolicyService {
             .detail(json!({
                 "card_template_id": policy.card_template_id.as_ref().map(|t| t.to_string()),
                 "pin_unresolved": policy.pin_unresolved,
+                "unpin_on_resolve": policy.unpin_on_resolve,
+                "pin_resolved": policy.pin_resolved,
                 "repeat_policy": format!("{:?}", policy.repeat_policy),
                 "resolved_policy": format!("{:?}", policy.resolved_policy),
                 "group_update_policy": format!("{:?}", policy.group_update_policy),

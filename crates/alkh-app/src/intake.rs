@@ -490,7 +490,7 @@ impl IntakeService {
         if policy.is_muted(now) {
             // R4：静默期不发消息，但 Pin 状态仍要与开关/分组状态对齐
             //（否则关闭开关后旧 Pin 会一直留在群里）。
-            self.sender.reconcile_pin(&mut group, policy, None).await;
+            self.sender.reconcile_pins(&mut group, policy, None).await;
             self.deps.groups.upsert(&group).await?;
             self.audit(skip_reason::MUTED, &hook.id, Some(&channel.id), now)
                 .await;
@@ -504,7 +504,7 @@ impl IntakeService {
         if action == DeliveryAction::Suppress {
             // 本轮不发送（重复通知被抑制 / 内容变化被抑制）：现有 Pin 保持不变，
             // 但开关被关闭时要取消 Pin（R4）。
-            self.sender.reconcile_pin(&mut group, policy, None).await;
+            self.sender.reconcile_pins(&mut group, policy, None).await;
             self.deps.groups.upsert(&group).await?;
             self.audit(
                 skip_reason::POLICY_SUPPRESS,
@@ -546,11 +546,19 @@ impl IntakeService {
             }
             _ => {}
         }
-        // R4：Pin 跟随「分组是否仍有未解决告警」——firing 时 Pin 当前活跃卡片，
-        // 全部恢复 / 开关关闭 / 卡片被新消息替换时取消 Pin。
+        // R4：按策略与分组状态对齐 Pin 集合（多条累积；恢复时按开关批量取消或保留）。
+        // 若本轮撤回了旧消息（「发送并删除旧告警」），其 Pin 记录应同步移除
+        //（消息已不存在，否则会对一条已删除的消息记着 Pin）。
+        if let Some(prev) = &result.previous {
+            if prev.state == DeliveryState::Recalled {
+                if let Some(mid) = prev.lark_message_id.as_deref() {
+                    group.pinned_messages.retain(|p| p.message_id != mid);
+                }
+            }
+        }
         let current_message_id = result.current.lark_message_id.clone();
         self.sender
-            .reconcile_pin(&mut group, policy, current_message_id.as_deref())
+            .reconcile_pins(&mut group, policy, current_message_id.as_deref())
             .await;
         self.deps.groups.upsert(&group).await?;
         self.limiter.record(&channel.id);

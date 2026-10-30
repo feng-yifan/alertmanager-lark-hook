@@ -188,11 +188,19 @@ export default function AlertGroupDetailPage(): JSX.Element {
             },
             {
               label: '当前 Pin 消息',
-              value: group.pinned_message_id ? (
-                <span className="mono break-all">{group.pinned_message_id}</span>
-              ) : (
-                '—'
-              ),
+              value:
+                group.pinned_messages.length === 0 ? (
+                  '—'
+                ) : (
+                  <div className="row tight">
+                    {group.pinned_messages.map((pin) => (
+                      <Badge key={pin.message_id} tone={pin.kind === 'resolved' ? 'accent' : 'muted'}>
+                        <span className="mono break-all">{pin.message_id}</span>
+                        <span className="faint small"> · {pin.kind === 'resolved' ? '已解决' : '未解决'}</span>
+                      </Badge>
+                    ))}
+                  </div>
+                ),
             },
           ]}
         />

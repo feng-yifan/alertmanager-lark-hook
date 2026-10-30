@@ -385,6 +385,34 @@ fn parse_am_time(raw: Option<&str>) -> Option<Timestamp> {
 // AlertGroup 聚合根
 // ---------------------------------------------------------------------------
 
+/// 一条 Pin 记录的角色：由「未解决告警 Pin」产生，还是由「已解决告警 Pin」产生。
+///
+/// 两者分开记录，才能在「全部恢复」时分别执行「取消未解决 Pin」与「Pin 恢复卡片」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PinKind {
+    /// 未解决期间 Pin 的告警卡片。
+    Unresolved,
+    /// 全部恢复后 Pin 的恢复卡片。
+    Resolved,
+}
+
+/// 一条被本服务 Pin 到会话的卡片消息（`om_…`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedMessage {
+    pub message_id: String,
+    pub kind: PinKind,
+}
+
+impl PinnedMessage {
+    pub fn new(message_id: impl Into<String>, kind: PinKind) -> Self {
+        Self {
+            message_id: message_id.into(),
+            kind,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlertGroup {
     pub id: AlertGroupId,
@@ -410,11 +438,12 @@ pub struct AlertGroup {
     pub last_notified_at: Option<Timestamp>,
     pub resolved_at: Option<Timestamp>,
     pub active_delivery_id: Option<DeliveryId>,
-    /// 当前被 Pin 的卡片消息（`om_…`）；`None` = 该分组没有 Pin 卡片。
+    /// 当前被本服务 Pin 的卡片消息（可多条）。
     ///
-    /// 只在策略开启「未解决告警 Pin」且分组仍处于 firing 时指向当前活跃消息；
-    /// 全部恢复、开关关闭或消息被替换时会取消 Pin 并清空（R4）。
-    pub pinned_message_id: Option<String>,
+    /// `repeat_policy = send` 时每次重复通知都会新发一张卡片，未解决期间会逐条累积；
+    /// 全部恢复时按策略批量取消（或保留）未解决 Pin，并可按「已解决告警 Pin」再 Pin
+    /// 当前恢复卡片。为空表示该分组没有任何 Pin（R4）。
+    pub pinned_messages: Vec<PinnedMessage>,
 }
 
 impl AlertGroup {
@@ -448,7 +477,7 @@ impl AlertGroup {
             last_notified_at: None,
             resolved_at: None,
             active_delivery_id: None,
-            pinned_message_id: None,
+            pinned_messages: Vec::new(),
         };
         g.normalize_status(now);
         g
