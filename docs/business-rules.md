@@ -128,10 +128,15 @@ POST /api/v1/hooks/alertmanager/{token}
   - 实现要点：`pin_ignored` 是分组级持久标志，由唯一的 Pin 对账函数 `reconcile_pins` 在计算
     期望 Pin 集合时统一压住（置位 → 期望集合为空 → 差额逻辑撤销全部并停止新增）。回调写标志
     与投递流水线共用同一把按 `(hook_id, group_key)` 的 keyed lock，避免并发丢标志。
+  - **可逆切换**：按钮随 `pin_ignored` 在「忽略并 unpin」⇄「恢复 Pin」之间切换——渲染出口按分组
+    状态改写按钮文案与 `alkh_action`（`ignore_unpin` / `restore_pin`）；点击「恢复 Pin」会清除标志
+    并按策略重新 Pin 当前活跃卡片。渲染期改写保证**重复 / 恢复 / 更新后按钮状态仍然一致**（不是只改一次）。
+    仅 JSON 模板（`CardSource = BuilderJson`）生效；飞书模板 ID（`BuilderTemplate`，已停用）不参与切换。
   - 入口：飞书「卡片回传交互」事件 `card.action.trigger` → `POST /api/v1/lark/card-callback`
     （公开端点，用应用设置里的 **Verification Token** 校验来源）。按钮通过内置默认卡 +
-    可拖拽积木「忽略并 unpin 按钮」（callback value = `{"alkh_action":"ignore_unpin","alert_group_id":"${alert_group_id}"}`）
-    提供；飞书要求 3s 内 ack，故标志同步落库、取消 Pin 异步执行。
+    可拖拽积木「忽略并 unpin 按钮」（callback value = `{"alkh_action":"ignore_unpin"|"restore_pin","alert_group_id":"${alert_group_id}"}`）
+    提供；飞书要求 3s 内 ack，故**回调内即时渲染并返回「切换后」的卡片**（仅本地渲染、无外呼），
+    真实撤销 / 恢复 Pin 与审计在后台异步执行。
   - 管理端反向出口：`POST / DELETE /api/v1/alert-groups/{id}/pin-ignore` 可手动忽略 / 恢复 Pin。
   - 安全：采用 Verification Token 校验，**不启用**飞书 Encrypt Key 加密策略（启用后事件体加密，
     需 AES 解密，本服务不引入该复杂度）。

@@ -120,6 +120,12 @@ pub fn render_variables() -> Vec<VariableMeta> {
             description: "告警分组 ID（卡片回调用，如「忽略并 unpin」按钮）",
         },
         V {
+            name: "pin_ignored",
+            group: "group",
+            ty: "string",
+            description: "该分组是否已被「忽略并 unpin」（true/false）",
+        },
+        V {
             name: "receiver",
             group: "group",
             ty: "string",

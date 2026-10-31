@@ -2808,6 +2808,18 @@ fn ignore_event(token: &str, group_id: &str) -> Value {
     })
 }
 
+fn restore_event(token: &str, group_id: &str) -> Value {
+    json!({
+        "schema": "2.0",
+        "header": {"event_id": "evt_2", "event_type": "card.action.trigger", "token": token, "app_id": "cli_test"},
+        "event": {
+            "operator": {"open_id": "ou_tester"},
+            "action": {"tag": "button", "value": {"alkh_action": "restore_pin", "alert_group_id": group_id}},
+            "context": {"open_message_id": "om_x", "open_chat_id": "oc_test_group"}
+        }
+    })
+}
+
 async fn wait_pin_ignored(h: &Harness, gid: &str, secs: u64) -> Value {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     loop {
@@ -2906,6 +2918,64 @@ async fn card_ignore_unpin_suppresses_future_pins_and_reopen_restores() {
     assert!(
         h.fake.snapshot().pinned.len() >= 2,
         "重开后新告警应重新 Pin"
+    );
+}
+
+/// R4c 可逆切换：忽略 → 按钮变「恢复 Pin」；点恢复 → 清除标志并重新 Pin。
+#[tokio::test]
+async fn card_restore_pin_toggles_back_and_repins() {
+    let mut h = start().await;
+    let _ = h.create_channel().await;
+    let channel_id = h.channel_id.clone().unwrap();
+    put_policy_flag(&h, &channel_id, "pin_unresolved", json!(true)).await;
+    put_settings_with_token(&h, "test-token-r4c").await;
+
+    let (_, body) = h.push(firing_payload(1)).await;
+    let gid = body["alert_group_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        h.fake.snapshot().pinned.len(),
+        1,
+        "开启 pin_unresolved 后 firing 应 Pin"
+    );
+
+    // 忽略：即时卡片应带回，且标志落库。
+    let (status, resp) = post_card_callback(&h, ignore_event("test-token-r4c", &gid)).await;
+    assert_eq!(status, 200, "{resp}");
+    assert!(
+        resp.get("card").is_some(),
+        "忽略回调应带回即时更新卡片: {resp}"
+    );
+    let g = wait_pin_ignored(&h, &gid, 3).await;
+    assert_eq!(
+        g["pin_ignored"].as_bool(),
+        Some(true),
+        "忽略后应置 pin_ignored"
+    );
+
+    // 恢复：即时卡片应带回，标志应清除，活跃卡片应重新 Pin。
+    let (status, resp) = post_card_callback(&h, restore_event("test-token-r4c", &gid)).await;
+    assert_eq!(status, 200, "{resp}");
+    assert!(
+        resp.get("card").is_some(),
+        "恢复回调应带回即时更新卡片: {resp}"
+    );
+
+    let mut g = h.get(&format!("/api/v1/alert-groups/{gid}")).await.1;
+    for _ in 0..80 {
+        if g["pin_ignored"].as_bool() == Some(false) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        g = h.get(&format!("/api/v1/alert-groups/{gid}")).await.1;
+    }
+    assert_eq!(
+        g["pin_ignored"].as_bool(),
+        Some(false),
+        "恢复后应清除 pin_ignored"
+    );
+    assert!(
+        h.fake.snapshot().pinned.len() >= 2,
+        "恢复后应重新 Pin 当前活跃卡片"
     );
 }
 

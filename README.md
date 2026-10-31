@@ -44,6 +44,7 @@ Prometheus ──▶ AlertManager ──webhook──▶ alertmanager-lark-hook 
 | 自动同步渠道 | 一键读取机器人所在的所有群，每个群自动生成一个独立的接收地址 |
 | 每个渠道独立规则 | 模板、重复告警、解决告警、分组更新、标签过滤、聚合窗口、发送限流、静默期 |
 | 未解决 / 已解决告警 Pin | 可选：分组还有未解决告警时把每张卡片 Pin 到会话的 Pin 列表（重复通知逐条累积），恢复后可选是否自动取消；也可单独开「已解决 Pin」把恢复卡片也 Pin 上（不是飞书的「置顶消息」） |
+| 卡片一键忽略 / 恢复 Pin | 告警卡片上带「忽略并 unpin」按钮，点击后撤销该分组全部 Pin 并停止后续 Pin；按钮随即变为「恢复 Pin」，再点可撤销忽略并重新 Pin（可逆切换，仅 JSON 模板支持） |
 | 原地更新告警卡片 | 告警有新增 / 部分恢复时，把**已发的那张卡片**更新掉，不刷屏 |
 | 撤回旧消息 | 重复通知或告警恢复时，可以撤回 / 删除上一条消息 |
 | 完整审计与指标 | 每一次接收、发送、更新、撤回、失败都留痕，并暴露 Prometheus 指标 |
@@ -360,6 +361,7 @@ receivers:
 | `${receiver}` | AlertManager 的 receiver 名 | **AM 标准**（`.Receiver`） | `lark-ops` |
 | `${group_key}` | 告警分组键 | AM webhook 字段 `groupKey` | `{}:{alertname="HighCPU"}` |
 | `${alert_group_id}` | 告警分组 ID（卡片回调用，如「忽略并 unpin」按钮） | 本项目 | `0f3c…` |
+| `${pin_ignored}` | 该分组是否已被「忽略并 unpin」（决定按钮显示「恢复 Pin」还是「忽略并 unpin」） | 本项目 | `true` / `false` |
 | `${external_url}` | AlertManager 外部地址 | **AM 标准**（`.ExternalURL`） | `http://am:9093` |
 | `${alert_count}` | 本次告警总条数 | 本项目 | `3` |
 | `${firing_count}` | 未解决条数 | 本项目 | `2` |
@@ -566,6 +568,8 @@ cardkit:card:write
 - **飞书 JSON 2.0 没有循环容器**（循环容器仅搭建工具可用，且不能再嵌一层；JSON 导入的卡片完全不支持）。所以「按告警循环」由本工具的 **`repeat` / `if` 本地指令**实现：保存的是指令，**服务端渲染时才展开**成飞书认识的组件（见 §3.2）；展开结果同样受 200 组件 / 30KB 限制。旧的 `${alerts_list}` / `${alerts_table}` 变量继续可用（服务端把一组告警拍平成 markdown），但不再推荐用于新模板。
 
 其他行为约定：
+
+- 卡片「忽略并 unpin」按钮的可逆切换依赖**服务端改写卡片 JSON**，因此仅对 JSON 模板（`CardSource = BuilderJson`）生效；飞书模板 ID（`BuilderTemplate`，已停用的历史来源）的卡片不参与切换，需在管理端「恢复 Pin」。
 
 - `ok: true` 只代表**请求已受理**，不代表消息已发出。真实结果看投递记录的 `state`（`active` 已发出 / `pending` 待重试 / `failed` 失败）。
 - 发送失败会按 1s / 5s / 30s / 2m / 10m 退避重试 5 次；**只有 `pending` 会进这个后台队列**。

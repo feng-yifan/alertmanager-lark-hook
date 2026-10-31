@@ -18,6 +18,8 @@ use axum::Json;
 use serde_json::{json, Value};
 
 use alkh_domain::ids::AlertGroupId;
+use alkh_domain::policy::NotificationPolicy;
+use alkh_domain::template::CardSource;
 
 use crate::state::AppState;
 
@@ -95,13 +97,18 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
         Some(v) => v.clone(),
         None => Value::Null,
     };
-    if action_value.get("alkh_action").and_then(|v| v.as_str()) != Some("ignore_unpin") {
-        return (
-            StatusCode::OK,
-            Json(json!({"toast": {"type": "info", "content": "未识别的操作"}})),
-        )
-            .into_response();
-    }
+    let action = match action_value.get("alkh_action").and_then(|v| v.as_str()) {
+        Some("ignore_unpin") => CallbackAction::Ignore,
+        // R4c 可逆切换：分组已被忽略后按钮变为「恢复 Pin」，回调此动作。
+        Some("restore_pin") => CallbackAction::Restore,
+        _ => {
+            return (
+                StatusCode::OK,
+                Json(json!({"toast": {"type": "info", "content": "未识别的操作"}})),
+            )
+                .into_response()
+        }
+    };
     let group_id = match action_value
         .get("alert_group_id")
         .and_then(|v| v.as_str())
@@ -116,24 +123,99 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    // 5. 异步执行，先 ack（飞书要求 3s 内返回；取消 Pin 可能有多条，不能阻塞响应）。
-    let state2 = state.clone();
     let gid = AlertGroupId::from_string(group_id);
+
+    // 5. 即时渲染「切换后的卡片」并回给飞书（本地渲染、无外呼），让用户马上看到按钮变化。
+    //    渲染失败不影响主流程，降级为只回 toast。
+    let card_payload = render_toggled_card(&state, &gid, action).await;
+
+    // 6. 真实副作用（撤销/恢复 Pin、审计、指标）异步执行：飞书要求 3s 内 ack，而
+    //    Pin 调用可能多条多次外呼，不能阻塞响应。
+    let state2 = state.clone();
+    let gid2 = gid.clone();
     tokio::spawn(async move {
-        match state2.intake.ignore_and_unpin(&gid, operator).await {
+        let result = match action {
+            CallbackAction::Ignore => state2.intake.ignore_and_unpin(&gid2, operator).await,
+            CallbackAction::Restore => state2.intake.unignore_pin(&gid2).await,
+        };
+        match result {
             Ok(out) if out.found => {
-                tracing::info!(group_id = %gid, unpinned = out.unpinned, "卡片「忽略并 unpin」已执行");
+                tracing::info!(group_id = %gid2, unpinned = out.unpinned, action = ?action, "卡片 Pin 操作已执行");
             }
-            Ok(_) => tracing::warn!(group_id = %gid, "忽略的分组不存在"),
-            Err(e) => tracing::warn!(error = %e, "「忽略并 unpin」执行失败"),
+            Ok(_) => tracing::warn!(group_id = %gid2, "操作的分组不存在"),
+            Err(e) => tracing::warn!(error = %e, action = ?action, "卡片 Pin 操作执行失败"),
         }
     });
 
-    (
-        StatusCode::OK,
-        Json(json!({"toast": {"type": "success", "content": "已忽略，后续不再 Pin"}})),
-    )
-        .into_response()
+    let toast = match action {
+        CallbackAction::Ignore => {
+            json!({"type": "success", "content": "已忽略，后续不再 Pin"})
+        }
+        CallbackAction::Restore => json!({"type": "success", "content": "已恢复 Pin"}),
+    };
+    let mut body = json!({ "toast": toast });
+    if let Some(card) = card_payload {
+        body["card"] = card;
+    }
+    (StatusCode::OK, Json(body)).into_response()
+}
+
+/// 卡片按钮动作（R4c 可逆切换）。
+#[derive(Clone, Copy, Debug)]
+enum CallbackAction {
+    /// 「忽略并 unpin」：撤销全部 Pin 并置 `pin_ignored`。
+    Ignore,
+    /// 「恢复 Pin」：清除 `pin_ignored` 并按策略重新 Pin。
+    Restore,
+}
+
+/// 按目标动作渲染「切换后」的卡片内容，用于飞书回调的即时更新。
+///
+/// 仅本地渲染（加载分组/渠道/策略 + 套模板），不做任何飞书外呼，因此可在 3s ack
+/// 预算内完成。任一环节失败都返回 `None`，调用方降级为只回 toast。
+async fn render_toggled_card(
+    state: &AppState,
+    gid: &AlertGroupId,
+    action: CallbackAction,
+) -> Option<Value> {
+    let group = match state.deps.groups.get(gid).await {
+        Ok(Some(g)) => g,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(error = %e, "读取分组失败，跳过即时卡片更新");
+            return None;
+        }
+    };
+    let channel = match state.deps.channels.get(&group.channel_id).await {
+        Ok(Some(c)) => c,
+        _ => return None,
+    };
+    let policy = match state.deps.policies.get(&group.channel_id).await {
+        Ok(Some(p)) => p,
+        _ => NotificationPolicy::default_for(group.channel_id.clone()),
+    };
+    // 在内存副本上翻转标志，仅用于渲染出「切换后」的样子（真实落库在后台任务里做）。
+    let mut view = group;
+    match action {
+        CallbackAction::Ignore => view.ignore_pin(),
+        CallbackAction::Restore => view.clear_pin_ignored(),
+    }
+    let sender = state.sender().clone();
+    let prepared = match sender
+        .prepare_with_context(&view, &channel, &policy, None, None)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "即时渲染卡片失败，降级为仅 toast");
+            return None;
+        }
+    };
+    let content = prepared.content.to_content();
+    Some(match prepared.card_source {
+        Some(CardSource::BuilderTemplate) => content,
+        _ => json!({"type": "raw", "data": content}),
+    })
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response {

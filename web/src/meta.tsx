@@ -57,6 +57,7 @@ export const FALLBACK_META: Meta = {
   variables: [
     // 分组级
     { name: 'group_key', group: 'group', type: 'string', description: 'AlertManager 分组键' },
+    { name: 'pin_ignored', group: 'group', type: 'string', description: '该分组是否已被「忽略并 unpin」（true/false）' },
     { name: 'receiver', group: 'group', type: 'string', description: 'AlertManager receiver 名' },
     { name: 'external_url', group: 'group', type: 'url', description: 'AlertManager 地址' },
     { name: 'channel_name', group: 'group', type: 'string', description: '消息渠道名称' },

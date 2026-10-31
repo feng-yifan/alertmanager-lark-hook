@@ -73,6 +73,9 @@ pub fn render_card_message(
             if !rendered.is_object() {
                 return Err(AppError::validation("渲染后的卡片不是 JSON 对象"));
             }
+            // R4c 可逆切换：按分组「忽略 Pin」状态切换按钮文案与回调动作。
+            let pin_ignored = ctx.lookup("pin_ignored") == Some("true");
+            apply_pin_ignore_button_state(&mut rendered, pin_ignored);
             // 模板保存时只校验了**骨架**，真正的告警数据是这里注入的：含
             // `${alerts_table}` 的卡片在告警很多时很容易超过 30KB，而飞书对超限返回
             // 不可重试的错误 ⇒ 整条告警被标 Failed 丢掉。这里在渲染出口收口体积，
@@ -304,6 +307,12 @@ pub fn build_context(
     ctx.set("status", group.status.as_str());
     ctx.set("status_text", if is_firing { "未解决" } else { "已恢复" });
     ctx.set("is_firing", if is_firing { "true" } else { "false" });
+    // R4c「忽略并 unpin」可逆切换：模板可据此自定义展示，渲染出口也会用它
+    // 统一切换内置「忽略/恢复 Pin」按钮的文案与回调动作。
+    ctx.set(
+        "pin_ignored",
+        if group.pin_ignored { "true" } else { "false" },
+    );
 
     let severity = group.severity.clone();
     ctx.set("severity", severity.clone().unwrap_or_default());
@@ -503,6 +512,67 @@ pub const DIRECTIVE_IF: &str = "if";
 pub fn expand_card_json(card: &Value, ctx: &RenderContext) -> Value {
     let mut budget = alkh_domain::card_catalog::MAX_CARD_ELEMENTS;
     expand_value(card, ctx, &mut budget)
+}
+
+/// 按分组 `pin_ignored` 状态，改写卡片里「忽略并 unpin / 恢复 Pin」回调按钮的
+/// 文案与 `alkh_action`（R4c 可逆切换）。
+///
+/// 对模板里任意位置（含循环体内）带 `behaviors[].value.alkh_action` 为
+/// `ignore_unpin` / `restore_pin` 的按钮生效；不含该按钮的模板不受影响。
+/// `pin_ignored = true` 时显示「恢复 Pin」并回调 `restore_pin`，否则显示
+/// 「忽略并 unpin」并回调 `ignore_unpin`。
+pub fn apply_pin_ignore_button_state(value: &mut Value, pin_ignored: bool) {
+    match value {
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                apply_pin_ignore_button_state(item, pin_ignored);
+            }
+        }
+        Value::Object(map) => {
+            if map.get("tag").and_then(Value::as_str) == Some("button") {
+                let mut matched = false;
+                if let Some(behaviors) = map.get_mut("behaviors").and_then(Value::as_array_mut) {
+                    for behavior in behaviors.iter_mut() {
+                        if behavior.get("type").and_then(Value::as_str) != Some("callback") {
+                            continue;
+                        }
+                        let action = behavior
+                            .pointer("/value/alkh_action")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        let Some(action) = action else { continue };
+                        if action != "ignore_unpin" && action != "restore_pin" {
+                            continue;
+                        }
+                        if let Some(slot) = behavior.pointer_mut("/value/alkh_action") {
+                            *slot = Value::String(if pin_ignored {
+                                "restore_pin".into()
+                            } else {
+                                "ignore_unpin".into()
+                            });
+                        }
+                        matched = true;
+                    }
+                }
+                if matched {
+                    if let Some(text) = map.get_mut("text").and_then(Value::as_object_mut) {
+                        text.insert(
+                            "content".into(),
+                            Value::String(if pin_ignored {
+                                "恢复 Pin".into()
+                            } else {
+                                "忽略并 unpin".into()
+                            }),
+                        );
+                    }
+                }
+            }
+            for child in map.values_mut() {
+                apply_pin_ignore_button_state(child, pin_ignored);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// 展开一个 JSON 值。`charged` 表示它是否**作为组件**（elements 数组的成员）被计数。
@@ -1430,5 +1500,44 @@ mod tests {
             card["header"]["title"]["content"], "【已恢复】X",
             "标题文案也应显示已恢复: {card}"
         );
+    }
+
+    #[test]
+    fn ignore_button_toggles_with_pin_ignored() {
+        let card = json!({
+            "body": {"elements": [
+                {"tag": "markdown", "content": "hi"},
+                {"tag": "button", "element_id": "ignore_pin_btn",
+                 "text": {"tag": "plain_text", "content": "忽略并 unpin"},
+                 "behaviors": [{"type": "callback", "value": {"alkh_action": "ignore_unpin", "alert_group_id": "g1"}}]}
+            ]}
+        });
+
+        let mut active = card.clone();
+        apply_pin_ignore_button_state(&mut active, false);
+        let btn = &active["body"]["elements"][1];
+        assert_eq!(btn["text"]["content"], "忽略并 unpin");
+        assert_eq!(btn["behaviors"][0]["value"]["alkh_action"], "ignore_unpin");
+        assert_eq!(btn["behaviors"][0]["value"]["alert_group_id"], "g1");
+
+        let mut ignored = card;
+        apply_pin_ignore_button_state(&mut ignored, true);
+        let btn = &ignored["body"]["elements"][1];
+        assert_eq!(btn["text"]["content"], "恢复 Pin");
+        assert_eq!(btn["behaviors"][0]["value"]["alkh_action"], "restore_pin");
+        assert_eq!(btn["behaviors"][0]["value"]["alert_group_id"], "g1");
+    }
+
+    #[test]
+    fn ignore_button_toggle_leaves_other_buttons_untouched() {
+        let mut card = json!({
+            "body": {"elements": [
+                {"tag": "button", "text": {"tag": "plain_text", "content": "查看详情"},
+                 "behaviors": [{"type": "open_url", "default_url": "https://x"}]}
+            ]}
+        });
+        let before = card.clone();
+        apply_pin_ignore_button_state(&mut card, true);
+        assert_eq!(card, before);
     }
 }
